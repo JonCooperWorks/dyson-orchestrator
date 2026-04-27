@@ -17,6 +17,7 @@ use dyson_warden::{
     instance::InstanceService,
     logging,
     probe::{self, HttpHealthProber},
+    proxy::{self, policy_check::InstancePolicy, ProxyService},
     secrets::SecretsService,
     snapshot::SnapshotService,
     traits::{BackupSink, CubeClient, HealthProber, InstanceStore, SecretStore, TokenStore},
@@ -110,7 +111,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cube.clone(),
         instances_store.clone(),
         secrets_store.clone(),
-        tokens_store,
+        tokens_store.clone(),
         proxy_base,
         cfg.default_ttl_seconds,
     ));
@@ -138,7 +139,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         instances_store.clone(),
         backup_sink,
         instance_svc.clone(),
-        pool,
+        pool.clone(),
     ));
 
     let auth = if dangerous_no_auth {
@@ -168,14 +169,36 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         ttl::DEFAULT_INTERVAL,
     );
 
+    let default_policy = InstancePolicy {
+        allowed_providers: cfg.default_policy.allowed_providers.clone(),
+        allowed_models: cfg.default_policy.allowed_models.clone(),
+        daily_token_budget: cfg.default_policy.daily_token_budget,
+        monthly_usd_budget: cfg.default_policy.monthly_usd_budget,
+        rps_limit: cfg.default_policy.rps_limit,
+    };
+    let proxy_svc = match ProxyService::new(
+        pool.clone(),
+        tokens_store.clone(),
+        cfg.providers.clone(),
+        default_policy,
+    ) {
+        Ok(s) => Arc::new(s),
+        Err(err) => {
+            tracing::error!(error = %err, "proxy service init failed");
+            return ExitCode::from(2);
+        }
+    };
+    let llm_router = proxy::http::router(proxy_svc);
+
     let app_state = http::AppState {
         secrets: secrets_svc,
         instances: instance_svc,
         snapshots: snapshot_svc,
         prober,
+        tokens: tokens_store,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
     };
-    let app = http::router(app_state, auth, axum::Router::new());
+    let app = http::router(app_state, auth, llm_router);
 
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
         Ok(l) => l,

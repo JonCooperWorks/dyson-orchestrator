@@ -14,7 +14,9 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
+pub mod audit;
 pub mod instances;
+pub mod policies;
 pub mod secrets;
 pub mod snapshots;
 pub mod tokens;

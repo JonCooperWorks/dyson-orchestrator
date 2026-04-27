@@ -153,7 +153,7 @@ mod tests {
             cube.clone(),
             instances_store.clone(),
             raw.clone(),
-            tokens_store,
+            tokens_store.clone(),
             "http://test/llm",
             3600,
         ));
@@ -170,6 +170,7 @@ mod tests {
             instances: instance_svc,
             snapshots: snapshot_svc,
             prober: Arc::new(StubProber),
+            tokens: tokens_store,
             sandbox_domain: "cube.test".into(),
         };
         (state, raw)

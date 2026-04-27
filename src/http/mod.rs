@@ -12,6 +12,7 @@
 
 pub mod healthz;
 pub mod instances;
+pub mod proxy_admin;
 pub mod secrets;
 pub mod snapshots;
 
@@ -23,7 +24,7 @@ use crate::auth::{admin_bearer, AuthState};
 use crate::instance::InstanceService;
 use crate::secrets::SecretsService;
 use crate::snapshot::SnapshotService;
-use crate::traits::HealthProber;
+use crate::traits::{HealthProber, TokenStore};
 
 /// Shared state handed to every route handler. Cheap to clone — every field
 /// is an `Arc` or scalar `String`.
@@ -33,6 +34,7 @@ pub struct AppState {
     pub instances: Arc<InstanceService>,
     pub snapshots: Arc<SnapshotService>,
     pub prober: Arc<dyn HealthProber>,
+    pub tokens: Arc<dyn TokenStore>,
     pub sandbox_domain: String,
 }
 
@@ -46,7 +48,8 @@ pub fn router(state: AppState, auth: AuthState, extra: Router) -> Router {
     let v1 = Router::new()
         .merge(instances::router(state.clone()))
         .merge(snapshots::router(state.clone()))
-        .merge(secrets::router(state))
+        .merge(secrets::router(state.clone()))
+        .merge(proxy_admin::router(state))
         .layer(middleware::from_fn_with_state(auth, admin_bearer));
 
     Router::new().merge(healthz::router()).merge(v1).merge(extra)
@@ -112,7 +115,7 @@ mod tests {
             cube.clone(),
             instances_store.clone(),
             raw.clone(),
-            tokens_store,
+            tokens_store.clone(),
             "http://test/llm",
             3600,
         ));
@@ -129,6 +132,7 @@ mod tests {
             instances: instance_svc,
             snapshots: snapshot_svc,
             prober: Arc::new(StubProber),
+            tokens: tokens_store,
             sandbox_domain: "cube.test".into(),
         }
     }
