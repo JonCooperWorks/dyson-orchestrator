@@ -3,9 +3,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-mod cli;
-mod config;
-mod logging;
+use dyson_warden::{cli, config, logging};
 
 fn collect_env() -> BTreeMap<String, String> {
     std::env::vars()

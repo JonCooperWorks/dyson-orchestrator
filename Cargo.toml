@@ -7,6 +7,10 @@ description = "Orchestration server for Dyson agents in CubeSandbox MicroVMs"
 license = "MIT"
 publish = false
 
+[lib]
+name = "dyson_warden"
+path = "src/lib.rs"
+
 [[bin]]
 name = "warden"
 path = "src/main.rs"
