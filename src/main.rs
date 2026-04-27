@@ -108,7 +108,22 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
     let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+    let user_secrets_store: Arc<dyn dyson_warden::traits::UserSecretStore> =
+        Arc::new(dyson_warden::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let system_secrets_store: Arc<dyn dyson_warden::traits::SystemSecretStore> =
+        Arc::new(dyson_warden::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
     let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+
+    // Per-user envelope encryption directory.  Lazy-creates an age
+    // identity per user inside `keys_dir` on first secret seal/open.
+    let cipher_dir: Arc<dyn dyson_warden::envelope::CipherDirectory> =
+        match dyson_warden::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
+            Ok(d) => Arc::new(d),
+            Err(err) => {
+                tracing::error!(error = %err, "envelope key directory init failed");
+                return ExitCode::from(2);
+            }
+        };
     let snapshots_store: Arc<dyn SnapshotStore> =
         Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
     let policies_store: Arc<dyn PolicyStore> =
@@ -126,7 +141,15 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         proxy_base,
         cfg.default_ttl_seconds,
     ));
-    let secrets_svc = Arc::new(SecretsService::new(secrets_store));
+    let secrets_svc = Arc::new(SecretsService::new(secrets_store, cipher_dir.clone()));
+    let user_secrets_svc = Arc::new(dyson_warden::secrets::UserSecretsService::new(
+        user_secrets_store,
+        cipher_dir.clone(),
+    ));
+    let system_secrets_svc = Arc::new(dyson_warden::secrets::SystemSecretsService::new(
+        system_secrets_store,
+        cipher_dir.clone(),
+    ));
 
     let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
         config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
@@ -232,6 +255,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     let app_state = http::AppState {
         secrets: secrets_svc,
+        user_secrets: user_secrets_svc,
+        system_secrets: system_secrets_svc,
+        ciphers: cipher_dir.clone(),
         instances: instance_svc,
         snapshots: snapshot_svc,
         prober,

@@ -38,6 +38,17 @@ use crate::traits::{HealthProber, TokenStore};
 #[derive(Clone)]
 pub struct AppState {
     pub secrets: Arc<SecretsService>,
+    /// Per-user opaque blobs, encrypted with the user's own age key.
+    /// Stages 3 + 6 use this for OpenRouter keys and (in future) any
+    /// other per-user secret material.
+    pub user_secrets: Arc<crate::secrets::UserSecretsService>,
+    /// Global blobs (provider api_keys, OpenRouter provisioning key),
+    /// encrypted with the system-scope cipher.
+    pub system_secrets: Arc<crate::secrets::SystemSecretsService>,
+    /// Per-user envelope cipher directory.  Held here so handlers can
+    /// drop down to raw seal/open if needed (e.g. minting an OR key
+    /// before there's a UserSecretsService entry).
+    pub ciphers: Arc<dyn crate::envelope::CipherDirectory>,
     pub instances: Arc<InstanceService>,
     pub snapshots: Arc<SnapshotService>,
     pub prober: Arc<dyn HealthProber>,
@@ -169,7 +180,22 @@ mod tests {
     async fn build_state() -> (AppState, Arc<dyn crate::traits::UserStore>) {
         let pool = open_in_memory().await.unwrap();
         let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let svc = Arc::new(SecretsService::new(raw.clone()));
+        let _keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(_keys_tmp.path()).unwrap());
+        let svc = Arc::new(SecretsService::new(raw.clone(), cipher_dir.clone()));
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
+            Arc::new(crate::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(crate::secrets::UserSecretsService::new(
+            user_secrets_store,
+            cipher_dir.clone(),
+        ));
+        let system_secrets = Arc::new(crate::secrets::SystemSecretsService::new(
+            system_secrets_store,
+            cipher_dir.clone(),
+        ));
         let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone()));
@@ -196,6 +222,9 @@ mod tests {
         ));
         let state = AppState {
             secrets: svc,
+            user_secrets,
+            system_secrets,
+            ciphers: cipher_dir,
             instances: instance_svc,
             snapshots: snapshot_svc,
             prober: Arc::new(StubProber),

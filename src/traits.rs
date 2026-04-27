@@ -280,11 +280,59 @@ pub trait InstanceStore: Send + Sync {
     async fn expired(&self, now: i64) -> Result<Vec<InstanceRow>, StoreError>;
 }
 
+/// Per-instance secrets — opaque ciphertexts stored against an instance row.
+///
+/// All methods deal in **ciphertext**: the store is dumb sqlite; encryption
+/// happens one layer up in `SecretsService`, which routes through the
+/// instance owner's [`crate::envelope::EnvelopeCipher`].  The `&str` shape
+/// is fine because age's armored output is ASCII, mapped to a TEXT column.
 #[async_trait]
 pub trait SecretStore: Send + Sync {
-    async fn put(&self, instance_id: &str, name: &str, value: &str) -> Result<(), StoreError>;
+    async fn put(
+        &self,
+        instance_id: &str,
+        name: &str,
+        ciphertext: &str,
+    ) -> Result<(), StoreError>;
     async fn delete(&self, instance_id: &str, name: &str) -> Result<(), StoreError>;
+    /// Returns `(name, ciphertext)` pairs ordered by name.  The service
+    /// layer decrypts.
     async fn list(&self, instance_id: &str) -> Result<Vec<(String, String)>, StoreError>;
+}
+
+/// Per-user opaque ciphertexts.  Same dumb-store contract as
+/// [`SecretStore`]; the service layer seals/opens with the user's
+/// own [`crate::envelope::EnvelopeCipher`], so cross-user reads of
+/// the raw column yield only undecryptable bytes.
+#[async_trait]
+pub trait UserSecretStore: Send + Sync {
+    async fn put(
+        &self,
+        user_id: &str,
+        name: &str,
+        ciphertext: &str,
+    ) -> Result<(), StoreError>;
+    async fn get(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<Option<String>, StoreError>;
+    async fn delete(&self, user_id: &str, name: &str) -> Result<(), StoreError>;
+    /// Returns `(name, ciphertext)` pairs ordered by name.
+    async fn list(&self, user_id: &str) -> Result<Vec<(String, String)>, StoreError>;
+}
+
+/// Global opaque ciphertexts (one row per `name`).  Used for provider
+/// API keys, the OpenRouter provisioning key, and anything else not
+/// owned by a real user.  Encrypted with the system-scope cipher
+/// (see [`crate::envelope::SYSTEM_KEY_ID`]).
+#[async_trait]
+pub trait SystemSecretStore: Send + Sync {
+    async fn put(&self, name: &str, ciphertext: &str) -> Result<(), StoreError>;
+    async fn get(&self, name: &str) -> Result<Option<String>, StoreError>;
+    async fn delete(&self, name: &str) -> Result<(), StoreError>;
+    /// Returns names only (operators inspect via `warden secret list system`).
+    async fn list_names(&self) -> Result<Vec<String>, StoreError>;
 }
 
 #[async_trait]

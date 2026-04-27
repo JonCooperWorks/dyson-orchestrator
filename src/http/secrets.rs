@@ -48,11 +48,14 @@ async fn list_secrets(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<SecretNameView>>, StatusCode> {
     ensure_owns_instance(&state, &caller.user_id, &id).await?;
-    match state.secrets.list(&id).await {
-        Ok(rows) => Ok(Json(
-            rows.into_iter().map(|(name, _)| SecretNameView { name }).collect(),
+    // Names only — keep plaintext off the wire entirely.  The SPA's
+    // secrets panel never needs values; admins with shell access can
+    // round-trip via the CLI.
+    match state.secrets.list_names(&id).await {
+        Ok(names) => Ok(Json(
+            names.into_iter().map(|name| SecretNameView { name }).collect(),
         )),
-        Err(e) => Err(store_err_to_status(e)),
+        Err(e) => Err(secrets_err_to_status(e)),
     }
 }
 
@@ -65,9 +68,9 @@ async fn put_secret(
     if let Err(s) = ensure_owns_instance(&state, &caller.user_id, &id).await {
         return s;
     }
-    match state.secrets.put(&id, &name, &body.value).await {
+    match state.secrets.put(&caller.user_id, &id, &name, &body.value).await {
         Ok(()) => StatusCode::NO_CONTENT,
-        Err(e) => store_err_to_status(e),
+        Err(e) => secrets_err_to_status(e),
     }
 }
 
@@ -81,7 +84,7 @@ async fn delete_secret(
     }
     match state.secrets.delete(&id, &name).await {
         Ok(()) => StatusCode::NO_CONTENT,
-        Err(e) => store_err_to_status(e),
+        Err(e) => secrets_err_to_status(e),
     }
 }
 
@@ -105,6 +108,16 @@ pub(crate) fn store_err_to_status(e: StoreError) -> StatusCode {
         StoreError::Constraint(_) => StatusCode::CONFLICT,
         StoreError::Malformed(_) => StatusCode::INTERNAL_SERVER_ERROR,
         StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// SecretsError → HTTP status.  Envelope failures (corrupt ciphertext,
+/// unreachable key file) are 500 — the user can't act on them.
+pub(crate) fn secrets_err_to_status(e: crate::secrets::SecretsError) -> StatusCode {
+    use crate::secrets::SecretsError::*;
+    match e {
+        Store(s) => store_err_to_status(s),
+        Envelope(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -212,7 +225,22 @@ mod tests {
     ) {
         let pool = open_in_memory().await.unwrap();
         let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let svc = Arc::new(SecretsService::new(raw.clone()));
+        let _keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(_keys_tmp.path()).unwrap());
+        let svc = Arc::new(SecretsService::new(raw.clone(), cipher_dir.clone()));
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
+            Arc::new(crate::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(crate::secrets::UserSecretsService::new(
+            user_secrets_store,
+            cipher_dir.clone(),
+        ));
+        let system_secrets = Arc::new(crate::secrets::SystemSecretsService::new(
+            system_secrets_store,
+            cipher_dir.clone(),
+        ));
         let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone()));
@@ -242,6 +270,9 @@ mod tests {
         ));
         let state = AppState {
             secrets: svc,
+            user_secrets,
+            system_secrets,
+            ciphers: cipher_dir,
             instances: instance_svc,
             snapshots: snapshot_svc,
             prober: Arc::new(StubProber),
@@ -257,7 +288,8 @@ mod tests {
 
     #[tokio::test]
     async fn put_then_delete() {
-        let (state, raw, user_auth, _) = build_state().await;
+        let (state, _raw, user_auth, user_id) = build_state().await;
+        let svc = state.secrets.clone();
         let base = spawn_full(state, user_auth).await;
         let client = reqwest::Client::new();
         let r = client
@@ -267,7 +299,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 204);
-        let listed = raw.list("i1").await.unwrap();
+        // Assert against the decrypted service view rather than `raw`,
+        // which now returns ciphertexts (the store is dumb sqlite).
+        let listed = svc.list(&user_id, "i1").await.unwrap();
         assert_eq!(listed, vec![("GITHUB_TOKEN".to_string(), "ghp_xxx".to_string())]);
 
         let r = client
@@ -276,12 +310,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 204);
-        assert!(raw.list("i1").await.unwrap().is_empty());
+        assert!(svc.list(&user_id, "i1").await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn put_overwrites_idempotently() {
-        let (state, raw, user_auth, _) = build_state().await;
+        let (state, _raw, user_auth, user_id) = build_state().await;
+        let svc = state.secrets.clone();
         let base = spawn_full(state, user_auth).await;
         let client = reqwest::Client::new();
         for v in ["v1", "v2", "v3"] {
@@ -293,7 +328,10 @@ mod tests {
                 .unwrap();
             assert_eq!(r.status(), 204);
         }
-        assert_eq!(raw.list("i1").await.unwrap(), vec![("K".into(), "v3".into())]);
+        assert_eq!(
+            svc.list(&user_id, "i1").await.unwrap(),
+            vec![("K".into(), "v3".into())]
+        );
     }
 
     #[tokio::test]

@@ -95,7 +95,22 @@ mod tests {
     async fn build() -> (AppState, Arc<dyn TokenStore>, String) {
         let pool = open_in_memory().await.unwrap();
         let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let svc = Arc::new(SecretsService::new(raw.clone()));
+        let _keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(_keys_tmp.path()).unwrap());
+        let svc = Arc::new(SecretsService::new(raw.clone(), cipher_dir.clone()));
+        let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let system_secrets_store: Arc<dyn crate::traits::SystemSecretStore> =
+            Arc::new(crate::db::secrets::SqlxSystemSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(crate::secrets::UserSecretsService::new(
+            user_secrets_store,
+            cipher_dir.clone(),
+        ));
+        let system_secrets = Arc::new(crate::secrets::SystemSecretsService::new(
+            system_secrets_store,
+            cipher_dir.clone(),
+        ));
         let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone()));
@@ -144,6 +159,9 @@ mod tests {
             Arc::new(crate::db::users::SqlxUserStore::new(pool));
         let state = AppState {
             secrets: svc,
+            user_secrets,
+            system_secrets,
+            ciphers: cipher_dir,
             instances: instance_svc,
             snapshots: snapshot_svc,
             users: users_store,

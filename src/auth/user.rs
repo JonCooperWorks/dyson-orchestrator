@@ -173,7 +173,11 @@ pub async fn fixed_user_auth(
         }
     }
 
-    let id = format!("test-{subject}");
+    // Production user ids are uuid simple form (32 hex).  The envelope
+    // module's `validate_user_id` rejects anything else, which would
+    // make per-user secret seal/open fail in tests.  Use a fresh uuid
+    // per call so concurrent tests don't collide on the users.id PK.
+    let id = Uuid::new_v4().simple().to_string();
     users
         .create(UserRow {
             id: id.clone(),
