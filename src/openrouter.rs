@@ -45,12 +45,12 @@ pub enum OpenRouterError {
 #[derive(Debug, Clone, Serialize)]
 struct CreateKeyBody<'a> {
     /// User-visible label in the OpenRouter dashboard. We use the
-    /// warden user id so an operator can match a key to a person.
+    /// warden user id (and email if known, joined) so an operator
+    /// can match a key to a person.  Note: OR's API returns its
+    /// own `label` field (the key preview, server-generated); the
+    /// only operator-visible string is `name`, so we encode both
+    /// pieces in there.
     name: &'a str,
-    /// Optional sublabel.  We pass the email when known so the OR
-    /// dashboard reads as "alice@x · <user_id>".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<&'a str>,
     /// Hard USD spend cap on this key.  When exceeded, OR returns
     /// 402 on every subsequent call.
     limit: f64,
@@ -64,19 +64,22 @@ struct UpdateKeyBody {
     disabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct EnvelopeWithData<T> {
-    data: T,
-}
-
 /// Fields returned by POST /keys.  `key` is the plaintext bearer the
 /// user's instances will use; warden seals it into the user's
 /// envelope cipher and stores the ciphertext in `user_secrets`.
-/// Subsequent calls (PATCH/GET) return only the `id` and metadata —
-/// never the plaintext again.
-#[derive(Debug, Clone, Deserialize)]
+/// Subsequent calls (PATCH/GET) return only the metadata — never
+/// the plaintext again.
+///
+/// OR's actual response shape is the somewhat irregular:
+///     `{ "data": { "hash": "...", "name": "...", "label": "<preview>", "limit": ... }, "key": "<plaintext>" }`
+/// where `hash` is the stable id and `key` is at the top level (not
+/// inside `data`).  We deserialize via a private wire type and
+/// project the relevant fields; that way an OR API change in
+/// shape only breaks one place.
+#[derive(Debug, Clone)]
 pub struct MintedKey {
     /// Stable identifier — what we keep on `users.openrouter_key_id`.
+    /// Maps to OR's `data.hash`.
     pub id: String,
     /// Plaintext OR key.  Sealed via [`crate::envelope::CipherDirectory`]
     /// and discarded after.
@@ -84,6 +87,26 @@ pub struct MintedKey {
     pub name: Option<String>,
     pub label: Option<String>,
     pub limit: Option<f64>,
+}
+
+/// Wire shape of POST /api/v1/keys.  Kept private so the rest of the
+/// crate sees the cleaned-up [`MintedKey`].
+#[derive(Debug, Deserialize)]
+struct MintWire {
+    data: MintWireData,
+    /// Plaintext key — sibling of `data`, never inside it.
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MintWireData {
+    hash: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    limit: Option<f64>,
 }
 
 impl OpenRouterProvisioning {
@@ -105,16 +128,25 @@ impl OpenRouterProvisioning {
         format!("{}/v1/keys{}", self.upstream.trim_end_matches('/'), path)
     }
 
-    /// Mint a new key for `name` (we use the warden user id) with the
-    /// given USD `limit_usd`.  Returns the plaintext key — the only
-    /// chance to capture it.
+    /// Mint a new key for `name` (we use the warden user id, plus
+    /// email if known, joined into one string since OR's API only
+    /// has one operator-visible label field) with the given USD
+    /// `limit_usd`.  Returns the plaintext key — the only chance to
+    /// capture it.
     pub async fn mint(
         &self,
         name: &str,
         label: Option<&str>,
         limit_usd: f64,
     ) -> Result<MintedKey, OpenRouterError> {
-        let body = CreateKeyBody { name, label, limit: limit_usd };
+        // OR's `name` is the only operator-visible string; fold the
+        // email into it when present so the dashboard reads as
+        // "alice@x · <user_id>".
+        let combined = match label {
+            Some(l) if !l.is_empty() => format!("{l} · {name}"),
+            _ => name.to_string(),
+        };
+        let body = CreateKeyBody { name: &combined, limit: limit_usd };
         let resp = self
             .http
             .post(self.url(""))
@@ -129,11 +161,17 @@ impl OpenRouterProvisioning {
                 body: resp.text().await.unwrap_or_default(),
             });
         }
-        let env: EnvelopeWithData<MintedKey> = resp.json().await?;
-        if env.data.key.is_empty() {
+        let wire: MintWire = resp.json().await?;
+        if wire.key.is_empty() {
             return Err(OpenRouterError::Missing("key"));
         }
-        Ok(env.data)
+        Ok(MintedKey {
+            id: wire.data.hash,
+            key: wire.key,
+            name: wire.data.name,
+            label: wire.data.label,
+            limit: wire.data.limit,
+        })
     }
 
     /// Update the USD limit on an existing key.  No-op upstream if

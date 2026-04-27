@@ -198,6 +198,16 @@ impl InstanceService {
             .ok_or(WardenError::NotFound)
     }
 
+    /// System lookup: returns the row regardless of owner.  Used by
+    /// the anonymous `/healthz` probe carve-out in `dyson_proxy::dispatch`
+    /// (the prober has no user identity) and by background sweepers
+    /// like the TTL loop.  Caller is responsible for not exposing the
+    /// row across tenant boundaries — this skips the normal
+    /// owner-filter that the per-handler `get` enforces.
+    pub async fn get_unscoped(&self, id: &str) -> Result<InstanceRow, WardenError> {
+        self.instances.get(id).await?.ok_or(WardenError::NotFound)
+    }
+
     pub async fn list(
         &self,
         owner_id: &str,

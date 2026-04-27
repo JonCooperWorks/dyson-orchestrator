@@ -26,61 +26,56 @@ use crate::traits::{HealthProber, InstanceRow, InstanceStatus, InstanceStore, Li
 #[derive(Clone)]
 pub struct HttpHealthProber {
     http: Client,
-    sandbox_domain: String,
+    /// Public hostname warden answers on (e.g. `dyson.myprivate.network`).
+    /// We probe `https://<instance_id>.<hostname>/healthz` so the prober
+    /// exercises the same chain the user's browser does — Caddy →
+    /// dispatch → dyson_proxy → cubeproxy → dyson.  When `None` the
+    /// prober reports "unreachable" with a descriptive reason and
+    /// the operator knows to set `[server] hostname` in config.toml.
+    hostname: Option<String>,
 }
 
 impl HttpHealthProber {
-    pub fn new(timeout: Duration, sandbox_domain: impl Into<String>) -> Result<Self, reqwest::Error> {
-        // Mirror dyson_proxy::build_client — cubeproxy's TLS uses an
-        // mkcert root that isn't in the default webpki bundle, so a
-        // vanilla reqwest::Client fails with "error sending request"
-        // (TLS handshake → unknown issuer) on every probe.
-        // WARDEN_CUBE_ROOT_CA points at the PEM the installer drops
-        // at /etc/dyson-warden/cube-root-ca.pem; trust it as an
-        // additional root.  Verification stays on.
-        let mut b = Client::builder().timeout(timeout);
-        if let Ok(path) = std::env::var("WARDEN_CUBE_ROOT_CA")
-            && !path.is_empty()
-        {
-            match std::fs::read(&path) {
-                Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
-                    Ok(cert) => {
-                        tracing::info!(path = %path, "probe: trusting cube root CA");
-                        b = b.add_root_certificate(cert);
-                    }
-                    Err(e) => tracing::error!(path = %path, error = %e, "probe: WARDEN_CUBE_ROOT_CA: parse failed"),
-                },
-                Err(e) => tracing::error!(path = %path, error = %e, "probe: WARDEN_CUBE_ROOT_CA: read failed"),
-            }
-        }
-        let http = b.build()?;
-        Ok(Self {
-            http,
-            sandbox_domain: sandbox_domain.into(),
-        })
+    pub fn new(timeout: Duration, hostname: Option<String>) -> Result<Self, reqwest::Error> {
+        // Plain webpki roots — the public hostname is fronted by Caddy
+        // with a Let's Encrypt cert, so no custom CA is needed here.
+        // (The cube-internal probe path used to require the mkcert root
+        // CA; we no longer hit cubeproxy directly.)
+        let http = Client::builder().timeout(timeout).build()?;
+        Ok(Self { http, hostname })
     }
 
-    fn url_for(&self, sandbox_id: &str) -> String {
-        format!("https://{sandbox_id}.{}/healthz", self.sandbox_domain)
+    fn url_for(&self, instance_id: &str) -> Option<String> {
+        let host = self.hostname.as_deref()?.trim_end_matches('/');
+        if host.is_empty() {
+            return None;
+        }
+        Some(format!("https://{instance_id}.{host}/healthz"))
     }
 }
 
 #[async_trait]
 impl HealthProber for HttpHealthProber {
     async fn probe(&self, instance: &InstanceRow) -> ProbeResult {
-        let Some(sb) = instance.cube_sandbox_id.as_deref() else {
+        // The instance row's `cube_sandbox_id` must be set for any
+        // forward path through warden's dispatcher to succeed (it's
+        // the value dyson_proxy uses to address cubeproxy), so a
+        // missing id is a hard "unreachable".
+        if instance.cube_sandbox_id.as_deref().is_none_or(str::is_empty) {
             return ProbeResult::Unreachable {
                 reason: "no cube sandbox id".into(),
             };
+        }
+        let Some(url) = self.url_for(&instance.id) else {
+            return ProbeResult::Unreachable {
+                reason: "warden hostname not configured (set `hostname` in config.toml)".into(),
+            };
         };
-        let url = self.url_for(sb);
-        let resp = match self
-            .http
-            .get(&url)
-            .bearer_auth(&instance.bearer_token)
-            .send()
-            .await
-        {
+        // /healthz is anonymous through dispatch — see
+        // dyson_proxy::dispatch's anonymous-probe carve-out.  We send
+        // no Authorization header so a leaked instance id can't be
+        // used to mint a deeper attack surface.
+        let resp = match self.http.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
                 return ProbeResult::Unreachable {

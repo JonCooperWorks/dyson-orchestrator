@@ -126,32 +126,57 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     //    its plumbing with user_middleware — JIT-create on first
     //    sighting, refuse non-Active accounts.
     //
-    //    If the inbound request has no Authorization header but does
-    //    carry a `dyson_warden_session` cookie, synthesize the header
-    //    from the cookie value before authenticating.  This is what
-    //    makes the SPA's "open ↗" link work — a plain anchor click
-    //    can't set Authorization but it ships cookies for the parent
-    //    domain.
-    let auth_headers = ensure_authorization_from_cookie(req.headers());
-    let caller_user_id = match resolve_active_user(
-        state.authenticator.as_ref(),
-        state.app.users.as_ref(),
-        &auth_headers,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+    //    Anonymous-probe carve-out: `/healthz` requests are forwarded
+    //    without any auth or owner check so warden's internal health
+    //    prober can exercise the same end-to-end chain the user's
+    //    browser does (Caddy → dispatch → cubeproxy → dyson) without
+    //    needing a system credential.  /healthz returns just a tiny
+    //    "ok"-ish payload; the only information leak is whether the
+    //    sandbox is currently alive at this id, which is no worse
+    //    than the wildcard cert already exposing the id's existence.
+    //
+    //    Otherwise: if the inbound request has no Authorization
+    //    header but does carry a `dyson_warden_session` cookie,
+    //    synthesize the header from the cookie value before
+    //    authenticating.  This is what makes the SPA's "open ↗"
+    //    link work — a plain anchor click can't set Authorization
+    //    but it ships cookies for the parent domain.
+    let path = req.uri().path();
+    let anonymous_probe = path == "/healthz";
 
-    // 2. Owner-check.
-    let row: InstanceRow = match state.app.instances.get(&caller_user_id, &instance_id).await {
-        Ok(r) => r,
-        Err(crate::error::WardenError::NotFound) => {
-            return error_response(StatusCode::NOT_FOUND, "no such instance");
+    // 2. Look up the instance row.  Owner-scoped for normal user
+    //    requests; system-scoped for the anonymous probe carve-out
+    //    (which lacks a user identity to scope by).
+    let row: InstanceRow = if anonymous_probe {
+        match state.app.instances.get_unscoped(&instance_id).await {
+            Ok(r) => r,
+            Err(crate::error::WardenError::NotFound) => {
+                return error_response(StatusCode::NOT_FOUND, "no such instance");
+            }
+            Err(_) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance lookup failed");
+            }
         }
-        Err(_) => {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance lookup failed");
+    } else {
+        let auth_headers = ensure_authorization_from_cookie(req.headers());
+        let caller_user_id = match resolve_active_user(
+            state.authenticator.as_ref(),
+            state.app.users.as_ref(),
+            &auth_headers,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
+        match state.app.instances.get(&caller_user_id, &instance_id).await {
+            Ok(r) => r,
+            Err(crate::error::WardenError::NotFound) => {
+                return error_response(StatusCode::NOT_FOUND, "no such instance");
+            }
+            Err(_) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance lookup failed");
+            }
         }
     };
     let sandbox_id = match row.cube_sandbox_id.as_deref() {

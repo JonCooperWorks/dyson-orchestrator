@@ -201,7 +201,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     let prober: Arc<dyn HealthProber> = match HttpHealthProber::new(
         Duration::from_secs(cfg.health_probe_timeout_seconds),
-        cfg.cube.sandbox_domain.clone(),
+        cfg.hostname.clone(),
     ) {
         Ok(p) => Arc::new(p),
         Err(err) => {
