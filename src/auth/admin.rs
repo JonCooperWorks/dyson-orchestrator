@@ -12,16 +12,6 @@ use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-/// Placeholder used by `/v1/*` route handlers until phase 5 wires real
-/// auth-resolved owner ids from request extensions. Returns the seeded
-/// `legacy` user so existing tests pass.
-///
-/// FIXME(phase5): replace every call site with an extractor that reads the
-/// resolved [`UserIdentity`] from the request extensions.
-pub fn caller_owner_placeholder() -> &'static str {
-    "legacy"
-}
-
 #[derive(Clone, Debug)]
 pub struct AuthState {
     pub admin_token: Option<String>,
