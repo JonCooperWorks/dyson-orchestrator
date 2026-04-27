@@ -9,6 +9,16 @@ pub struct Config {
     pub admin_token: String,
     pub db_path: PathBuf,
 
+    /// Directory holding per-user age root keys
+    /// (`<keys_dir>/<user_id>.age`, mode 0400).  The system-scope key
+    /// for provider api_keys / OpenRouter provisioning lives at
+    /// `<keys_dir>/system.age`.  Created on first warden boot.
+    /// Defaults to a sibling of `db_path` so a typical
+    /// `/var/lib/dyson-warden/` layout keeps all per-host secret
+    /// material under one root.
+    #[serde(default)]
+    pub keys_dir: Option<PathBuf>,
+
     /// Public hostname warden answers on, e.g. `"warden.example.com"`.
     /// When set, every Dyson is reachable at
     /// `<instance_id>.<hostname>` — the host-based dispatcher in
@@ -175,6 +185,22 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Resolve the on-disk path for per-user age root keys.
+    /// Honours an explicit `keys_dir` from the TOML / env when set;
+    /// otherwise defaults to `<db_path parent>/keys`.  Falls back to
+    /// `./keys` when `db_path` is malformed (parent-less); validation
+    /// rejects that anyway, so this branch is only hit during early
+    /// startup before `validate()` has run.
+    pub fn resolved_keys_dir(&self) -> PathBuf {
+        if let Some(p) = &self.keys_dir {
+            return p.clone();
+        }
+        match self.db_path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.join("keys"),
+            _ => PathBuf::from("keys"),
+        }
+    }
+
     /// Load the config from `path`, apply `WARDEN_*` env overrides, then
     /// validate. `dangerous_no_auth` relaxes the admin-token check.
     pub fn load(
@@ -204,6 +230,9 @@ impl Config {
         }
         if let Some(v) = env.get("WARDEN_DB_PATH") {
             self.db_path = PathBuf::from(v);
+        }
+        if let Some(v) = env.get("WARDEN_KEYS_DIR") {
+            self.keys_dir = if v.is_empty() { None } else { Some(PathBuf::from(v)) };
         }
         if let Some(v) = env.get("WARDEN_HOSTNAME") {
             self.hostname = if v.is_empty() { None } else { Some(v.clone()) };
