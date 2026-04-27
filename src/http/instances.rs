@@ -39,6 +39,12 @@ struct PatchInstanceBody {
     /// New task / mission. Pass null/missing to leave unchanged.
     #[serde(default)]
     task: Option<String>,
+    /// New ordered model list.  When supplied, warden pushes the new
+    /// list into the running dyson via /api/admin/configure (Stage 8.3
+    /// — runtime-reconfigure of the agent's model selection without
+    /// destroying the sandbox).  Empty/missing leaves models unchanged.
+    #[serde(default)]
+    models: Option<Vec<String>>,
 }
 
 async fn update_instance(
@@ -48,21 +54,38 @@ async fn update_instance(
     Json(body): Json<PatchInstanceBody>,
 ) -> Result<Json<InstanceView>, StatusCode> {
     // PATCH semantics: missing fields stay unchanged. Read the row to
-    // pick up the existing values for the un-touched fields.
+    // pick up the existing values for the un-touched identity fields.
     let current = match state.instances.get(&caller.user_id, &id).await {
         Ok(r) => r,
         Err(e) => return Err(warden_err_to_status(e)),
     };
+
+    // 1. Identity update (name + task).  `rename` also pushes the new
+    //    identity into the running dyson via /api/admin/configure.
     let new_name = body.name.unwrap_or(current.name);
     let new_task = body.task.unwrap_or(current.task);
-    match state
+    let row = match state
         .instances
         .rename(&caller.user_id, &id, &new_name, &new_task)
         .await
     {
-        Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
-        Err(e) => Err(warden_err_to_status(e)),
+        Ok(row) => row,
+        Err(e) => return Err(warden_err_to_status(e)),
+    };
+
+    // 2. Models update (optional).  Synchronous so the SPA can show
+    //    "saved" only after the agent's config has been patched
+    //    (the agent rebuilds on the next turn via HotReloader).
+    if let Some(models) = body.models.filter(|m| !m.is_empty())
+        && let Err(e) = state
+            .instances
+            .update_models(&caller.user_id, &id, models)
+            .await
+    {
+        return Err(warden_err_to_status(e));
     }
+
+    Ok(Json(InstanceView::from_row(row, state.hostname.as_deref())))
 }
 
 async fn create_instance(
@@ -144,7 +167,15 @@ async fn destroy_instance(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.instances.destroy(&caller.user_id, &id).await {
-        Ok(()) => StatusCode::NO_CONTENT,
+        Ok(()) => {
+            // Stage 8: wipe the per-instance configure secret
+            // sealed in `system_secrets["instance.<id>.configure"]`.
+            // Best-effort — the destroy itself succeeded; lingering
+            // sealed plaintext is benign (the sandbox is gone) but
+            // worth cleaning so the table doesn't grow forever.
+            crate::dyson_reconfig::forget_secret(&state.system_secrets, &id).await;
+            StatusCode::NO_CONTENT
+        }
         Err(e) => warden_err_to_status(e),
     }
 }

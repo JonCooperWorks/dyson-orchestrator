@@ -638,9 +638,19 @@ function InstanceDetail({ id }) {
 // ─── Edit name + task ─────────────────────────────────────────────
 
 function EditEmployeeModal({ instance, onClose, onSaved }) {
-  const { client } = useApi();
+  const { client, auth } = useApi();
   const [name, setName] = React.useState(instance.name || '');
   const [task, setTask] = React.useState(instance.task || '');
+  // Models picker reuses the same component as the create form,
+  // sourced from operator-curated `default_models` plus the live
+  // /v1/models upstream catalogue.  Pre-fills with the current
+  // primary model when available; the agent will also accept any
+  // other model id the user types.
+  const initialModels = (instance.models && instance.models.length)
+    ? instance.models
+    : (instance.model ? [instance.model] : []);
+  const [models, setModels] = React.useState(initialModels);
+  const defaultModels = auth?.config?.default_models || [];
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
@@ -648,7 +658,11 @@ function EditEmployeeModal({ instance, onClose, onSaved }) {
     e.preventDefault();
     setSubmitting(true); setError(null);
     try {
-      const updated = await client.updateInstance(instance.id, { name, task });
+      const payload = { name, task };
+      // Only include models if the user actually picked any —
+      // backend treats missing/empty as "leave unchanged".
+      if (models.length > 0) payload.models = models;
+      const updated = await client.updateInstance(instance.id, payload);
       onSaved && onSaved(updated);
     } catch (err) {
       setError(err?.detail || err?.message || 'save failed');
@@ -678,11 +692,16 @@ function EditEmployeeModal({ instance, onClose, onSaved }) {
             rows={6}
           />
           <span className="hint muted small">
-            Saving updates warden's record only.  A running employee
-            keeps its current self-knowledge file (SOUL.md) — the new
-            task takes effect on the next restore or recreate.
+            Saving rewrites the dyson's IDENTITY.md (mission section)
+            via /api/admin/configure — the agent picks it up on the
+            next turn (no restart).
           </span>
         </label>
+        <ModelMultiPicker
+          defaultModels={defaultModels}
+          selected={models}
+          onChange={setModels}
+        />
         {error ? <div className="error">{error}</div> : null}
         <div className="modal-actions">
           <button type="submit" className="btn btn-primary" disabled={submitting}>

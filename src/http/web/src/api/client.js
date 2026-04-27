@@ -69,11 +69,14 @@ export class WardenClient {
   }
 
   /// PATCH the employee profile.  Body fields are optional — pass only
-  /// what you want changed.
-  updateInstance(id, { name, task } = {}) {
+  /// what you want changed.  When `models` is supplied (non-empty
+  /// array), warden also pushes the new list into the running dyson
+  /// via /api/admin/configure (Stage 8.3 runtime reconfigure).
+  updateInstance(id, { name, task, models } = {}) {
     const body = {};
     if (typeof name === 'string') body.name = name;
     if (typeof task === 'string') body.task = task;
+    if (Array.isArray(models) && models.length > 0) body.models = models;
     return this._json(`/v1/instances/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },

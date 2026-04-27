@@ -49,11 +49,57 @@ pub const ENV_TASK: &str = "WARDEN_TASK";
 /// into deployments long after it was the right call.
 pub const ENV_MODEL: &str = "WARDEN_MODEL";
 
+/// Comma-separated ordered fallback list of model ids.  First entry
+/// matches `WARDEN_MODEL`; trailing entries let agents that support
+/// failover/rotation try alternate models in order.  Optional —
+/// agents that only read `WARDEN_MODEL` ignore this.
+pub const ENV_MODELS: &str = "WARDEN_MODELS";
+
 /// Sentinel `owner_id` used by system-internal flows (TTL sweeper, probe
 /// loop, proxy resolving via `proxy_token`) to bypass tenant filtering.
 /// User-facing routes never pass this — the auth middleware resolves the
 /// caller's real `user_id` and that's what flows in.
 pub const SYSTEM_OWNER: &str = "*";
+
+/// Build the `system_secrets` name for an instance's per-instance
+/// configure secret (Stage 8).  Used by `instance.create` /
+/// `instance.destroy` and the Stage-8.3 patch path; central so
+/// rename mistakes can't desync.
+pub fn configure_secret_name(instance_id: &str) -> String {
+    format!("instance.{instance_id}.configure")
+}
+
+/// Retry the dyson reconfigure call with exponential-ish backoff —
+/// the sandbox is `Live` by the time this fires, but the dyson HTTP
+/// server inside can take a beat to settle (especially when cubeproxy
+/// is itself cold-starting).  Total budget: ~15s.  Backoff: 0.5s,
+/// 1s, 2s, 4s, 8s.
+pub async fn push_with_retry(
+    r: &dyn DysonReconfigurer,
+    instance_id: &str,
+    sandbox_id: &str,
+    body: &ReconfigureBody,
+) -> Result<(), String> {
+    let mut delay = std::time::Duration::from_millis(500);
+    let mut last_err = String::new();
+    for attempt in 0..5 {
+        match r.push(instance_id, sandbox_id, body).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e;
+                tracing::debug!(
+                    attempt,
+                    instance = %instance_id,
+                    error = %last_err,
+                    "reconfigure: retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(8));
+            }
+        }
+    }
+    Err(last_err)
+}
 
 #[derive(Clone)]
 pub struct InstanceService {
@@ -65,6 +111,51 @@ pub struct InstanceService {
     /// `http://warden:8080/llm`.
     proxy_base: String,
     default_ttl_seconds: i64,
+    /// Dyson reconfigurer — lets us push WARDEN_MODEL / WARDEN_TASK /
+    /// WARDEN_NAME into a freshly-created sandbox via Dyson's
+    /// `/api/admin/configure` endpoint.  Stage 8 fix for cube's
+    /// snapshot/restore freezing the dyson process's env at warmup
+    /// time (when WARDEN_* are unset → "warmup-placeholder" model).
+    /// `None` skips reconfigure entirely (test/local-dev).
+    reconfigurer: Option<Arc<dyn DysonReconfigurer>>,
+}
+
+/// Anything that can push warden-side identity/task/model state to a
+/// running dyson sandbox via dyson's `/api/admin/configure` runtime
+/// endpoint.  Trait so tests can substitute a recorder without
+/// standing up an HTTP server.
+///
+/// Implementations own (a) the per-instance configure secret (a
+/// random 32-hex string sealed in `system_secrets["instance.<id>.configure"]`,
+/// generated lazily on first push and reused thereafter) and (b)
+/// the cube-trusted HTTP client that reaches the sandbox via
+/// cubeproxy.  Dyson hashes the inbound secret with argon2id on
+/// first sighting (TOFU) and verifies on every subsequent call.
+#[async_trait::async_trait]
+pub trait DysonReconfigurer: Send + Sync {
+    async fn push(
+        &self,
+        instance_id: &str,
+        sandbox_id: &str,
+        body: &ReconfigureBody,
+    ) -> Result<(), String>;
+}
+
+/// Body sent to dyson's `/api/admin/configure`.  Mirrors the dyson
+/// side's `ConfigureBody` — the two structs are intentionally
+/// duplicated rather than shared because warden + dyson are two
+/// separate crates and a shared crate just for this would be
+/// significant churn for a 4-field struct.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReconfigureBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 impl InstanceService {
@@ -83,7 +174,15 @@ impl InstanceService {
             tokens,
             proxy_base: proxy_base.into(),
             default_ttl_seconds,
+            reconfigurer: None,
         }
+    }
+
+    /// Builder-style: plug in the dyson reconfigurer so post-create
+    /// pushes the env envelope through dyson's runtime endpoint.
+    pub fn with_reconfigurer(mut self, r: Arc<dyn DysonReconfigurer>) -> Self {
+        self.reconfigurer = Some(r);
+        self
     }
 
     pub async fn create(
@@ -182,6 +281,55 @@ impl InstanceService {
         // when the detail page mounts).  Doing it here would add 5–15s
         // of synchronous wait to every create, which the user feels.
 
+        // Stage 8: push the env envelope (name, task, models) into the
+        // running dyson via /api/admin/configure.  Cube's snapshot/
+        // restore freezes the warmup-mode dyson process's env; without
+        // this push, every instance shows "warmup-placeholder" forever
+        // and IDENTITY.md is empty.  Best-effort with retries — the
+        // sandbox is Live by here but the dyson HTTP server inside
+        // can take a beat to settle, especially on cold cubeproxy.
+        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let mut models: Vec<String> = req
+                .env
+                .get(ENV_MODELS)
+                .map(|s| s.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
+                .unwrap_or_default();
+            // Fall back to the single WARDEN_MODEL if WARDEN_MODELS
+            // wasn't supplied — older clients might still only pass
+            // the legacy env.
+            if models.is_empty()
+                && let Some(m) = req.env.get(ENV_MODEL).map(|s| s.trim().to_owned())
+                && !m.is_empty()
+            {
+                models.push(m);
+            }
+            let body = ReconfigureBody {
+                name: req.name.clone().filter(|s| !s.is_empty()),
+                task: req.task.clone().filter(|s| !s.is_empty()),
+                models,
+                instance_id: Some(id.clone()),
+            };
+            let r = reconfigurer.clone();
+            let id_for_log = id.clone();
+            let sandbox_id = info.sandbox_id.clone();
+            // Spawn so we can return CreatedInstance immediately —
+            // the SPA's create flow already shows a "provisioning"
+            // spinner that the dispatch layer drives via the
+            // detail-page useEffect.  If the push fails we log;
+            // the user can retry by editing the dyson, which lands
+            // on the same /api/admin/configure code path.
+            tokio::spawn(async move {
+                if let Err(err) = push_with_retry(&*r, &id_for_log, &sandbox_id, &body).await {
+                    tracing::warn!(
+                        error = %err,
+                        instance = %id_for_log,
+                        sandbox = %sandbox_id,
+                        "reconfigure: failed; dyson may stay on warmup-placeholder"
+                    );
+                }
+            });
+        }
+
         Ok(CreatedInstance {
             id,
             url: info.url,
@@ -234,12 +382,12 @@ impl InstanceService {
         Ok(result)
     }
 
-    /// Owner-scoped identity update. Returns `NotFound` if the row exists
-    /// but isn't owned by the caller, matching the rest of the service's
-    /// no-cross-tenant-oracle policy. Per the design, this updates only
-    /// warden's own record — running sandboxes keep their pre-edit
-    /// SOUL.md. Re-onboarding a live sandbox is a separate (forthcoming)
-    /// flow.
+    /// Owner-scoped identity update.  Updates warden's row AND pushes
+    /// the new identity into the running dyson via /api/admin/configure
+    /// so IDENTITY.md (and the agent's system prompt on the next turn)
+    /// reflects the change.  Returns `NotFound` if the row isn't owned
+    /// by the caller, matching the rest of the service's
+    /// no-cross-tenant-oracle policy.
     pub async fn rename(
         &self,
         owner_id: &str,
@@ -248,10 +396,78 @@ impl InstanceService {
         task: &str,
     ) -> Result<InstanceRow, WardenError> {
         self.instances.update_identity(owner_id, id, name, task).await?;
-        self.instances
+        let row = self
+            .instances
             .get_for_owner(owner_id, id)
             .await?
-            .ok_or(WardenError::NotFound)
+            .ok_or(WardenError::NotFound)?;
+        if let (Some(r), Some(sb)) = (
+            self.reconfigurer.as_ref(),
+            row.cube_sandbox_id.as_deref().filter(|s| !s.is_empty()),
+        ) {
+            let body = ReconfigureBody {
+                name: Some(name.to_owned()).filter(|s| !s.is_empty()),
+                task: Some(task.to_owned()).filter(|s| !s.is_empty()),
+                models: Vec::new(), // identity-only update; leave models alone
+                instance_id: Some(id.to_owned()),
+            };
+            let r = r.clone();
+            let id_owned = id.to_owned();
+            let sb_owned = sb.to_owned();
+            tokio::spawn(async move {
+                if let Err(err) = push_with_retry(&*r, &id_owned, &sb_owned, &body).await {
+                    tracing::warn!(error = %err, instance = %id_owned, "rename: reconfigure push failed");
+                }
+            });
+        }
+        Ok(row)
+    }
+
+    /// Owner-scoped models update.  Stage 8.3 entry point — lets a
+    /// user change which model(s) the agent uses without destroying
+    /// the dyson.  Updates dyson.json's
+    /// `providers.<agent.provider>.models` array via the runtime
+    /// reconfigure endpoint; `HotReloader` rebuilds the agent on the
+    /// next turn.  Empty `models` is a no-op (the user has to pick at
+    /// least one).  Returns `NotFound` for cross-owner ids and
+    /// `PolicyDenied` when the reconfigurer isn't wired in
+    /// (production has it; tests + local dev may not).
+    pub async fn update_models(
+        &self,
+        owner_id: &str,
+        id: &str,
+        models: Vec<String>,
+    ) -> Result<(), WardenError> {
+        if models.is_empty() {
+            return Err(WardenError::PolicyDenied(
+                "models list must contain at least one entry".into(),
+            ));
+        }
+        let row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(WardenError::NotFound)?;
+        let sandbox_id = row
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                WardenError::PolicyDenied("instance has no live sandbox to reconfigure".into())
+            })?;
+        let r = self.reconfigurer.as_ref().ok_or_else(|| {
+            WardenError::PolicyDenied("dyson reconfigurer not configured".into())
+        })?;
+        let body = ReconfigureBody {
+            name: None,
+            task: None,
+            models,
+            instance_id: Some(id.to_owned()),
+        };
+        push_with_retry(&**r, id, sandbox_id, &body)
+            .await
+            .map_err(WardenError::PolicyDenied)?;
+        Ok(())
     }
 
     pub async fn destroy(&self, owner_id: &str, id: &str) -> Result<(), WardenError> {

@@ -133,14 +133,14 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(pool.clone()));
 
     let proxy_base = format!("http://{}/llm", cfg.bind);
-    let instance_svc = Arc::new(InstanceService::new(
+    let mut instance_svc = InstanceService::new(
         cube.clone(),
         instances_store.clone(),
         secrets_store.clone(),
         tokens_store.clone(),
         proxy_base,
         cfg.default_ttl_seconds,
-    ));
+    );
     let secrets_svc = Arc::new(SecretsService::new(secrets_store, cipher_dir.clone()));
     let user_secrets_svc = Arc::new(dyson_warden::secrets::UserSecretsService::new(
         user_secrets_store,
@@ -150,6 +150,29 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         system_secrets_store,
         cipher_dir.clone(),
     ));
+
+    // Stage 8: dyson runtime reconfigurer.  Pushes
+    // {name, task, models} into the sandbox's
+    // /api/admin/configure after create/restore/edit.  Only set
+    // when warden has both a hostname (so dyson is reachable at
+    // all) and a sandbox_domain (cubeproxy is the dispatch
+    // target).  We thread it into InstanceService so create()
+    // and restore() both push automatically.
+    let reconfigurer: Option<Arc<dyn dyson_warden::instance::DysonReconfigurer>> =
+        match dyson_warden::dyson_reconfig::DysonReconfigurerHttp::new(
+            cfg.cube.sandbox_domain.clone(),
+            system_secrets_svc.clone(),
+        ) {
+            Ok(r) => Some(Arc::new(r)),
+            Err(err) => {
+                tracing::warn!(error = %err, "reconfigurer init failed; warmup-placeholder will persist");
+                None
+            }
+        };
+    if let Some(r) = &reconfigurer {
+        instance_svc = instance_svc.with_reconfigurer(r.clone());
+    }
+    let instance_svc = Arc::new(instance_svc);
 
     let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
         config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
