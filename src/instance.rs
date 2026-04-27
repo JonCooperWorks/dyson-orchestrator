@@ -42,6 +42,12 @@ pub const ENV_NAME: &str = "WARDEN_NAME";
 /// seed its self-knowledge files; warden does not push subsequent
 /// edits to a running sandbox.
 pub const ENV_TASK: &str = "WARDEN_TASK";
+/// LLM model id the agent talks to via warden's `/llm` proxy
+/// (e.g. `"anthropic/claude-sonnet-4-5"`, `"openai/gpt-4o"`). Required
+/// at create time — there is intentionally no server-side default,
+/// since the right model is task-specific and a stale default leaks
+/// into deployments long after it was the right call.
+pub const ENV_MODEL: &str = "WARDEN_MODEL";
 
 /// Sentinel `owner_id` used by system-internal flows (TTL sweeper, probe
 /// loop, proxy resolving via `proxy_token`) to bypass tenant filtering.
@@ -85,6 +91,17 @@ impl InstanceService {
         owner_id: &str,
         req: CreateRequest,
     ) -> Result<CreatedInstance, WardenError> {
+        // The agent boot config refuses to start without a model id, so
+        // catch the missing-model case here with a clean error instead
+        // of letting the cube start a doomed sandbox we then have to
+        // garbage-collect. Trim-empty counts as missing.
+        if !req.env.get(ENV_MODEL).is_some_and(|s| !s.trim().is_empty()) {
+            return Err(WardenError::PolicyDenied(format!(
+                "{ENV_MODEL} is required in the create request's `env` \
+                 (e.g. \"anthropic/claude-sonnet-4-5\"); there is no default"
+            )));
+        }
+
         let id = Uuid::new_v4().simple().to_string();
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
@@ -488,6 +505,15 @@ mod tests {
         (svc, cube, tokens, secrets, instances)
     }
 
+    /// Tests share this helper so the WARDEN_MODEL requirement isn't
+    /// re-stated everywhere. Returns an env map with just the model set
+    /// to a placeholder; callers add their own keys on top.
+    fn env_with_model() -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert(ENV_MODEL.into(), "anthropic/claude-sonnet-4-5".into());
+        m
+    }
+
     #[tokio::test]
     async fn create_with_name_and_task_stamps_row_and_env() {
         let (svc, cube, _tokens, _secrets, instances) = build().await;
@@ -496,7 +522,7 @@ mod tests {
                 template_id: "tpl".into(),
                 name: Some("PR reviewer".into()),
                 task: Some("Watch foo/bar PRs and comment on style".into()),
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await
@@ -523,7 +549,7 @@ mod tests {
                 template_id: "tpl".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await
@@ -543,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn create_returns_url_and_injects_managed_env() {
         let (svc, cube, tokens, _secrets, instances) = build().await;
-        let mut caller = BTreeMap::new();
+        let mut caller = env_with_model();
         caller.insert("EXTRA".into(), "yes".into());
         let created = svc
             .create("legacy", CreateRequest {
@@ -585,7 +611,7 @@ mod tests {
         // Per the brief's priority: template < managed < caller < existing.
         // The caller can override managed values (we trust the operator).
         let (svc, cube, _tokens, _secrets, _instances) = build().await;
-        let mut caller = BTreeMap::new();
+        let mut caller = env_with_model();
         caller.insert(ENV_PROXY_URL.into(), "http://override".into());
         svc.create("legacy", CreateRequest {
             template_id: "tpl".into(),
@@ -608,7 +634,7 @@ mod tests {
                 template_id: "tpl".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await
@@ -640,7 +666,7 @@ mod tests {
                 template_id: "tpl".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await
@@ -654,7 +680,7 @@ mod tests {
                 source_instance_id: Some(src.id.clone()),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await

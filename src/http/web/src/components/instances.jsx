@@ -112,6 +112,12 @@ function CreateModal({ onClose, onCreated }) {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
+  // Model id the agent talks to, e.g. "anthropic/claude-sonnet-4-5",
+  // "openai/gpt-4o", "deepseek/deepseek-chat".  No default — warden
+  // refuses the create otherwise, since a stale default leaks long
+  // past when it was the right call.  Free-text because OpenRouter
+  // alone exposes 200+ ids and no client-side enum can keep up.
+  const [model, setModel] = React.useState('');
   // Operator-configured default from `default_template_id` in
   // /etc/dyson-warden/config.toml, surfaced via /auth/config.  Fall
   // back to a placeholder string only when the deployment hasn't
@@ -128,13 +134,13 @@ function CreateModal({ onClose, onCreated }) {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!templateId.trim()) return;
+    if (!templateId.trim() || !model.trim()) return;
     setSubmitting(true);
     setError(null);
     try {
       const req = {
         template_id: templateId.trim(),
-        env: {},
+        env: { WARDEN_MODEL: model.trim() },
       };
       if (name.trim()) req.name = name.trim();
       if (task.trim()) req.task = task.trim();
@@ -197,6 +203,20 @@ function CreateModal({ onClose, onCreated }) {
             The agent reads this on first boot as <code>WARDEN_TASK</code>.
             You can edit it later, but changes don't propagate to a
             running employee.
+          </span>
+        </label>
+        <label className="field">
+          <span>model</span>
+          <input
+            value={model}
+            onChange={e => setModel(e.target.value)}
+            placeholder="anthropic/claude-sonnet-4-5"
+            required
+          />
+          <span className="hint muted small">
+            OpenRouter model id. Free-text — see{' '}
+            <a href="https://openrouter.ai/models" target="_blank" rel="noopener noreferrer">openrouter.ai/models</a>{' '}
+            for the full list.
           </span>
         </label>
         <button
