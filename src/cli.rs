@@ -33,6 +33,28 @@ pub enum Command {
         #[command(subcommand)]
         action: SecretsAction,
     },
+
+    /// Create a new instance from a template.
+    New {
+        #[arg(long)]
+        template: String,
+        /// `KEY=VALUE` env entries (repeatable).
+        #[arg(long = "env", value_parser = parse_kv)]
+        env: Vec<(String, String)>,
+        #[arg(long)]
+        ttl_seconds: Option<i64>,
+    },
+
+    /// Destroy an instance by id.
+    Destroy { id: String },
+
+    /// List instances. By default destroyed rows are excluded.
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = false)]
+        include_destroyed: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -58,4 +80,14 @@ Do not run this configuration outside a trusted network.
 
 pub fn print_dangerous_banner() {
     eprintln!("{DANGEROUS_BANNER}");
+}
+
+fn parse_kv(s: &str) -> Result<(String, String), String> {
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got {s:?}"))?;
+    if k.is_empty() {
+        return Err("empty key".into());
+    }
+    Ok((k.to_owned(), v.to_owned()))
 }

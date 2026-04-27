@@ -157,6 +157,10 @@ pub trait InstanceStore: Send + Sync {
     async fn get(&self, id: &str) -> Result<Option<InstanceRow>, StoreError>;
     async fn list(&self, filter: ListFilter) -> Result<Vec<InstanceRow>, StoreError>;
     async fn update_status(&self, id: &str, status: InstanceStatus) -> Result<(), StoreError>;
+    /// Set the Cube-side sandbox id once Cube has assigned one. Needed
+    /// because the row must exist before `TokenStore::mint` (FK), but the
+    /// sandbox id is only known after the Cube call returns.
+    async fn set_cube_sandbox_id(&self, id: &str, sandbox_id: &str) -> Result<(), StoreError>;
     async fn touch(&self, id: &str) -> Result<(), StoreError>;
     async fn pin(&self, id: &str, pinned: bool, ttl: Option<i64>) -> Result<(), StoreError>;
     async fn record_probe(&self, id: &str, status: ProbeResult) -> Result<(), StoreError>;

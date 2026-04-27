@@ -66,8 +66,38 @@ mod tests {
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
     use crate::db::secrets::SqlxSecretStore;
+    use crate::db::tokens::SqlxTokenStore;
+    use crate::instance::InstanceService;
     use crate::secrets::SecretsService;
-    use crate::traits::{InstanceRow, InstanceStatus, InstanceStore, SecretStore};
+    use crate::traits::{
+        CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore, SandboxInfo,
+        SecretStore, SnapshotInfo, TokenStore,
+    };
+
+    struct StubCube;
+
+    #[async_trait::async_trait]
+    impl CubeClient for StubCube {
+        async fn create_sandbox(
+            &self,
+            _: CreateSandboxArgs,
+        ) -> Result<SandboxInfo, crate::error::CubeError> {
+            unreachable!("not used by secrets routes")
+        }
+        async fn destroy_sandbox(&self, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
+        async fn snapshot_sandbox(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<SnapshotInfo, crate::error::CubeError> {
+            unreachable!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), crate::error::CubeError> {
+            unreachable!()
+        }
+    }
 
     async fn seed_instance(pool: sqlx::SqlitePool, id: &str) {
         SqlxInstanceStore::new(pool)
@@ -102,9 +132,26 @@ mod tests {
     async fn build_state() -> (AppState, Arc<dyn SecretStore>) {
         let pool = open_in_memory().await.unwrap();
         seed_instance(pool.clone(), "i1").await;
-        let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool));
+        let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
         let svc = Arc::new(SecretsService::new(raw.clone()));
-        (AppState { secrets: svc }, raw)
+        let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
+        let instances_store: Arc<dyn InstanceStore> =
+            Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool));
+        let instance_svc = Arc::new(InstanceService::new(
+            cube,
+            instances_store,
+            raw.clone(),
+            tokens_store,
+            "http://test/llm",
+            3600,
+        ));
+        let state = AppState {
+            secrets: svc,
+            instances: instance_svc,
+            sandbox_domain: "cube.test".into(),
+        };
+        (state, raw)
     }
 
     #[tokio::test]

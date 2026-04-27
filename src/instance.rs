@@ -1,0 +1,498 @@
+//! Instance lifecycle: create, destroy, restore.
+//!
+//! Wires `CubeClient` + `InstanceStore` + `SecretStore` + `TokenStore`. The
+//! env map handed to the sandbox is composed via [`crate::secrets::compose_env`]
+//! using the brief's priority (template → managed → caller → existing rows).
+//!
+//! One **proxy token per instance** is minted at create time; the
+//! `provider` column is set to `"*"` to indicate the same token authorises
+//! the instance against any provider permitted by its policy. The proxy
+//! (step 14) consults the URL path to decide which adapter to use.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::error::WardenError;
+use crate::secrets::compose_env;
+use crate::traits::{
+    CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore, ListFilter,
+    SecretStore, TokenStore,
+};
+
+/// Sentinel `provider` value used for the per-instance shared proxy token.
+/// The proxy resolves the token, sees `"*"`, and accepts any provider that
+/// the instance's policy allows.
+pub const SHARED_PROVIDER: &str = "*";
+
+/// Env-var names injected by the orchestrator into every sandbox.
+pub const ENV_PROXY_URL: &str = "WARDEN_PROXY_URL";
+pub const ENV_PROXY_TOKEN: &str = "WARDEN_PROXY_TOKEN";
+pub const ENV_INSTANCE_ID: &str = "WARDEN_INSTANCE_ID";
+
+#[derive(Clone)]
+pub struct InstanceService {
+    cube: Arc<dyn CubeClient>,
+    instances: Arc<dyn InstanceStore>,
+    secrets: Arc<dyn SecretStore>,
+    tokens: Arc<dyn TokenStore>,
+    /// Public base URL of the warden's `/llm/` proxy mount, e.g.
+    /// `http://warden:8080/llm`.
+    proxy_base: String,
+    default_ttl_seconds: i64,
+}
+
+impl InstanceService {
+    pub fn new(
+        cube: Arc<dyn CubeClient>,
+        instances: Arc<dyn InstanceStore>,
+        secrets: Arc<dyn SecretStore>,
+        tokens: Arc<dyn TokenStore>,
+        proxy_base: impl Into<String>,
+        default_ttl_seconds: i64,
+    ) -> Self {
+        Self {
+            cube,
+            instances,
+            secrets,
+            tokens,
+            proxy_base: proxy_base.into(),
+            default_ttl_seconds,
+        }
+    }
+
+    pub async fn create(&self, req: CreateRequest) -> Result<CreatedInstance, WardenError> {
+        let id = Uuid::new_v4().simple().to_string();
+        let bearer = Uuid::new_v4().simple().to_string();
+        let now = now_secs();
+        let ttl = req.ttl_seconds.unwrap_or(self.default_ttl_seconds);
+
+        // Insert the instance row first so the FK target exists; mint the
+        // proxy token; then call Cube. If Cube fails we mark the row
+        // destroyed to keep state consistent.
+        let row = InstanceRow {
+            id: id.clone(),
+            cube_sandbox_id: None,
+            template_id: req.template_id.clone(),
+            status: InstanceStatus::Cold,
+            bearer_token: bearer.clone(),
+            pinned: false,
+            expires_at: Some(now + ttl),
+            last_active_at: now,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: now,
+            destroyed_at: None,
+        };
+        self.instances.create(row).await?;
+
+        let proxy_token = self.tokens.mint(&id, SHARED_PROVIDER).await?;
+
+        let mut managed = BTreeMap::new();
+        managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
+        managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
+        managed.insert(ENV_INSTANCE_ID.into(), id.clone());
+
+        // Templates aren't materialised inside warden — they live in Cube.
+        // The "template" half of the merge is empty here; operators set per-
+        // instance values via PUT /secrets and they win as `existing`.
+        let template_env = BTreeMap::new();
+        let env = compose_env(&template_env, &managed, &req.env, &[]);
+
+        let info = match self
+            .cube
+            .create_sandbox(CreateSandboxArgs {
+                template_id: req.template_id,
+                env,
+                from_snapshot_path: None,
+            })
+            .await
+        {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = self.tokens.revoke_for_instance(&id).await;
+                let _ = self
+                    .instances
+                    .update_status(&id, InstanceStatus::Destroyed)
+                    .await;
+                return Err(e.into());
+            }
+        };
+        self.instances
+            .set_cube_sandbox_id(&id, &info.sandbox_id)
+            .await?;
+        self.instances
+            .update_status(&id, InstanceStatus::Live)
+            .await?;
+
+        Ok(CreatedInstance {
+            id,
+            url: info.url,
+            bearer_token: bearer,
+            proxy_token,
+        })
+    }
+
+    pub async fn get(&self, id: &str) -> Result<InstanceRow, WardenError> {
+        self.instances
+            .get(id)
+            .await?
+            .ok_or(WardenError::NotFound)
+    }
+
+    pub async fn list(&self, filter: ListFilter) -> Result<Vec<InstanceRow>, WardenError> {
+        Ok(self.instances.list(filter).await?)
+    }
+
+    pub async fn destroy(&self, id: &str) -> Result<(), WardenError> {
+        let row = self.instances.get(id).await?.ok_or(WardenError::NotFound)?;
+        if let Some(sb) = &row.cube_sandbox_id {
+            self.cube.destroy_sandbox(sb).await?;
+        }
+        self.tokens.revoke_for_instance(id).await?;
+        self.instances
+            .update_status(id, InstanceStatus::Destroyed)
+            .await?;
+        Ok(())
+    }
+
+    /// Restore a new instance from a snapshot's bytes on the Cube host.
+    /// Carries `source` instance secrets across by writing them into the new
+    /// instance's `instance_secrets` rows. The caller may override or add via
+    /// `req.env`.
+    pub async fn restore(&self, req: RestoreRequest) -> Result<CreatedInstance, WardenError> {
+        let id = Uuid::new_v4().simple().to_string();
+        let bearer = Uuid::new_v4().simple().to_string();
+        let now = now_secs();
+        let ttl = req.ttl_seconds.unwrap_or(self.default_ttl_seconds);
+
+        let existing = if let Some(src) = &req.source_instance_id {
+            self.secrets.list(src).await?
+        } else {
+            Vec::new()
+        };
+
+        let row = InstanceRow {
+            id: id.clone(),
+            cube_sandbox_id: None,
+            template_id: req.template_id.clone(),
+            status: InstanceStatus::Cold,
+            bearer_token: bearer.clone(),
+            pinned: false,
+            expires_at: Some(now + ttl),
+            last_active_at: now,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: now,
+            destroyed_at: None,
+        };
+        self.instances.create(row).await?;
+
+        let proxy_token = self.tokens.mint(&id, SHARED_PROVIDER).await?;
+
+        // Persist carried-over secrets early so they appear in the new
+        // instance's `existing` rows on subsequent restarts. They also feed
+        // the env map below directly (cheaper than re-reading).
+        for (name, value) in &existing {
+            self.secrets.put(&id, name, value).await?;
+        }
+
+        let mut managed = BTreeMap::new();
+        managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
+        managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
+        managed.insert(ENV_INSTANCE_ID.into(), id.clone());
+
+        let env = compose_env(&BTreeMap::new(), &managed, &req.env, &existing);
+
+        let info = match self
+            .cube
+            .create_sandbox(CreateSandboxArgs {
+                template_id: req.template_id,
+                env,
+                from_snapshot_path: Some(req.snapshot_path),
+            })
+            .await
+        {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = self.tokens.revoke_for_instance(&id).await;
+                let _ = self
+                    .instances
+                    .update_status(&id, InstanceStatus::Destroyed)
+                    .await;
+                return Err(e.into());
+            }
+        };
+
+        self.instances
+            .set_cube_sandbox_id(&id, &info.sandbox_id)
+            .await?;
+        self.instances
+            .update_status(&id, InstanceStatus::Live)
+            .await?;
+
+        Ok(CreatedInstance {
+            id,
+            url: info.url,
+            bearer_token: bearer,
+            proxy_token,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRequest {
+    pub template_id: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RestoreRequest {
+    pub template_id: String,
+    /// Path on the Cube host where the snapshot bundle currently lives.
+    pub snapshot_path: std::path::PathBuf,
+    /// If present, this instance's secrets are copied to the new instance.
+    pub source_instance_id: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreatedInstance {
+    pub id: String,
+    pub url: String,
+    pub bearer_token: String,
+    pub proxy_token: String,
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use crate::db::instances::SqlxInstanceStore;
+    use crate::db::open_in_memory;
+    use crate::db::secrets::SqlxSecretStore;
+    use crate::db::tokens::SqlxTokenStore;
+    use crate::error::CubeError;
+    use crate::traits::{CubeClient, SandboxInfo, SnapshotInfo};
+
+    #[derive(Default)]
+    struct CapturedCreate {
+        template_id: String,
+        env: BTreeMap<String, String>,
+        from_snapshot: Option<std::path::PathBuf>,
+    }
+
+    #[derive(Default)]
+    struct MockCube {
+        last_create: Mutex<Option<CapturedCreate>>,
+        destroyed: Mutex<Vec<String>>,
+        next_sandbox_id: Mutex<u32>,
+    }
+
+    impl MockCube {
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+        fn last_create(&self) -> CapturedCreate {
+            self.last_create.lock().unwrap().take().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl CubeClient for MockCube {
+        async fn create_sandbox(
+            &self,
+            args: CreateSandboxArgs,
+        ) -> Result<SandboxInfo, CubeError> {
+            let mut n = self.next_sandbox_id.lock().unwrap();
+            *n += 1;
+            let sid = format!("sb-{}", *n);
+            *self.last_create.lock().unwrap() = Some(CapturedCreate {
+                template_id: args.template_id.clone(),
+                env: args.env,
+                from_snapshot: args.from_snapshot_path,
+            });
+            Ok(SandboxInfo {
+                sandbox_id: sid.clone(),
+                host_ip: "10.0.0.1".into(),
+                url: format!("https://{sid}.cube.test"),
+            })
+        }
+
+        async fn destroy_sandbox(&self, sandbox_id: &str) -> Result<(), CubeError> {
+            self.destroyed.lock().unwrap().push(sandbox_id.into());
+            Ok(())
+        }
+
+        async fn snapshot_sandbox(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<SnapshotInfo, CubeError> {
+            unimplemented!("not used in instance tests")
+        }
+
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), CubeError> {
+            unimplemented!("not used in instance tests")
+        }
+    }
+
+    async fn build() -> (
+        InstanceService,
+        Arc<MockCube>,
+        Arc<dyn TokenStore>,
+        Arc<dyn SecretStore>,
+        Arc<dyn InstanceStore>,
+    ) {
+        let pool = open_in_memory().await.unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        let svc = InstanceService::new(
+            cube.clone(),
+            instances.clone(),
+            secrets.clone(),
+            tokens.clone(),
+            "http://warden.test:8080/llm",
+            3600,
+        );
+        (svc, cube, tokens, secrets, instances)
+    }
+
+    #[tokio::test]
+    async fn create_returns_url_and_injects_managed_env() {
+        let (svc, cube, tokens, _secrets, instances) = build().await;
+        let mut caller = BTreeMap::new();
+        caller.insert("EXTRA".into(), "yes".into());
+        let created = svc
+            .create(CreateRequest {
+                template_id: "tpl-x".into(),
+                env: caller,
+                ttl_seconds: Some(60),
+            })
+            .await
+            .unwrap();
+        assert!(created.url.starts_with("https://sb-1."));
+        assert_eq!(created.bearer_token.len(), 32);
+        assert_eq!(created.proxy_token.len(), 32);
+
+        let captured = cube.last_create();
+        assert_eq!(captured.template_id, "tpl-x");
+        assert_eq!(captured.env[ENV_PROXY_URL], "http://warden.test:8080/llm");
+        assert_eq!(captured.env[ENV_PROXY_TOKEN], created.proxy_token);
+        assert_eq!(captured.env[ENV_INSTANCE_ID], created.id);
+        assert_eq!(captured.env["EXTRA"], "yes");
+        assert!(captured.from_snapshot.is_none());
+
+        let resolved = tokens.resolve(&created.proxy_token).await.unwrap().unwrap();
+        assert_eq!(resolved.instance_id, created.id);
+        assert_eq!(resolved.provider, SHARED_PROVIDER);
+
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(row.status, InstanceStatus::Live);
+    }
+
+    #[tokio::test]
+    async fn caller_env_overrides_managed_when_keys_collide() {
+        // Per the brief's priority: template < managed < caller < existing.
+        // The caller can override managed values (we trust the operator).
+        let (svc, cube, _tokens, _secrets, _instances) = build().await;
+        let mut caller = BTreeMap::new();
+        caller.insert(ENV_PROXY_URL.into(), "http://override".into());
+        svc.create(CreateRequest {
+            template_id: "tpl".into(),
+            env: caller,
+            ttl_seconds: None,
+        })
+        .await
+        .unwrap();
+        let captured = cube.last_create();
+        assert_eq!(captured.env[ENV_PROXY_URL], "http://override");
+    }
+
+    #[tokio::test]
+    async fn destroy_revokes_proxy_tokens_and_marks_destroyed() {
+        let (svc, cube, tokens, _secrets, instances) = build().await;
+        let created = svc
+            .create(CreateRequest {
+                template_id: "tpl".into(),
+                env: BTreeMap::new(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_some());
+
+        svc.destroy(&created.id).await.unwrap();
+        assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_none());
+
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(row.status, InstanceStatus::Destroyed);
+        assert!(row.destroyed_at.is_some());
+
+        assert_eq!(cube.destroyed.lock().unwrap().as_slice(), ["sb-1"]);
+    }
+
+    #[tokio::test]
+    async fn destroy_unknown_returns_not_found() {
+        let (svc, _cube, _tokens, _secrets, _instances) = build().await;
+        let err = svc.destroy("nope").await.expect_err("must error");
+        matches!(err, WardenError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn restore_carries_existing_secrets_and_uses_snapshot_path() {
+        let (svc, cube, _tokens, secrets, _instances) = build().await;
+        let src = svc
+            .create(CreateRequest {
+                template_id: "tpl".into(),
+                env: BTreeMap::new(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        secrets.put(&src.id, "K", "v-existing").await.unwrap();
+
+        let restored = svc
+            .restore(RestoreRequest {
+                template_id: "tpl".into(),
+                snapshot_path: "/var/snaps/snap-1".into(),
+                source_instance_id: Some(src.id.clone()),
+                env: BTreeMap::new(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+        assert_ne!(restored.id, src.id);
+
+        let captured = cube.last_create();
+        assert_eq!(
+            captured.from_snapshot.as_deref(),
+            Some(std::path::Path::new("/var/snaps/snap-1"))
+        );
+        assert_eq!(captured.env["K"], "v-existing");
+
+        // Existing secrets are persisted under the new instance id too.
+        let copied = secrets.list(&restored.id).await.unwrap();
+        assert_eq!(copied, vec![("K".into(), "v-existing".into())]);
+    }
+}

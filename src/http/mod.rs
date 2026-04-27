@@ -1,30 +1,36 @@
 //! HTTP server assembly.
 //!
-//! At this point only the secrets routes are wired. Step 7 brings instance
-//! routes + admin-bearer middleware; Step 8 adds snapshots; Step 11 stitches
-//! the full router together with healthz, graceful shutdown, and the proxy
-//! mount. Each sub-module exports a `router(state)` function so the top-level
-//! assembly is just a couple of `.merge()` calls.
+//! Each sub-module exports a `router(state)` factory; this module composes
+//! them and wraps `/v1/*` in the admin-bearer middleware. Step 8 adds
+//! snapshots; step 11 stitches in `/healthz` and graceful shutdown; step 14
+//! mounts the `/llm/` proxy.
 
+pub mod instances;
 pub mod secrets;
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{middleware, Router};
 
+use crate::auth::{admin_bearer, AuthState};
+use crate::instance::InstanceService;
 use crate::secrets::SecretsService;
 
-/// Shared state handed to every route handler.
-///
-/// Cheap to clone — every field is an `Arc`. Components are added as the
-/// remaining steps land.
+/// Shared state handed to every route handler. Cheap to clone — every field
+/// is an `Arc` or scalar `String`.
 #[derive(Clone)]
 pub struct AppState {
     pub secrets: Arc<SecretsService>,
+    pub instances: Arc<InstanceService>,
+    pub sandbox_domain: String,
 }
 
-/// Build the public `Router`. Routes that need admin auth will be wrapped by
-/// the middleware introduced in step 7.
-pub fn router(state: AppState) -> Router {
-    Router::new().merge(secrets::router(state.clone()))
+/// Build the public `Router`. All `/v1/*` routes share the admin-bearer
+/// middleware. The `auth` argument decides whether the middleware enforces a
+/// token or runs in `--dangerous-no-auth` pass-through mode.
+pub fn router(state: AppState, auth: AuthState) -> Router {
+    Router::new()
+        .merge(instances::router(state.clone()))
+        .merge(secrets::router(state))
+        .layer(middleware::from_fn_with_state(auth, admin_bearer))
 }

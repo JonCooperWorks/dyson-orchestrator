@@ -115,6 +115,19 @@ impl InstanceStore for SqlxInstanceStore {
         rows.iter().map(row_to_instance).collect()
     }
 
+    async fn set_cube_sandbox_id(&self, id: &str, sandbox_id: &str) -> Result<(), StoreError> {
+        let r = sqlx::query("UPDATE instances SET cube_sandbox_id = ? WHERE id = ?")
+            .bind(sandbox_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn update_status(&self, id: &str, status: InstanceStatus) -> Result<(), StoreError> {
         let now = now_secs();
         let result = sqlx::query(
