@@ -179,9 +179,14 @@ mod tests {
                 required_scopes: vec!["profile".into()],
             },
             default_template_id: Some("tpl-abc".into()),
+            default_models: vec!["anthropic/claude-sonnet-4-5".into()],
         };
         let json = serde_json::to_value(cfg).unwrap();
         assert_eq!(json["mode"], "oidc");
+        assert_eq!(
+            json["default_models"],
+            serde_json::json!(["anthropic/claude-sonnet-4-5"])
+        );
         assert_eq!(json["issuer"], "https://idp.example");
         assert_eq!(json["client_id"], "warden-spa");
         assert_eq!(json["required_scopes"], serde_json::json!(["profile"]));

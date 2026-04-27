@@ -34,6 +34,7 @@ time = { version = "0.3", default-features = false, features = ["serde", "format
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 jsonwebtoken = { version = "9", default-features = false }
+age = { version = "0.10", default-features = false, features = ["armor"] }
 
 [features]
 default = []
@@ -49,6 +50,7 @@ postgres = ["sqlx/postgres"]
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
 rand = "0.8"
 base64 = "0.22"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"
