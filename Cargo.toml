@@ -1,0 +1,38 @@
+[package]
+name = "dyson-warden"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+description = "Orchestration server for Dyson agents in CubeSandbox MicroVMs"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "warden"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "macros", "signal", "sync", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+rust-s3 = { version = "0.34", default-features = false, features = ["tokio-rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json"] }
+thiserror = "1"
+anyhow = "1"
+uuid = { version = "1", default-features = false, features = ["v4", "serde"] }
+time = { version = "0.3", default-features = false, features = ["serde", "formatting", "macros"] }
+async-trait = "0.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+opt-level = 3

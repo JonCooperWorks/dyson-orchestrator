@@ -1,0 +1,52 @@
+bind = "0.0.0.0:8080"
+admin_token = "CHANGE_ME"
+db_path = "/var/lib/dyson-warden/state.db"
+
+default_ttl_seconds = 86400
+health_probe_interval_seconds = 60
+health_probe_timeout_seconds = 5
+
+[cube]
+url = "http://localhost:3000"
+api_key = "CHANGE_ME"
+sandbox_domain = "cube.app"
+
+[default_policy]
+allowed_providers = ["openrouter"]
+allowed_models = ["*"]
+daily_token_budget = 1_000_000
+monthly_usd_budget = 100.0
+rps_limit = 10
+
+[providers.anthropic]
+api_key = "CHANGE_ME"
+upstream = "https://api.anthropic.com"
+anthropic_version = "2023-06-01"
+
+[providers.openai]
+api_key = "CHANGE_ME"
+upstream = "https://api.openai.com"
+
+[providers.gemini]
+api_key = "CHANGE_ME"
+upstream = "https://generativelanguage.googleapis.com"
+
+[providers.openrouter]
+api_key = "sk-or-CHANGE_ME"
+upstream = "https://openrouter.ai/api"
+
+[providers.ollama]
+upstream = "http://localhost:11434"
+
+[backup]
+sink = "local"
+local_cache_dir = "/var/lib/dyson-warden/backup-cache"
+
+[backup.s3]
+endpoint = "https://s3.us-east-1.amazonaws.com"
+region = "us-east-1"
+bucket = "dyson-backups"
+prefix = "warden/"
+access_key_id = "CHANGE_ME"
+secret_access_key = "CHANGE_ME"
+path_style = false
