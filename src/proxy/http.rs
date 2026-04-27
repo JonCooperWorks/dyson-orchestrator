@@ -346,6 +346,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.clone(),
                 owner_id: "legacy".into(),
+            name: String::new(),
+            task: String::new(),
                 cube_sandbox_id: Some("sb-1".into()),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,

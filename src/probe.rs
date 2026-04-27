@@ -222,6 +222,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: "legacy".into(),
+            name: String::new(),
+            task: String::new(),
                 cube_sandbox_id: Some(format!("sb-{id}")),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -292,6 +294,8 @@ mod tests {
             .create(InstanceRow {
                 id: "d1".into(),
                 owner_id: "legacy".into(),
+            name: String::new(),
+            task: String::new(),
                 cube_sandbox_id: Some("sb-d1".into()),
                 template_id: "t".into(),
                 status: InstanceStatus::Destroyed,

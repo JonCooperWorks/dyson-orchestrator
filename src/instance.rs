@@ -31,6 +31,12 @@ pub const SHARED_PROVIDER: &str = "*";
 pub const ENV_PROXY_URL: &str = "WARDEN_PROXY_URL";
 pub const ENV_PROXY_TOKEN: &str = "WARDEN_PROXY_TOKEN";
 pub const ENV_INSTANCE_ID: &str = "WARDEN_INSTANCE_ID";
+/// Human-readable label, e.g. "PR reviewer for foo/bar".
+pub const ENV_NAME: &str = "WARDEN_NAME";
+/// Free-text mission statement. The agent reads this on first boot to
+/// seed its self-knowledge files; warden does not push subsequent
+/// edits to a running sandbox.
+pub const ENV_TASK: &str = "WARDEN_TASK";
 
 /// Sentinel `owner_id` used by system-internal flows (TTL sweeper, probe
 /// loop, proxy resolving via `proxy_token`) to bypass tenant filtering.
@@ -78,6 +84,8 @@ impl InstanceService {
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
         let ttl = req.ttl_seconds.unwrap_or(self.default_ttl_seconds);
+        let name = req.name.clone().unwrap_or_default();
+        let task = req.task.clone().unwrap_or_default();
 
         // Insert the instance row first so the FK target exists; mint the
         // proxy token; then call Cube. If Cube fails we mark the row
@@ -85,6 +93,8 @@ impl InstanceService {
         let row = InstanceRow {
             id: id.clone(),
             owner_id: owner_id.to_owned(),
+            name: name.clone(),
+            task: task.clone(),
             cube_sandbox_id: None,
             template_id: req.template_id.clone(),
             status: InstanceStatus::Cold,
@@ -105,6 +115,12 @@ impl InstanceService {
         managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
         managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
         managed.insert(ENV_INSTANCE_ID.into(), id.clone());
+        // Identity envelope. The agent reads these on first boot to seed
+        // its own self-knowledge files (SOUL.md and friends in Dyson's
+        // case); subsequent edits to the warden row don't propagate to a
+        // running sandbox, by design.
+        managed.insert(ENV_NAME.into(), name);
+        managed.insert(ENV_TASK.into(), task);
 
         // Templates aren't materialised inside warden — they live in Cube.
         // The "template" half of the merge is empty here; operators set per-
@@ -180,6 +196,26 @@ impl InstanceService {
         Ok(result)
     }
 
+    /// Owner-scoped identity update. Returns `NotFound` if the row exists
+    /// but isn't owned by the caller, matching the rest of the service's
+    /// no-cross-tenant-oracle policy. Per the design, this updates only
+    /// warden's own record — running sandboxes keep their pre-edit
+    /// SOUL.md. Re-onboarding a live sandbox is a separate (forthcoming)
+    /// flow.
+    pub async fn rename(
+        &self,
+        owner_id: &str,
+        id: &str,
+        name: &str,
+        task: &str,
+    ) -> Result<InstanceRow, WardenError> {
+        self.instances.update_identity(owner_id, id, name, task).await?;
+        self.instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(WardenError::NotFound)
+    }
+
     pub async fn destroy(&self, owner_id: &str, id: &str) -> Result<(), WardenError> {
         let row = self
             .instances
@@ -216,9 +252,13 @@ impl InstanceService {
             Vec::new()
         };
 
+        let restored_name = req.name.clone().unwrap_or_default();
+        let restored_task = req.task.clone().unwrap_or_default();
         let row = InstanceRow {
             id: id.clone(),
             owner_id: owner_id.to_owned(),
+            name: restored_name.clone(),
+            task: restored_task.clone(),
             cube_sandbox_id: None,
             template_id: req.template_id.clone(),
             status: InstanceStatus::Cold,
@@ -246,6 +286,11 @@ impl InstanceService {
         managed.insert(ENV_PROXY_URL.into(), self.proxy_base.clone());
         managed.insert(ENV_PROXY_TOKEN.into(), proxy_token.clone());
         managed.insert(ENV_INSTANCE_ID.into(), id.clone());
+        // Identity envelope. Re-injected on restore so a fresh sandbox
+        // (no SOUL.md) can seed itself; an inherited image with prior
+        // self-knowledge will simply ignore them.
+        managed.insert(ENV_NAME.into(), restored_name);
+        managed.insert(ENV_TASK.into(), restored_task);
 
         let env = compose_env(&BTreeMap::new(), &managed, &req.env, &existing);
 
@@ -288,6 +333,15 @@ impl InstanceService {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateRequest {
     pub template_id: String,
+    /// Human-readable label for the employee. Optional — defaults to the
+    /// short id when unset. Surfaced as `WARDEN_NAME` in the sandbox env.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Free-text task / mission. Optional but strongly recommended;
+    /// surfaced as `WARDEN_TASK` so the agent reads its job description
+    /// at boot.
+    #[serde(default)]
+    pub task: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -301,6 +355,12 @@ pub struct RestoreRequest {
     pub snapshot_path: std::path::PathBuf,
     /// If present, this instance's secrets are copied to the new instance.
     pub source_instance_id: Option<String>,
+    /// Carry-over identity. Populated by `SnapshotService::restore` from
+    /// the source instance row so the restored employee keeps its name.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub task: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -422,6 +482,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_with_name_and_task_stamps_row_and_env() {
+        let (svc, cube, _tokens, _secrets, instances) = build().await;
+        let created = svc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("PR reviewer".into()),
+                task: Some("Watch foo/bar PRs and comment on style".into()),
+                env: BTreeMap::new(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+
+        let captured = cube.last_create();
+        assert_eq!(captured.env[ENV_NAME], "PR reviewer");
+        assert_eq!(captured.env[ENV_TASK], "Watch foo/bar PRs and comment on style");
+
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(row.name, "PR reviewer");
+        assert_eq!(row.task, "Watch foo/bar PRs and comment on style");
+    }
+
+    #[tokio::test]
+    async fn rename_updates_row_but_does_not_re_emit_env() {
+        // Per the design, edits in warden don't propagate to a running
+        // sandbox.  This test is the contract: rename mutates the row,
+        // but the cube was only invoked at create time, so its captured
+        // env snapshot still has the original (empty) values.
+        let (svc, cube, _tokens, _secrets, _instances) = build().await;
+        let created = svc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: BTreeMap::new(),
+                ttl_seconds: None,
+            })
+            .await
+            .unwrap();
+
+        let renamed = svc.rename("legacy", &created.id, "renamed", "new task").await.unwrap();
+        assert_eq!(renamed.name, "renamed");
+        assert_eq!(renamed.task, "new task");
+
+        // Cube received the original empty values at create time and
+        // hasn't been called since.
+        let captured = cube.last_create();
+        assert_eq!(captured.env[ENV_NAME], "");
+        assert_eq!(captured.env[ENV_TASK], "");
+    }
+
+    #[tokio::test]
     async fn create_returns_url_and_injects_managed_env() {
         let (svc, cube, tokens, _secrets, instances) = build().await;
         let mut caller = BTreeMap::new();
@@ -429,6 +541,8 @@ mod tests {
         let created = svc
             .create("legacy", CreateRequest {
                 template_id: "tpl-x".into(),
+                name: None,
+                task: None,
                 env: caller,
                 ttl_seconds: Some(60),
             })
@@ -445,6 +559,11 @@ mod tests {
         assert_eq!(captured.env[ENV_INSTANCE_ID], created.id);
         assert_eq!(captured.env["EXTRA"], "yes");
         assert!(captured.from_snapshot.is_none());
+        // Identity envelope: name + task were unset, so the env carries
+        // empty strings — the agent reads them on first boot and either
+        // seeds itself from blanks or falls through to its own defaults.
+        assert_eq!(captured.env[ENV_NAME], "");
+        assert_eq!(captured.env[ENV_TASK], "");
 
         let resolved = tokens.resolve(&created.proxy_token).await.unwrap().unwrap();
         assert_eq!(resolved.instance_id, created.id);
@@ -463,6 +582,8 @@ mod tests {
         caller.insert(ENV_PROXY_URL.into(), "http://override".into());
         svc.create("legacy", CreateRequest {
             template_id: "tpl".into(),
+                name: None,
+                task: None,
             env: caller,
             ttl_seconds: None,
         })
@@ -478,6 +599,8 @@ mod tests {
         let created = svc
             .create("legacy", CreateRequest {
                 template_id: "tpl".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })
@@ -508,6 +631,8 @@ mod tests {
         let src = svc
             .create("legacy", CreateRequest {
                 template_id: "tpl".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })
@@ -520,6 +645,8 @@ mod tests {
                 template_id: "tpl".into(),
                 snapshot_path: "/var/snaps/snap-1".into(),
                 source_instance_id: Some(src.id.clone()),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })

@@ -141,6 +141,8 @@ mod tests {
         let a = svc
             .create("legacy", CreateRequest {
                 template_id: "t".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: Some(1),
             })
@@ -151,6 +153,8 @@ mod tests {
         let b = svc
             .create("legacy", CreateRequest {
                 template_id: "t".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: Some(1),
             })
@@ -162,6 +166,8 @@ mod tests {
         let c = svc
             .create("legacy", CreateRequest {
                 template_id: "t".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: Some(10_000),
             })

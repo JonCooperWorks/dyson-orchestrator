@@ -165,6 +165,8 @@ mod tests {
             .create(InstanceRow {
                 id: id.into(),
                 owner_id: owner.into(),
+            name: String::new(),
+            task: String::new(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -318,6 +320,8 @@ mod tests {
         let inst = crate::traits::InstanceRow {
             id: other_id.into(),
             owner_id: "someone-else".into(),
+            name: String::new(),
+            task: String::new(),
             cube_sandbox_id: None,
             template_id: "t".into(),
             status: InstanceStatus::Live,

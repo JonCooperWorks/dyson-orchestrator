@@ -43,6 +43,8 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
     Ok(InstanceRow {
         id: row.try_get("id").map_err(map_sqlx)?,
         owner_id: row.try_get("owner_id").map_err(map_sqlx)?,
+        name: row.try_get("name").map_err(map_sqlx)?,
+        task: row.try_get("task").map_err(map_sqlx)?,
         cube_sandbox_id: row.try_get("cube_sandbox_id").map_err(map_sqlx)?,
         template_id: row.try_get("template_id").map_err(map_sqlx)?,
         status,
@@ -66,12 +68,15 @@ impl InstanceStore for SqlxInstanceStore {
         };
         sqlx::query(
             "INSERT INTO instances \
-             (id, owner_id, cube_sandbox_id, template_id, status, bearer_token, pinned, expires_at, \
-              last_active_at, last_probe_at, last_probe_status, created_at, destroyed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token, \
+              pinned, expires_at, last_active_at, last_probe_at, last_probe_status, \
+              created_at, destroyed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.owner_id)
+        .bind(&row.name)
+        .bind(&row.task)
         .bind(&row.cube_sandbox_id)
         .bind(&row.template_id)
         .bind(row.status.as_str())
@@ -191,6 +196,35 @@ impl InstanceStore for SqlxInstanceStore {
         Ok(())
     }
 
+    async fn update_identity(
+        &self,
+        owner_id: &str,
+        id: &str,
+        name: &str,
+        task: &str,
+    ) -> Result<(), StoreError> {
+        // Owner-scoped: a 0-row update for an id that exists but isn't
+        // ours surfaces as NotFound, matching the get_for_owner contract.
+        // owner_id == "*" is the system bypass (TTL sweep, etc.) and is
+        // not intended for tenant-facing flows but kept consistent with
+        // the rest of the store.
+        let result = sqlx::query(
+            "UPDATE instances SET name = ?1, task = ?2 \
+             WHERE id = ?3 AND (?4 = '*' OR owner_id = ?4)",
+        )
+        .bind(name)
+        .bind(task)
+        .bind(id)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn pin(&self, id: &str, pinned: bool, ttl: Option<i64>) -> Result<(), StoreError> {
         let expires_at = if pinned {
             None
@@ -261,6 +295,8 @@ mod tests {
         InstanceRow {
             id: id.to_owned(),
             owner_id: "legacy".into(),
+            name: String::new(),
+            task: String::new(),
             cube_sandbox_id: Some(format!("sb-{id}")),
             template_id: "tpl-1".into(),
             status: InstanceStatus::Live,
@@ -391,6 +427,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_identity_round_trips_and_is_owner_scoped() {
+        let pool = open_in_memory().await.unwrap();
+        let store = SqlxInstanceStore::new(pool);
+        store.create(sample("a")).await.unwrap();
+
+        store.update_identity("legacy", "a", "PR reviewer", "Watch for PRs").await.unwrap();
+        let row = store.get("a").await.unwrap().unwrap();
+        assert_eq!(row.name, "PR reviewer");
+        assert_eq!(row.task, "Watch for PRs");
+
+        // Wrong owner → NotFound (no oracle).
+        let err = store.update_identity("someone-else", "a", "x", "y").await.unwrap_err();
+        assert!(matches!(err, StoreError::NotFound));
+
+        // Unchanged from the failed update.
+        let row = store.get("a").await.unwrap().unwrap();
+        assert_eq!(row.name, "PR reviewer");
     }
 
     #[tokio::test]

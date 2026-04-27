@@ -190,6 +190,10 @@ impl SnapshotService {
                     template_id: source.template_id,
                     snapshot_path: row.path.into(),
                     source_instance_id: Some(row.source_instance_id),
+                    // Carry employee identity across the snapshot/restore
+                    // boundary — same person, fresh sandbox.
+                    name: Some(source.name),
+                    task: Some(source.task),
                     env,
                     ttl_seconds,
                 },
@@ -363,6 +367,8 @@ mod tests {
         let created = isvc
             .create("legacy", CreateRequest {
                 template_id: "t".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })
@@ -383,6 +389,8 @@ mod tests {
         let created = isvc
             .create("legacy", CreateRequest {
                 template_id: "t".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })
@@ -439,6 +447,8 @@ mod tests {
         let alice_inst = isvc
             .create("alice", CreateRequest {
                 template_id: "t".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })
@@ -460,6 +470,8 @@ mod tests {
         let src = isvc
             .create("legacy", CreateRequest {
                 template_id: "t".into(),
+                name: None,
+                task: None,
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })

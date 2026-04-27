@@ -11,7 +11,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::CallerIdentity;
 use crate::error::WardenError;
@@ -24,11 +24,45 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/instances", post(create_instance).get(list_instances))
         .route(
             "/v1/instances/:id",
-            get(get_instance).delete(destroy_instance),
+            get(get_instance).delete(destroy_instance).patch(update_instance),
         )
         .route("/v1/instances/:id/url", get(instance_url))
         .route("/v1/instances/:id/probe", post(probe_instance))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchInstanceBody {
+    /// New display name. Pass null/missing to leave unchanged.
+    #[serde(default)]
+    name: Option<String>,
+    /// New task / mission. Pass null/missing to leave unchanged.
+    #[serde(default)]
+    task: Option<String>,
+}
+
+async fn update_instance(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchInstanceBody>,
+) -> Result<Json<InstanceView>, StatusCode> {
+    // PATCH semantics: missing fields stay unchanged. Read the row to
+    // pick up the existing values for the un-touched fields.
+    let current = match state.instances.get(&caller.user_id, &id).await {
+        Ok(r) => r,
+        Err(e) => return Err(warden_err_to_status(e)),
+    };
+    let new_name = body.name.unwrap_or(current.name);
+    let new_task = body.task.unwrap_or(current.task);
+    match state
+        .instances
+        .rename(&caller.user_id, &id, &new_name, &new_task)
+        .await
+    {
+        Ok(row) => Ok(Json(InstanceView::from(row))),
+        Err(e) => Err(warden_err_to_status(e)),
+    }
 }
 
 async fn create_instance(
@@ -146,6 +180,8 @@ async fn instance_url(
 #[derive(Debug, Serialize)]
 pub struct InstanceView {
     pub id: String,
+    pub name: String,
+    pub task: String,
     pub cube_sandbox_id: Option<String>,
     pub template_id: String,
     pub status: String,
@@ -162,6 +198,8 @@ impl From<InstanceRow> for InstanceView {
     fn from(r: InstanceRow) -> Self {
         Self {
             id: r.id,
+            name: r.name,
+            task: r.task,
             cube_sandbox_id: r.cube_sandbox_id,
             template_id: r.template_id,
             status: r.status.as_str().into(),

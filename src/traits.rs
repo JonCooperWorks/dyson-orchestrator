@@ -150,6 +150,16 @@ pub enum ProbeResult {
 pub struct InstanceRow {
     pub id: String,
     pub owner_id: String,
+    /// Human-readable label ("PR reviewer for foo/bar"). Optional —
+    /// stored as empty string when unset. Surfaced as `WARDEN_NAME` in
+    /// the sandbox env at create/restore time.
+    pub name: String,
+    /// Free-text mission statement. Surfaced as `WARDEN_TASK` in the
+    /// sandbox env at create/restore time. Per the design: warden
+    /// seeds this on first boot; the agent (Dyson) owns identity from
+    /// then on, so subsequent edits in warden don't propagate to a
+    /// running sandbox without an explicit re-onboard.
+    pub task: String,
     pub cube_sandbox_id: Option<String>,
     pub template_id: String,
     pub status: InstanceStatus,
@@ -254,6 +264,17 @@ pub trait InstanceStore: Send + Sync {
     /// sandbox id is only known after the Cube call returns.
     async fn set_cube_sandbox_id(&self, id: &str, sandbox_id: &str) -> Result<(), StoreError>;
     async fn touch(&self, id: &str) -> Result<(), StoreError>;
+    /// Owner-scoped rename. `name` and `task` are both replaced; pass
+    /// the existing values for fields that aren't changing. Returns
+    /// `NotFound` if the row exists but belongs to someone else (no
+    /// cross-tenant existence oracle).
+    async fn update_identity(
+        &self,
+        owner_id: &str,
+        id: &str,
+        name: &str,
+        task: &str,
+    ) -> Result<(), StoreError>;
     async fn pin(&self, id: &str, pinned: bool, ttl: Option<i64>) -> Result<(), StoreError>;
     async fn record_probe(&self, id: &str, status: ProbeResult) -> Result<(), StoreError>;
     async fn expired(&self, now: i64) -> Result<Vec<InstanceRow>, StoreError>;
