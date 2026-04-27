@@ -74,10 +74,12 @@ function InstanceList({ selectedId }) {
           <li className="rail-empty muted small">no instances. click "new" to spin one up.</li>
         ) : order.map(id => {
           const row = byId[id];
+          const label = row.name && row.name.trim() ? row.name : `(unnamed) ${shortId(id)}`;
           return (
             <li key={id} className={`rail-row ${selectedId === id ? 'selected' : ''}`}>
               <a href={`#/i/${encodeURIComponent(id)}`}>
-                <div className="rail-row-id">{id}</div>
+                <div className="rail-row-name">{label}</div>
+                <div className="rail-row-id muted small">{shortId(id)}</div>
                 <div className="rail-row-meta">
                   <StatusBadge status={row.status}/>
                   <span className="muted small">{row.template_id}</span>
@@ -100,12 +102,19 @@ function StatusBadge({ status }) {
   return <span className={`badge badge-${cls}`}>{status}</span>;
 }
 
-// ─── Create modal ─────────────────────────────────────────────────
+// ─── Create modal — onboarding-shaped ──────────────────────────────
+//
+// Each Dyson is an employee.  The form reads top-down like an offer
+// letter: who they are, what they do, then the boring infrastructure
+// bits (template, ttl) collapsed under "advanced".
 
 function CreateModal({ onClose, onCreated }) {
   const { client } = useApi();
-  const [templateId, setTemplateId] = React.useState('');
+  const [name, setName] = React.useState('');
+  const [task, setTask] = React.useState('');
+  const [templateId, setTemplateId] = React.useState('dyson-default');
   const [ttlSeconds, setTtlSeconds] = React.useState('');
+  const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [created, setCreated] = React.useState(null);
@@ -116,7 +125,12 @@ function CreateModal({ onClose, onCreated }) {
     setSubmitting(true);
     setError(null);
     try {
-      const req = { template_id: templateId.trim(), env: {} };
+      const req = {
+        template_id: templateId.trim(),
+        env: {},
+      };
+      if (name.trim()) req.name = name.trim();
+      if (task.trim()) req.task = task.trim();
       const ttl = ttlSeconds.trim() ? Number(ttlSeconds) : null;
       if (Number.isFinite(ttl) && ttl > 0) req.ttl_seconds = ttl;
       const result = await client.createInstance(req);
@@ -131,17 +145,19 @@ function CreateModal({ onClose, onCreated }) {
 
   if (created) {
     return (
-      <ModalShell onClose={onClose} title="instance created">
+      <ModalShell onClose={onClose} title="employee onboarded">
         <p className="small">
-          Save the proxy token now — it won't be shown again.
+          Save these tokens now — they won't be shown again.  The proxy
+          token is what every <code>/llm/*</code> call from inside the
+          sandbox carries.
         </p>
         <KvField label="id" value={created.id}/>
-        <KvField label="url" value={created.url}/>
+        <KvField label="sandbox url" value={created.url}/>
         <KvField label="bearer token" value={created.bearer_token}/>
         <KvField label="proxy token" value={created.proxy_token}/>
         <div className="modal-actions">
-          <a className="btn" href={`#/i/${encodeURIComponent(created.id)}`} onClick={onClose}>
-            open detail →
+          <a className="btn btn-primary" href={`#/i/${encodeURIComponent(created.id)}`} onClick={onClose}>
+            open profile →
           </a>
           <button className="btn btn-ghost" onClick={onClose}>close</button>
         </div>
@@ -150,31 +166,65 @@ function CreateModal({ onClose, onCreated }) {
   }
 
   return (
-    <ModalShell onClose={onClose} title="new instance">
+    <ModalShell onClose={onClose} title="hire a new dyson">
       <form onSubmit={submit} className="form">
         <label className="field">
-          <span>template id</span>
+          <span>name</span>
           <input
-            value={templateId}
-            onChange={e => setTemplateId(e.target.value)}
-            placeholder="dyson-default"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="PR reviewer for foo/bar"
             autoFocus
-            required
           />
         </label>
         <label className="field">
-          <span>ttl (seconds, optional)</span>
-          <input
-            value={ttlSeconds}
-            onChange={e => setTtlSeconds(e.target.value)}
-            placeholder="86400"
-            inputMode="numeric"
+          <span>task</span>
+          <textarea
+            className="textarea"
+            value={task}
+            onChange={e => setTask(e.target.value)}
+            placeholder="What this employee does, in prose. Example:\n\nWatch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge."
+            rows={6}
           />
+          <span className="hint muted small">
+            The agent reads this on first boot as <code>WARDEN_TASK</code>.
+            You can edit it later, but changes don't propagate to a
+            running employee.
+          </span>
         </label>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => setShowAdvanced(s => !s)}
+        >
+          {showAdvanced ? '▾ advanced' : '▸ advanced'}
+        </button>
+        {showAdvanced ? (
+          <>
+            <label className="field">
+              <span>template id</span>
+              <input
+                value={templateId}
+                onChange={e => setTemplateId(e.target.value)}
+                placeholder="dyson-default"
+                required
+              />
+            </label>
+            <label className="field">
+              <span>ttl (seconds, optional)</span>
+              <input
+                value={ttlSeconds}
+                onChange={e => setTtlSeconds(e.target.value)}
+                placeholder="86400"
+                inputMode="numeric"
+              />
+            </label>
+          </>
+        ) : null}
         {error ? <div className="error">{error}</div> : null}
         <div className="modal-actions">
           <button type="submit" className="btn btn-primary" disabled={submitting}>
-            {submitting ? 'creating…' : 'create'}
+            {submitting ? 'hiring…' : 'hire'}
           </button>
           <button type="button" className="btn btn-ghost" onClick={onClose}>cancel</button>
         </div>
@@ -277,18 +327,44 @@ function InstanceDetail({ id }) {
     }
   };
 
+  const [editing, setEditing] = React.useState(false);
+  const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
+  const canOpen = row.status === 'live' && !!row.cube_sandbox_id;
+
   return (
     <main className="detail-pane">
       <header className="detail-header">
-        <div>
-          <h2 className="detail-id">{row.id}</h2>
+        <div className="employee-card">
+          <h2 className="employee-name">{displayName}</h2>
           <div className="detail-sub muted small">
-            template <code>{row.template_id}</code> ·{' '}
+            <code className="mono-sm">{row.id}</code> ·{' '}
             <StatusBadge status={row.status}/>{' '}
             {row.pinned ? <span className="badge badge-info">pinned</span> : null}
+            {' · '}template <code>{row.template_id}</code>
+          </div>
+          <div className="employee-task">
+            {row.task && row.task.trim() ? (
+              <p className="task-prose">{row.task}</p>
+            ) : (
+              <p className="muted small">
+                no task description — click <em>edit</em> to write one.
+              </p>
+            )}
           </div>
         </div>
         <div className="detail-actions">
+          <a
+            className={`btn btn-primary ${canOpen ? '' : 'btn-disabled'}`}
+            href={canOpen ? `/d/${encodeURIComponent(id)}/` : undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-disabled={!canOpen}
+            onClick={(e) => { if (!canOpen) e.preventDefault(); }}
+            title={canOpen ? 'open this dyson in a new tab' : 'sandbox is not live'}
+          >
+            open ↗
+          </a>
+          <button className="btn btn-ghost" onClick={() => setEditing(true)} disabled={busy}>edit</button>
           <button className="btn btn-ghost" onClick={probe} disabled={busy}>probe</button>
           <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>
             destroy
@@ -314,7 +390,78 @@ function InstanceDetail({ id }) {
 
       <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
       <SecretsPanel instanceId={id}/>
+
+      {editing ? (
+        <EditEmployeeModal
+          instance={row}
+          onClose={() => setEditing(false)}
+          onSaved={(updated) => {
+            upsertInstance(updated);
+            setEditing(false);
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+// ─── Edit name + task ─────────────────────────────────────────────
+
+function EditEmployeeModal({ instance, onClose, onSaved }) {
+  const { client } = useApi();
+  const [name, setName] = React.useState(instance.name || '');
+  const [task, setTask] = React.useState(instance.task || '');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSubmitting(true); setError(null);
+    try {
+      const updated = await client.updateInstance(instance.id, { name, task });
+      onSaved && onSaved(updated);
+    } catch (err) {
+      setError(err?.detail || err?.message || 'save failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="edit employee">
+      <form onSubmit={submit} className="form">
+        <label className="field">
+          <span>name</span>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="PR reviewer for foo/bar"
+            autoFocus
+          />
+        </label>
+        <label className="field">
+          <span>task</span>
+          <textarea
+            className="textarea"
+            value={task}
+            onChange={e => setTask(e.target.value)}
+            rows={6}
+          />
+          <span className="hint muted small">
+            Saving updates warden's record only.  A running employee
+            keeps its current self-knowledge file (SOUL.md) — the new
+            task takes effect on the next restore or recreate.
+          </span>
+        </label>
+        {error ? <div className="error">{error}</div> : null}
+        <div className="modal-actions">
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            {submitting ? 'saving…' : 'save'}
+          </button>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>cancel</button>
+        </div>
+      </form>
+    </ModalShell>
   );
 }
 
@@ -588,6 +735,13 @@ function fmtTime(secs) {
   if (!secs) return '—';
   try { return new Date(secs * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z'); }
   catch { return String(secs); }
+}
+
+// Trim a UUID for display.  Full id is still on the detail page, but
+// list rows + breadcrumbs read better with the first 8 chars.
+function shortId(id) {
+  if (!id) return '';
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
 }
 
 function probeLabel(p) {

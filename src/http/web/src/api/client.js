@@ -68,6 +68,19 @@ export class WardenClient {
     return this._json(`/v1/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
+  /// PATCH the employee profile.  Body fields are optional — pass only
+  /// what you want changed.
+  updateInstance(id, { name, task } = {}) {
+    const body = {};
+    if (typeof name === 'string') body.name = name;
+    if (typeof task === 'string') body.task = task;
+    return this._json(`/v1/instances/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
   instanceUrl(id) {
     return this._json(`/v1/instances/${encodeURIComponent(id)}/url`);
   }
