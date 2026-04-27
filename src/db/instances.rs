@@ -42,6 +42,7 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
     };
     Ok(InstanceRow {
         id: row.try_get("id").map_err(map_sqlx)?,
+        owner_id: row.try_get("owner_id").map_err(map_sqlx)?,
         cube_sandbox_id: row.try_get("cube_sandbox_id").map_err(map_sqlx)?,
         template_id: row.try_get("template_id").map_err(map_sqlx)?,
         status,
@@ -65,11 +66,12 @@ impl InstanceStore for SqlxInstanceStore {
         };
         sqlx::query(
             "INSERT INTO instances \
-             (id, cube_sandbox_id, template_id, status, bearer_token, pinned, expires_at, \
+             (id, owner_id, cube_sandbox_id, template_id, status, bearer_token, pinned, expires_at, \
               last_active_at, last_probe_at, last_probe_status, created_at, destroyed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
+        .bind(&row.owner_id)
         .bind(&row.cube_sandbox_id)
         .bind(&row.template_id)
         .bind(row.status.as_str())
@@ -99,14 +101,43 @@ impl InstanceStore for SqlxInstanceStore {
         }
     }
 
-    async fn list(&self, filter: ListFilter) -> Result<Vec<InstanceRow>, StoreError> {
+    async fn get_for_owner(
+        &self,
+        owner_id: &str,
+        id: &str,
+    ) -> Result<Option<InstanceRow>, StoreError> {
+        // owner_id == "*" is the system-internal bypass used by TTL sweep
+        // and the proxy. User-facing routes never pass it.
+        let row = sqlx::query(
+            "SELECT * FROM instances WHERE id = ?1 AND (?2 = '*' OR owner_id = ?2)",
+        )
+        .bind(id)
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        match row {
+            Some(r) => Ok(Some(row_to_instance(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn list(
+        &self,
+        owner_id: &str,
+        filter: ListFilter,
+    ) -> Result<Vec<InstanceRow>, StoreError> {
         let status_filter: Option<String> = filter.status.map(|s| s.as_str().to_owned());
+        let all_owners = if owner_id == "*" { 1i64 } else { 0i64 };
         let rows = sqlx::query(
             "SELECT * FROM instances \
-             WHERE (?1 IS NULL OR status = ?1) \
-               AND (?2 = 1 OR status != 'destroyed') \
+             WHERE (?1 = 1 OR owner_id = ?2) \
+               AND (?3 IS NULL OR status = ?3) \
+               AND (?4 = 1 OR status != 'destroyed') \
              ORDER BY created_at DESC",
         )
+        .bind(all_owners)
+        .bind(owner_id)
         .bind(status_filter)
         .bind(filter.include_destroyed as i64)
         .fetch_all(&self.pool)
@@ -229,6 +260,7 @@ mod tests {
     fn sample(id: &str) -> InstanceRow {
         InstanceRow {
             id: id.to_owned(),
+            owner_id: "legacy".into(),
             cube_sandbox_id: Some(format!("sb-{id}")),
             template_id: "tpl-1".into(),
             status: InstanceStatus::Live,
@@ -344,15 +376,18 @@ mod tests {
         b.status = InstanceStatus::Destroyed;
         store.create(b).await.unwrap();
 
-        let live_only = store.list(ListFilter::default()).await.unwrap();
+        let live_only = store.list("*", ListFilter::default()).await.unwrap();
         assert_eq!(live_only.len(), 1);
         assert_eq!(live_only[0].id, "a");
 
         let all = store
-            .list(ListFilter {
-                status: None,
-                include_destroyed: true,
-            })
+            .list(
+                "*",
+                ListFilter {
+                    status: None,
+                    include_destroyed: true,
+                },
+            )
             .await
             .unwrap();
         assert_eq!(all.len(), 2);

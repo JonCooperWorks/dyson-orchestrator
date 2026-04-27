@@ -32,6 +32,12 @@ pub const ENV_PROXY_URL: &str = "WARDEN_PROXY_URL";
 pub const ENV_PROXY_TOKEN: &str = "WARDEN_PROXY_TOKEN";
 pub const ENV_INSTANCE_ID: &str = "WARDEN_INSTANCE_ID";
 
+/// Sentinel `owner_id` used by system-internal flows (TTL sweeper, probe
+/// loop, proxy resolving via `proxy_token`) to bypass tenant filtering.
+/// User-facing routes never pass this — the auth middleware resolves the
+/// caller's real `user_id` and that's what flows in.
+pub const SYSTEM_OWNER: &str = "*";
+
 #[derive(Clone)]
 pub struct InstanceService {
     cube: Arc<dyn CubeClient>,
@@ -63,7 +69,11 @@ impl InstanceService {
         }
     }
 
-    pub async fn create(&self, req: CreateRequest) -> Result<CreatedInstance, WardenError> {
+    pub async fn create(
+        &self,
+        owner_id: &str,
+        req: CreateRequest,
+    ) -> Result<CreatedInstance, WardenError> {
         let id = Uuid::new_v4().simple().to_string();
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
@@ -74,6 +84,7 @@ impl InstanceService {
         // destroyed to keep state consistent.
         let row = InstanceRow {
             id: id.clone(),
+            owner_id: owner_id.to_owned(),
             cube_sandbox_id: None,
             template_id: req.template_id.clone(),
             status: InstanceStatus::Cold,
@@ -135,32 +146,46 @@ impl InstanceService {
         })
     }
 
-    pub async fn get(&self, id: &str) -> Result<InstanceRow, WardenError> {
+    /// Owner-scoped lookup: returns NotFound for rows the user doesn't own.
+    pub async fn get(&self, owner_id: &str, id: &str) -> Result<InstanceRow, WardenError> {
         self.instances
-            .get(id)
+            .get_for_owner(owner_id, id)
             .await?
             .ok_or(WardenError::NotFound)
     }
 
-    pub async fn list(&self, filter: ListFilter) -> Result<Vec<InstanceRow>, WardenError> {
-        Ok(self.instances.list(filter).await?)
+    pub async fn list(
+        &self,
+        owner_id: &str,
+        filter: ListFilter,
+    ) -> Result<Vec<InstanceRow>, WardenError> {
+        Ok(self.instances.list(owner_id, filter).await?)
     }
 
     /// Run a single probe synchronously, persist the result on the row, and
     /// hand it back to the caller. Used by `POST /v1/instances/:id/probe`.
     pub async fn probe(
         &self,
+        owner_id: &str,
         prober: &dyn HealthProber,
         id: &str,
     ) -> Result<ProbeResult, WardenError> {
-        let row = self.instances.get(id).await?.ok_or(WardenError::NotFound)?;
+        let row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(WardenError::NotFound)?;
         let result = prober.probe(&row).await;
         self.instances.record_probe(id, result.clone()).await?;
         Ok(result)
     }
 
-    pub async fn destroy(&self, id: &str) -> Result<(), WardenError> {
-        let row = self.instances.get(id).await?.ok_or(WardenError::NotFound)?;
+    pub async fn destroy(&self, owner_id: &str, id: &str) -> Result<(), WardenError> {
+        let row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(WardenError::NotFound)?;
         if let Some(sb) = &row.cube_sandbox_id {
             self.cube.destroy_sandbox(sb).await?;
         }
@@ -175,7 +200,11 @@ impl InstanceService {
     /// Carries `source` instance secrets across by writing them into the new
     /// instance's `instance_secrets` rows. The caller may override or add via
     /// `req.env`.
-    pub async fn restore(&self, req: RestoreRequest) -> Result<CreatedInstance, WardenError> {
+    pub async fn restore(
+        &self,
+        owner_id: &str,
+        req: RestoreRequest,
+    ) -> Result<CreatedInstance, WardenError> {
         let id = Uuid::new_v4().simple().to_string();
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
@@ -189,6 +218,7 @@ impl InstanceService {
 
         let row = InstanceRow {
             id: id.clone(),
+            owner_id: owner_id.to_owned(),
             cube_sandbox_id: None,
             template_id: req.template_id.clone(),
             status: InstanceStatus::Cold,
@@ -397,7 +427,7 @@ mod tests {
         let mut caller = BTreeMap::new();
         caller.insert("EXTRA".into(), "yes".into());
         let created = svc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "tpl-x".into(),
                 env: caller,
                 ttl_seconds: Some(60),
@@ -431,7 +461,7 @@ mod tests {
         let (svc, cube, _tokens, _secrets, _instances) = build().await;
         let mut caller = BTreeMap::new();
         caller.insert(ENV_PROXY_URL.into(), "http://override".into());
-        svc.create(CreateRequest {
+        svc.create("legacy", CreateRequest {
             template_id: "tpl".into(),
             env: caller,
             ttl_seconds: None,
@@ -446,7 +476,7 @@ mod tests {
     async fn destroy_revokes_proxy_tokens_and_marks_destroyed() {
         let (svc, cube, tokens, _secrets, instances) = build().await;
         let created = svc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "tpl".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: None,
@@ -455,7 +485,7 @@ mod tests {
             .unwrap();
         assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_some());
 
-        svc.destroy(&created.id).await.unwrap();
+        svc.destroy("legacy", &created.id).await.unwrap();
         assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_none());
 
         let row = instances.get(&created.id).await.unwrap().unwrap();
@@ -468,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn destroy_unknown_returns_not_found() {
         let (svc, _cube, _tokens, _secrets, _instances) = build().await;
-        let err = svc.destroy("nope").await.expect_err("must error");
+        let err = svc.destroy("legacy", "nope").await.expect_err("must error");
         matches!(err, WardenError::NotFound);
     }
 
@@ -476,7 +506,7 @@ mod tests {
     async fn restore_carries_existing_secrets_and_uses_snapshot_path() {
         let (svc, cube, _tokens, secrets, _instances) = build().await;
         let src = svc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "tpl".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: None,
@@ -486,7 +516,7 @@ mod tests {
         secrets.put(&src.id, "K", "v-existing").await.unwrap();
 
         let restored = svc
-            .restore(RestoreRequest {
+            .restore("legacy", RestoreRequest {
                 template_id: "tpl".into(),
                 snapshot_path: "/var/snaps/snap-1".into(),
                 source_instance_id: Some(src.id.clone()),

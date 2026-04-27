@@ -114,6 +114,7 @@ mod tests {
         SqlxInstanceStore::new(pool)
             .create(InstanceRow {
                 id: id.into(),
+                owner_id: "legacy".into(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,

@@ -95,6 +95,7 @@ async fn promote_pull_delete_round_trip_against_minio() {
 
     let row = SnapshotRow {
         id: snap_id.clone(),
+        owner_id: "legacy".into(),
         source_instance_id: "i".into(),
         parent_snapshot_id: None,
         kind: SnapshotKind::Backup,

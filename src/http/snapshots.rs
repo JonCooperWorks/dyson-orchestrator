@@ -41,7 +41,8 @@ async fn snapshot(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<SnapshotView>), StatusCode> {
-    match state.snapshots.snapshot(&id).await {
+    let owner = crate::auth::caller_owner_placeholder();
+    match state.snapshots.snapshot(owner, &id).await {
         Ok(row) => Ok((StatusCode::CREATED, Json(SnapshotView::from(row)))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -51,7 +52,8 @@ async fn backup(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<SnapshotView>), StatusCode> {
-    match state.snapshots.backup(&id).await {
+    let owner = crate::auth::caller_owner_placeholder();
+    match state.snapshots.backup(owner, &id).await {
         Ok(row) => Ok((StatusCode::CREATED, Json(SnapshotView::from(row)))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -61,7 +63,8 @@ async fn pull(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SnapshotView>, StatusCode> {
-    match state.snapshots.pull(&id).await {
+    let owner = crate::auth::caller_owner_placeholder();
+    match state.snapshots.pull(owner, &id).await {
         Ok(row) => Ok(Json(SnapshotView::from(row))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -72,9 +75,10 @@ async fn restore(
     Path(_source_id): Path<String>,
     Json(body): Json<RestoreBody>,
 ) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
+    let owner = crate::auth::caller_owner_placeholder();
     match state
         .snapshots
-        .restore(&body.snapshot_id, body.ttl_seconds, body.env)
+        .restore(owner, &body.snapshot_id, body.ttl_seconds, body.env)
         .await
     {
         Ok(c) => Ok((StatusCode::CREATED, Json(c))),

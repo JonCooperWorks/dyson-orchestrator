@@ -330,6 +330,7 @@ mod tests {
         store
             .create(InstanceRow {
                 id: id.clone(),
+                owner_id: "legacy".into(),
                 cube_sandbox_id: Some("sb-1".into()),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,

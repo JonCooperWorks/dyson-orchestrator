@@ -20,6 +20,7 @@ pub mod policies;
 pub mod secrets;
 pub mod snapshots;
 pub mod tokens;
+pub mod users;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 

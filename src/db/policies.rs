@@ -50,7 +50,7 @@ impl PolicyStore for SqlitePolicyStore {
     async fn get(&self, subject: &str) -> Result<Option<PolicyRecord>, StoreError> {
         let row = sqlx::query(
             "SELECT allowed_providers, allowed_models, daily_token_budget, monthly_usd_budget, rps_limit \
-             FROM instance_policies WHERE instance_id = ?",
+             FROM user_policies WHERE user_id = ?",
         )
         .bind(subject)
         .fetch_optional(&self.pool)
@@ -73,10 +73,10 @@ impl PolicyStore for SqlitePolicyStore {
 
     async fn put(&self, subject: &str, policy: &PolicyRecord) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO instance_policies \
-             (instance_id, allowed_providers, allowed_models, daily_token_budget, monthly_usd_budget, rps_limit) \
+            "INSERT INTO user_policies \
+             (user_id, allowed_providers, allowed_models, daily_token_budget, monthly_usd_budget, rps_limit) \
              VALUES (?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(instance_id) DO UPDATE SET \
+             ON CONFLICT(user_id) DO UPDATE SET \
                 allowed_providers = excluded.allowed_providers, \
                 allowed_models = excluded.allowed_models, \
                 daily_token_budget = excluded.daily_token_budget, \
@@ -99,34 +99,15 @@ impl PolicyStore for SqlitePolicyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
-    use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
 
-    async fn seed(pool: &SqlitePool, id: &str) {
-        SqlxInstanceStore::new(pool.clone())
-            .create(InstanceRow {
-                id: id.into(),
-                cube_sandbox_id: None,
-                template_id: "t".into(),
-                status: InstanceStatus::Live,
-                bearer_token: "b".into(),
-                pinned: false,
-                expires_at: None,
-                last_active_at: 0,
-                last_probe_at: None,
-                last_probe_status: None,
-                created_at: 0,
-                destroyed_at: None,
-            })
-            .await
-            .unwrap();
-    }
+    /// The migration seeds a `legacy` user; tests key policies on that
+    /// existing FK target.
+    const TEST_USER: &str = "legacy";
 
     #[tokio::test]
     async fn round_trip() {
         let pool = open_in_memory().await.unwrap();
-        seed(&pool, "i1").await;
         let store = SqlitePolicyStore::new(pool);
         let p = PolicyRecord {
             allowed_providers: vec!["openai".into(), "anthropic".into()],
@@ -135,8 +116,8 @@ mod tests {
             monthly_usd_budget: Some(50.0),
             rps_limit: Some(10),
         };
-        store.put("i1", &p).await.unwrap();
-        let got = store.get("i1").await.unwrap().unwrap();
+        store.put(TEST_USER, &p).await.unwrap();
+        let got = store.get(TEST_USER).await.unwrap().unwrap();
         assert_eq!(got.allowed_providers, vec!["openai".to_string(), "anthropic".into()]);
         assert_eq!(got.allowed_models, vec!["*".to_string()]);
         assert_eq!(got.daily_token_budget, Some(100_000));
@@ -147,7 +128,6 @@ mod tests {
     #[tokio::test]
     async fn upsert_overwrites() {
         let pool = open_in_memory().await.unwrap();
-        seed(&pool, "i1").await;
         let store = SqlitePolicyStore::new(pool);
         let mut p = PolicyRecord {
             allowed_providers: vec!["openai".into()],
@@ -156,11 +136,11 @@ mod tests {
             monthly_usd_budget: None,
             rps_limit: None,
         };
-        store.put("i1", &p).await.unwrap();
+        store.put(TEST_USER, &p).await.unwrap();
         p.allowed_providers = vec!["anthropic".into()];
         p.rps_limit = Some(5);
-        store.put("i1", &p).await.unwrap();
-        let got = store.get("i1").await.unwrap().unwrap();
+        store.put(TEST_USER, &p).await.unwrap();
+        let got = store.get(TEST_USER).await.unwrap().unwrap();
         assert_eq!(got.allowed_providers, vec!["anthropic".to_string()]);
         assert_eq!(got.rps_limit, Some(5));
     }
@@ -168,8 +148,7 @@ mod tests {
     #[tokio::test]
     async fn missing_returns_none() {
         let pool = open_in_memory().await.unwrap();
-        seed(&pool, "i1").await;
         let store = SqlitePolicyStore::new(pool);
-        assert!(store.get("i1").await.unwrap().is_none());
+        assert!(store.get(TEST_USER).await.unwrap().is_none());
     }
 }

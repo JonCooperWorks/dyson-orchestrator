@@ -122,6 +122,7 @@ mod tests {
         instances_store
             .create(InstanceRow {
                 id: id.clone(),
+                owner_id: "legacy".into(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,

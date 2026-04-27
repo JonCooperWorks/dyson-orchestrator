@@ -25,6 +25,7 @@ fn row_to_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<SnapshotRow, StoreEr
         .ok_or_else(|| StoreError::Malformed(format!("kind={kind_text}")))?;
     Ok(SnapshotRow {
         id: row.try_get("id").map_err(map_sqlx)?,
+        owner_id: row.try_get("owner_id").map_err(map_sqlx)?,
         source_instance_id: row.try_get("source_instance_id").map_err(map_sqlx)?,
         parent_snapshot_id: row.try_get("parent_snapshot_id").map_err(map_sqlx)?,
         kind,
@@ -53,10 +54,11 @@ impl SnapshotStore for SqliteSnapshotStore {
     async fn insert(&self, row: &SnapshotRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO snapshots \
-             (id, source_instance_id, parent_snapshot_id, kind, path, host_ip, remote_uri, size_bytes, created_at, deleted_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, owner_id, source_instance_id, parent_snapshot_id, kind, path, host_ip, remote_uri, size_bytes, created_at, deleted_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
+        .bind(&row.owner_id)
         .bind(&row.source_instance_id)
         .bind(&row.parent_snapshot_id)
         .bind(row.kind.as_str())
@@ -147,6 +149,7 @@ mod tests {
         store
             .create(InstanceRow {
                 id: id.into(),
+                owner_id: "legacy".into(),
                 cube_sandbox_id: None,
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -166,6 +169,7 @@ mod tests {
     fn snap(id: &str, parent: Option<&str>, source: &str) -> SnapshotRow {
         SnapshotRow {
             id: id.into(),
+            owner_id: "legacy".into(),
             source_instance_id: source.into(),
             parent_snapshot_id: parent.map(String::from),
             kind: SnapshotKind::Manual,

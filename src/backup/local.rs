@@ -96,6 +96,7 @@ mod tests {
     fn snap() -> SnapshotRow {
         SnapshotRow {
             id: "snap-1".into(),
+            owner_id: "legacy".into(),
             source_instance_id: "i".into(),
             parent_snapshot_id: None,
             kind: SnapshotKind::Manual,

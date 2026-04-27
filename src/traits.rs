@@ -9,6 +9,80 @@ use crate::error::{BackupError, CubeError, StoreError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum UserStatus {
+    /// Auto-created from a fresh OIDC `sub` but not yet approved by an
+    /// admin. The auth middleware returns 403 for inactive users.
+    Inactive,
+    /// Approved by an admin. Normal access.
+    Active,
+    /// Disabled by an admin. Same observable effect as Inactive but kept
+    /// distinct so the UI can show "needs approval" vs "blocked".
+    Suspended,
+}
+
+impl UserStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "inactive" => Some(Self::Inactive),
+            "active" => Some(Self::Active),
+            "suspended" => Some(Self::Suspended),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserRow {
+    pub id: String,
+    pub subject: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub status: UserStatus,
+    pub created_at: i64,
+    pub activated_at: Option<i64>,
+    pub last_seen_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserApiKey {
+    pub token: String,
+    pub user_id: String,
+    pub label: Option<String>,
+    pub created_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+#[async_trait]
+pub trait UserStore: Send + Sync {
+    /// Create a brand-new row. The caller is responsible for the id (uuid).
+    async fn create(&self, row: UserRow) -> Result<(), StoreError>;
+    async fn get(&self, id: &str) -> Result<Option<UserRow>, StoreError>;
+    async fn get_by_subject(&self, subject: &str) -> Result<Option<UserRow>, StoreError>;
+    async fn list(&self) -> Result<Vec<UserRow>, StoreError>;
+    async fn set_status(&self, id: &str, status: UserStatus) -> Result<(), StoreError>;
+    async fn touch_last_seen(&self, id: &str) -> Result<(), StoreError>;
+
+    /// Mint an opaque bearer for `user_id`. Used by CI/admin paths that
+    /// can't do an OIDC flow.
+    async fn mint_api_key(
+        &self,
+        user_id: &str,
+        label: Option<&str>,
+    ) -> Result<String, StoreError>;
+    async fn resolve_api_key(&self, token: &str) -> Result<Option<UserApiKey>, StoreError>;
+    async fn revoke_api_key(&self, token: &str) -> Result<(), StoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InstanceStatus {
     Live,
     Paused,
@@ -75,6 +149,7 @@ pub enum ProbeResult {
 #[derive(Debug, Clone)]
 pub struct InstanceRow {
     pub id: String,
+    pub owner_id: String,
     pub cube_sandbox_id: Option<String>,
     pub template_id: String,
     pub status: InstanceStatus,
@@ -91,6 +166,7 @@ pub struct InstanceRow {
 #[derive(Debug, Clone)]
 pub struct SnapshotRow {
     pub id: String,
+    pub owner_id: String,
     pub source_instance_id: String,
     pub parent_snapshot_id: Option<String>,
     pub kind: SnapshotKind,
@@ -154,8 +230,24 @@ pub trait CubeClient: Send + Sync {
 #[async_trait]
 pub trait InstanceStore: Send + Sync {
     async fn create(&self, row: InstanceRow) -> Result<(), StoreError>;
+    /// Look up by id without an owner filter. Reserved for system-internal
+    /// flows (TTL sweep, probe loop, proxy resolving an instance by its
+    /// proxy_token) where the caller has already authorised the access.
+    /// Tenant-facing routes use [`get_for_owner`].
     async fn get(&self, id: &str) -> Result<Option<InstanceRow>, StoreError>;
-    async fn list(&self, filter: ListFilter) -> Result<Vec<InstanceRow>, StoreError>;
+    /// Owner-scoped lookup: returns `Ok(None)` for rows not owned by
+    /// `owner_id` even if the id matches some other tenant's row.
+    async fn get_for_owner(
+        &self,
+        owner_id: &str,
+        id: &str,
+    ) -> Result<Option<InstanceRow>, StoreError>;
+    /// Owner-scoped list. `owner_id == "*"` is god-mode (admin only).
+    async fn list(
+        &self,
+        owner_id: &str,
+        filter: ListFilter,
+    ) -> Result<Vec<InstanceRow>, StoreError>;
     async fn update_status(&self, id: &str, status: InstanceStatus) -> Result<(), StoreError>;
     /// Set the Cube-side sandbox id once Cube has assigned one. Needed
     /// because the row must exist before `TokenStore::mint` (FK), but the

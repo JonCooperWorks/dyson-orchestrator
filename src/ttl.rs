@@ -26,7 +26,7 @@ pub async fn run_once(instances: &dyn InstanceStore, service: &InstanceService) 
         }
     };
     for row in expired {
-        if let Err(e) = service.destroy(&row.id).await {
+        if let Err(e) = service.destroy(crate::instance::SYSTEM_OWNER, &row.id).await {
             tracing::warn!(
                 error = %e,
                 instance = %row.id,
@@ -139,7 +139,7 @@ mod tests {
 
         // a: unpinned, will expire shortly
         let a = svc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "t".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: Some(1),
@@ -149,7 +149,7 @@ mod tests {
 
         // b: pinned, must NOT be destroyed even though TTL is 1
         let b = svc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "t".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: Some(1),
@@ -160,7 +160,7 @@ mod tests {
 
         // c: long TTL, must NOT be destroyed
         let c = svc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "t".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: Some(10_000),

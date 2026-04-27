@@ -126,10 +126,13 @@ async fn run_once(
     counters: &Mutex<UnreachableCounters>,
 ) {
     let rows = match instances
-        .list(ListFilter {
-            status: Some(InstanceStatus::Live),
-            include_destroyed: false,
-        })
+        .list(
+            "*",
+            ListFilter {
+                status: Some(InstanceStatus::Live),
+                include_destroyed: false,
+            },
+        )
         .await
     {
         Ok(r) => r,
@@ -218,6 +221,7 @@ mod tests {
         store
             .create(InstanceRow {
                 id: id.into(),
+                owner_id: "legacy".into(),
                 cube_sandbox_id: Some(format!("sb-{id}")),
                 template_id: "t".into(),
                 status: InstanceStatus::Live,
@@ -287,6 +291,7 @@ mod tests {
         store
             .create(InstanceRow {
                 id: "d1".into(),
+                owner_id: "legacy".into(),
                 cube_sandbox_id: Some("sb-d1".into()),
                 template_id: "t".into(),
                 status: InstanceStatus::Destroyed,

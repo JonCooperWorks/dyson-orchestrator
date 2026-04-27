@@ -34,7 +34,7 @@ async fn create_instance(
     State(state): State<AppState>,
     Json(req): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
-    match state.instances.create(req).await {
+    match state.instances.create(crate::auth::caller_owner_placeholder(), req).await {
         Ok(c) => Ok((StatusCode::CREATED, Json(c))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -60,7 +60,7 @@ async fn list_instances(
         status,
         include_destroyed,
     };
-    match state.instances.list(filter).await {
+    match state.instances.list(crate::auth::caller_owner_placeholder(), filter).await {
         Ok(rows) => Ok(Json(rows.into_iter().map(InstanceView::from).collect())),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -83,7 +83,7 @@ async fn get_instance(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<InstanceView>, StatusCode> {
-    match state.instances.get(&id).await {
+    match state.instances.get(crate::auth::caller_owner_placeholder(), &id).await {
         Ok(row) => Ok(Json(InstanceView::from(row))),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -93,7 +93,7 @@ async fn destroy_instance(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.instances.destroy(&id).await {
+    match state.instances.destroy(crate::auth::caller_owner_placeholder(), &id).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => warden_err_to_status(e),
     }
@@ -108,7 +108,11 @@ async fn probe_instance(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProbeResult>, StatusCode> {
-    match state.instances.probe(&*state.prober, &id).await {
+    match state
+        .instances
+        .probe(crate::auth::caller_owner_placeholder(), &*state.prober, &id)
+        .await
+    {
         Ok(r) => Ok(Json(r)),
         Err(e) => Err(warden_err_to_status(e)),
     }
@@ -118,7 +122,7 @@ async fn instance_url(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<UrlView>, StatusCode> {
-    let row = match state.instances.get(&id).await {
+    let row = match state.instances.get(crate::auth::caller_owner_placeholder(), &id).await {
         Ok(r) => r,
         Err(e) => return Err(warden_err_to_status(e)),
     };

@@ -71,16 +71,24 @@ impl SnapshotService {
     }
 
     /// Take a snapshot of the given instance. `kind=manual`.
-    pub async fn snapshot(&self, instance_id: &str) -> Result<SnapshotRow, WardenError> {
-        self.snapshot_with_kind(instance_id, SnapshotKind::Manual, None)
+    pub async fn snapshot(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<SnapshotRow, WardenError> {
+        self.snapshot_with_kind(owner_id, instance_id, SnapshotKind::Manual, None)
             .await
     }
 
     /// Take a snapshot then `BackupSink::promote` it. `kind=backup`. If the
     /// sink returns a remote URI, the row is updated with it before return.
-    pub async fn backup(&self, instance_id: &str) -> Result<SnapshotRow, WardenError> {
+    pub async fn backup(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<SnapshotRow, WardenError> {
         let mut row = self
-            .snapshot_with_kind(instance_id, SnapshotKind::Backup, None)
+            .snapshot_with_kind(owner_id, instance_id, SnapshotKind::Backup, None)
             .await?;
         if let Some(uri) = self.backup.promote(&row).await? {
             self.snapshots.update_remote_uri(&row.id, &uri).await?;
@@ -93,10 +101,17 @@ impl SnapshotService {
     /// bundle to its local cache, persist the new path on the row, and
     /// return the updated row. Idempotent — a sink whose `pull` is a no-op
     /// (the local sink) will simply return the row unchanged.
-    pub async fn pull(&self, snapshot_id: &str) -> Result<SnapshotRow, WardenError> {
-        let mut row = self.snapshots.get(snapshot_id)
+    pub async fn pull(
+        &self,
+        owner_id: &str,
+        snapshot_id: &str,
+    ) -> Result<SnapshotRow, WardenError> {
+        let mut row = self
+            .snapshots
+            .get(snapshot_id)
             .await?
             .ok_or(WardenError::NotFound)?;
+        require_owner(&row.owner_id, owner_id)?;
         let new_path = self.backup.pull(&row).await?;
         let new_path_str = new_path.display().to_string();
         if new_path_str != row.path {
@@ -112,13 +127,17 @@ impl SnapshotService {
     /// has a `remote_uri`, the sink's `pull` is invoked first.
     pub async fn restore(
         &self,
+        owner_id: &str,
         snapshot_id: &str,
         ttl_seconds: Option<i64>,
         env: std::collections::BTreeMap<String, String>,
     ) -> Result<CreatedInstance, WardenError> {
-        let mut row = self.snapshots.get(snapshot_id)
+        let mut row = self
+            .snapshots
+            .get(snapshot_id)
             .await?
             .ok_or(WardenError::NotFound)?;
+        require_owner(&row.owner_id, owner_id)?;
 
         // If the local path is missing and we have a remote URI, ask the
         // sink to rehydrate. The sink updates the row's `path` to wherever
@@ -138,25 +157,29 @@ impl SnapshotService {
             .ok_or(WardenError::NotFound)?;
 
         self.instance_svc
-            .restore(RestoreRequest {
-                template_id: source.template_id,
-                snapshot_path: row.path.into(),
-                source_instance_id: Some(row.source_instance_id),
-                env,
-                ttl_seconds,
-            })
+            .restore(
+                owner_id,
+                RestoreRequest {
+                    template_id: source.template_id,
+                    snapshot_path: row.path.into(),
+                    source_instance_id: Some(row.source_instance_id),
+                    env,
+                    ttl_seconds,
+                },
+            )
             .await
     }
 
     async fn snapshot_with_kind(
         &self,
+        owner_id: &str,
         instance_id: &str,
         kind: SnapshotKind,
         parent: Option<String>,
     ) -> Result<SnapshotRow, WardenError> {
         let inst = self
             .instances
-            .get(instance_id)
+            .get_for_owner(owner_id, instance_id)
             .await?
             .ok_or(WardenError::NotFound)?;
         let sandbox = inst
@@ -168,6 +191,7 @@ impl SnapshotService {
 
         let row = SnapshotRow {
             id: info.snapshot_id,
+            owner_id: inst.owner_id.clone(),
             source_instance_id: instance_id.into(),
             parent_snapshot_id: parent,
             kind,
@@ -180,6 +204,14 @@ impl SnapshotService {
         };
         self.snapshots.insert(&row).await?;
         Ok(row)
+    }
+}
+
+fn require_owner(row_owner: &str, caller_owner: &str) -> Result<(), WardenError> {
+    if caller_owner == "*" || row_owner == caller_owner {
+        Ok(())
+    } else {
+        Err(WardenError::NotFound)
     }
 }
 
@@ -302,14 +334,14 @@ mod tests {
     async fn snapshot_writes_manual_row_with_cube_id() {
         let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "t".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })
             .await
             .unwrap();
-        let snap = svc.snapshot(&created.id).await.unwrap();
+        let snap = svc.snapshot("legacy", &created.id).await.unwrap();
         assert!(snap.id.starts_with("snap-sb-1-"));
         assert_eq!(snap.kind, SnapshotKind::Manual);
         assert_eq!(snap.source_instance_id, created.id);
@@ -322,14 +354,14 @@ mod tests {
     async fn backup_writes_backup_row_local_sink_no_remote_uri() {
         let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
         let created = isvc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "t".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: None,
             })
             .await
             .unwrap();
-        let snap = svc.backup(&created.id).await.unwrap();
+        let snap = svc.backup("legacy", &created.id).await.unwrap();
         assert_eq!(snap.kind, SnapshotKind::Backup);
         // Local sink: promote returns None, so no remote_uri.
         assert!(snap.remote_uri.is_none());
@@ -342,7 +374,7 @@ mod tests {
     async fn restore_creates_new_instance_with_carried_secrets() {
         let (svc, isvc, _cube, secrets, _instances, _snaps) = build().await;
         let src = isvc
-            .create(CreateRequest {
+            .create("legacy", CreateRequest {
                 template_id: "t".into(),
                 env: BTreeMap::new(),
                 ttl_seconds: None,
@@ -352,9 +384,9 @@ mod tests {
         secrets.put(&src.id, "K", "carry").await.unwrap();
         // Snapshot path won't exist on disk in the test, but it also has no
         // remote_uri, so the restore proceeds without calling pull.
-        let snap = svc.snapshot(&src.id).await.unwrap();
+        let snap = svc.snapshot("legacy", &src.id).await.unwrap();
 
-        let new_inst = svc.restore(&snap.id, Some(60), BTreeMap::new()).await.unwrap();
+        let new_inst = svc.restore("legacy", &snap.id, Some(60), BTreeMap::new()).await.unwrap();
         assert_ne!(new_inst.id, src.id);
         let copied = secrets.list(&new_inst.id).await.unwrap();
         assert_eq!(copied, vec![("K".into(), "carry".into())]);
