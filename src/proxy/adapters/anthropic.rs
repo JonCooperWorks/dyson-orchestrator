@@ -14,7 +14,7 @@ const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct AnthropicAdapter;
 
 impl AnthropicAdapter {
-    fn version<'a>(config: &'a ProviderConfig) -> &'a str {
+    fn version(config: &ProviderConfig) -> &str {
         config
             .anthropic_version
             .as_deref()

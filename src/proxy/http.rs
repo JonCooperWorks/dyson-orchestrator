@@ -179,9 +179,7 @@ async fn handle(
     let upstream_headers = upstream_resp.headers().clone();
 
     // 6. Stream response back.
-    let body_stream = upstream_resp
-        .bytes_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let body_stream = upstream_resp.bytes_stream().map_err(std::io::Error::other);
     let resp_body = Body::from_stream(body_stream);
 
     let mut response = Response::builder()
@@ -312,9 +310,6 @@ fn now_secs() -> i64 {
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
-    use std::time::Duration;
-
     use axum::body::Bytes;
     use axum::extract::Path as AxPath;
     use axum::http::HeaderMap as AxHeaderMap;
@@ -366,51 +361,54 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct UpstreamState {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+        chunks: Arc<Vec<Vec<u8>>>,
+        captured_headers: Arc<std::sync::Mutex<Option<AxHeaderMap>>>,
+    }
+
+    async fn upstream_handler(
+        axum::extract::State(state): axum::extract::State<UpstreamState>,
+        AxPath(_rest): AxPath<String>,
+        headers: AxHeaderMap,
+        _body: Bytes,
+    ) -> Response<Body> {
+        state.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *state.captured_headers.lock().unwrap() = Some(headers);
+        let chunks_owned: Vec<Vec<u8>> = state.chunks.iter().cloned().collect();
+        let body_stream = stream::iter(
+            chunks_owned
+                .into_iter()
+                .map(|c| Ok::<Bytes, std::io::Error>(Bytes::from(c))),
+        );
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(body_stream))
+            .unwrap()
+    }
+
     /// Spin up a mock LLM upstream that emits a real-shaped chunked body.
-    /// Returns the URL.
-    async fn spawn_streaming_upstream(payload: Vec<Vec<u8>>) -> (String, Arc<std::sync::atomic::AtomicU32>) {
-        use std::sync::atomic::AtomicU32;
-        let calls = Arc::new(AtomicU32::new(0));
-        let payload = Arc::new(payload);
-        let calls2 = calls.clone();
-
-        async fn handler(
-            axum::extract::State(state): axum::extract::State<(
-                Arc<AtomicU32>,
-                Arc<Vec<Vec<u8>>>,
-                Arc<std::sync::Mutex<Option<AxHeaderMap>>>,
-            )>,
-            AxPath(_rest): AxPath<String>,
-            headers: AxHeaderMap,
-            _body: Bytes,
-        ) -> Response<Body> {
-            state.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            *state.2.lock().unwrap() = Some(headers);
-            let chunks_owned: Vec<Vec<u8>> = state.1.iter().cloned().collect();
-            let body_stream = stream::iter(
-                chunks_owned
-                    .into_iter()
-                    .map(|c| Ok::<Bytes, std::io::Error>(Bytes::from(c))),
-            );
-            Response::builder()
-                .status(200)
-                .header("content-type", "text/event-stream")
-                .body(Body::from_stream(body_stream))
-                .unwrap()
-        }
-
-        let captured: Arc<std::sync::Mutex<Option<AxHeaderMap>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let state = (calls.clone(), payload.clone(), captured.clone());
+    /// Returns the URL and a handle to the call counter.
+    async fn spawn_streaming_upstream(
+        payload: Vec<Vec<u8>>,
+    ) -> (String, Arc<std::sync::atomic::AtomicU32>) {
+        let state = UpstreamState {
+            calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            chunks: Arc::new(payload),
+            captured_headers: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let calls = state.calls.clone();
         let app = AxRouter::new()
-            .route("/*rest", post(handler))
+            .route("/*rest", post(upstream_handler))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{addr}"), calls2)
+        (format!("http://{addr}"), calls)
     }
 
     /// Build a `ProxyService` whose only configured provider points at
@@ -605,13 +603,5 @@ mod tests {
         assert_eq!(r.len(), 5);
     }
 
-    // Suppress unused-import warning when individual tests pull in HashMap
-    // implicitly via std preludes. Kept explicit so the test set is
-    // self-contained.
-    #[allow(dead_code)]
-    fn _force_use_hashmap(_: HashMap<String, String>) {}
-
-    #[allow(dead_code)]
-    fn _force_use_duration(_: Duration) {}
 }
 

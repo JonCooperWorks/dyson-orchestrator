@@ -126,11 +126,7 @@ async fn llm_chat(
         Bytes::from_static(b"data: {\"chunk\":2}\n\n"),
         Bytes::from_static(b"data: [DONE]\n\n"),
     ];
-    let body_stream = stream::iter(
-        chunks
-            .into_iter()
-            .map(|c| Ok::<Bytes, std::io::Error>(c)),
-    );
+    let body_stream = stream::iter(chunks.into_iter().map(Ok::<Bytes, std::io::Error>));
     Response::builder()
         .status(200)
         .header("content-type", "text/event-stream")
