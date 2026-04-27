@@ -72,9 +72,18 @@ mod tests {
     use crate::secrets::SecretsService;
     use crate::snapshot::SnapshotService;
     use crate::traits::{
-        BackupSink, CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore,
-        SandboxInfo, SecretStore, SnapshotInfo, TokenStore,
+        BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
+        InstanceStore, ProbeResult, SandboxInfo, SecretStore, SnapshotInfo, TokenStore,
     };
+
+    struct StubProber;
+
+    #[async_trait::async_trait]
+    impl HealthProber for StubProber {
+        async fn probe(&self, _: &InstanceRow) -> ProbeResult {
+            ProbeResult::Healthy
+        }
+    }
 
     struct StubCube;
 
@@ -160,6 +169,7 @@ mod tests {
             secrets: svc,
             instances: instance_svc,
             snapshots: snapshot_svc,
+            prober: Arc::new(StubProber),
             sandbox_domain: "cube.test".into(),
         };
         (state, raw)

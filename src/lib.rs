@@ -10,6 +10,7 @@ pub mod http;
 pub mod instance;
 pub mod logging;
 pub mod policy;
+pub mod probe;
 pub mod proxy;
 pub mod secrets;
 pub mod snapshot;

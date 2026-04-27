@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::error::WardenError;
 use crate::secrets::compose_env;
 use crate::traits::{
-    CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore, ListFilter,
-    SecretStore, TokenStore,
+    CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus, InstanceStore,
+    ListFilter, ProbeResult, SecretStore, TokenStore,
 };
 
 /// Sentinel `provider` value used for the per-instance shared proxy token.
@@ -144,6 +144,19 @@ impl InstanceService {
 
     pub async fn list(&self, filter: ListFilter) -> Result<Vec<InstanceRow>, WardenError> {
         Ok(self.instances.list(filter).await?)
+    }
+
+    /// Run a single probe synchronously, persist the result on the row, and
+    /// hand it back to the caller. Used by `POST /v1/instances/:id/probe`.
+    pub async fn probe(
+        &self,
+        prober: &dyn HealthProber,
+        id: &str,
+    ) -> Result<ProbeResult, WardenError> {
+        let row = self.instances.get(id).await?.ok_or(WardenError::NotFound)?;
+        let result = prober.probe(&row).await;
+        self.instances.record_probe(id, result.clone()).await?;
+        Ok(result)
     }
 
     pub async fn destroy(&self, id: &str) -> Result<(), WardenError> {

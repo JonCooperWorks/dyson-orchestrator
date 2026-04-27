@@ -4,6 +4,7 @@
 //! - `GET    /v1/instances/:id`          → get
 //! - `DELETE /v1/instances/:id`          → destroy
 //! - `GET    /v1/instances/:id/url`      → just the sandbox URL
+//! - `POST   /v1/instances/:id/probe`    → run a probe synchronously
 
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, Uri};
@@ -25,6 +26,7 @@ pub fn router(state: AppState) -> Router {
             get(get_instance).delete(destroy_instance),
         )
         .route("/v1/instances/:id/url", get(instance_url))
+        .route("/v1/instances/:id/probe", post(probe_instance))
         .with_state(state)
 }
 
@@ -100,6 +102,16 @@ async fn destroy_instance(
 #[derive(Debug, Serialize)]
 struct UrlView {
     url: String,
+}
+
+async fn probe_instance(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ProbeResult>, StatusCode> {
+    match state.instances.probe(&*state.prober, &id).await {
+        Ok(r) => Ok(Json(r)),
+        Err(e) => Err(warden_err_to_status(e)),
+    }
 }
 
 async fn instance_url(

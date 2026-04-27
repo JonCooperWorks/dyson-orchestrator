@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use reqwest::Method;
@@ -15,9 +16,10 @@ use dyson_warden::{
     http,
     instance::InstanceService,
     logging,
+    probe::{self, HttpHealthProber},
     secrets::SecretsService,
     snapshot::SnapshotService,
-    traits::{BackupSink, CubeClient, InstanceStore, SecretStore, TokenStore},
+    traits::{BackupSink, CubeClient, HealthProber, InstanceStore, SecretStore, TokenStore},
 };
 
 fn collect_env() -> BTreeMap<String, String> {
@@ -132,7 +134,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     let snapshot_svc = Arc::new(SnapshotService::new(
         cube,
-        instances_store,
+        instances_store.clone(),
         backup_sink,
         instance_svc.clone(),
         pool,
@@ -144,10 +146,27 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         AuthState::enforced(cfg.admin_token.clone())
     };
 
+    let prober: Arc<dyn HealthProber> = match HttpHealthProber::new(
+        Duration::from_secs(cfg.health_probe_timeout_seconds),
+        cfg.cube.sandbox_domain.clone(),
+    ) {
+        Ok(p) => Arc::new(p),
+        Err(err) => {
+            tracing::error!(error = %err, "health prober init failed");
+            return ExitCode::from(2);
+        }
+    };
+    let _probe_loop = probe::spawn_loop(
+        prober.clone(),
+        instances_store.clone(),
+        Duration::from_secs(cfg.health_probe_interval_seconds),
+    );
+
     let app_state = http::AppState {
         secrets: secrets_svc,
         instances: instance_svc,
         snapshots: snapshot_svc,
+        prober,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
     };
     let app = http::router(app_state, auth, axum::Router::new());
