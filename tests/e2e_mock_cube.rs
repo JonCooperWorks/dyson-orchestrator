@@ -94,10 +94,10 @@ async fn cube_delete_snap(State(_): State<CubeState>, Path(_): Path<String>) -> 
 
 fn cube_router(state: CubeState) -> Router {
     Router::new()
-        .route("/v1/sandboxes", post(cube_create))
-        .route("/v1/sandboxes/:id", delete(cube_destroy))
-        .route("/v1/sandboxes/:id/snapshots", post(cube_snapshot))
-        .route("/v1/snapshots/:id", delete(cube_delete_snap))
+        .route("/sandboxes", post(cube_create))
+        .route("/sandboxes/:id", delete(cube_destroy))
+        .route("/sandboxes/:id/snapshots", post(cube_snapshot))
+        .route("/sandboxes/snapshots/:id", delete(cube_delete_snap))
         .with_state(state)
 }
 
@@ -250,7 +250,7 @@ async fn full_walkthrough() {
         users: users_store,
         sandbox_domain: "cube.test".into(),
             hostname: None,
-        auth_config: std::sync::Arc::new(http::auth_config::AuthConfig::None),
+        auth_config: std::sync::Arc::new(http::auth_config::AuthConfig::none()),
         dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
     };
     let app = http::router(
@@ -267,7 +267,7 @@ async fn full_walkthrough() {
     let resp = admin
         .post(format!("{warden_url}/v1/instances"))
         .bearer_auth("admin-token")
-        .json(&json!({"template_id": "tpl-x", "env": {}, "ttl_seconds": 600}))
+        .json(&json!({"template_id": "tpl-x", "env": {"WARDEN_MODEL": "anthropic/claude-sonnet-4-5"}, "ttl_seconds": 600}))
         .send()
         .await
         .unwrap();
