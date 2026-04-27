@@ -55,6 +55,24 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         include_destroyed: bool,
     },
+
+    /// Take a snapshot of an instance (kind=manual).
+    Snapshot { id: String },
+
+    /// Take a snapshot then promote it via the configured backup sink (kind=backup).
+    Backup { id: String },
+
+    /// Restore a new instance from a snapshot id.
+    Restore {
+        /// Source instance id (informational; the snapshot id below decides the bytes).
+        instance: String,
+        #[arg(long)]
+        snapshot: String,
+        #[arg(long = "env", value_parser = parse_kv)]
+        env: Vec<(String, String)>,
+        #[arg(long)]
+        ttl_seconds: Option<i64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

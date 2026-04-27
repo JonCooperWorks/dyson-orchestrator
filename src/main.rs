@@ -8,6 +8,7 @@ use reqwest::Method;
 use dyson_warden::{
     api_client::ApiClient,
     auth::AuthState,
+    backup::local::LocalDiskBackupSink,
     cli::{self, Command, SecretsAction},
     config, cube_client, db,
     db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
@@ -15,7 +16,8 @@ use dyson_warden::{
     instance::InstanceService,
     logging,
     secrets::SecretsService,
-    traits::{CubeClient, InstanceStore, SecretStore, TokenStore},
+    snapshot::SnapshotService,
+    traits::{BackupSink, CubeClient, InstanceStore, SecretStore, TokenStore},
 };
 
 fn collect_env() -> BTreeMap<String, String> {
@@ -53,6 +55,30 @@ async fn main() -> ExitCode {
             status,
             include_destroyed,
         } => run_list(&cfg, args.dangerous_no_auth, status, include_destroyed).await,
+        Command::Snapshot { id } => {
+            run_simple_post(&cfg, args.dangerous_no_auth, &format!("/v1/instances/{id}/snapshot"))
+                .await
+        }
+        Command::Backup { id } => {
+            run_simple_post(&cfg, args.dangerous_no_auth, &format!("/v1/instances/{id}/backup"))
+                .await
+        }
+        Command::Restore {
+            instance,
+            snapshot,
+            env,
+            ttl_seconds,
+        } => {
+            run_restore(
+                &cfg,
+                args.dangerous_no_auth,
+                instance,
+                snapshot,
+                env,
+                ttl_seconds,
+            )
+            .await
+        }
     }
 }
 
@@ -74,18 +100,34 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     let instances_store: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
     let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-    let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool));
+    let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
 
     let proxy_base = format!("http://{}/llm", cfg.bind);
     let instance_svc = Arc::new(InstanceService::new(
-        cube,
-        instances_store,
+        cube.clone(),
+        instances_store.clone(),
         secrets_store.clone(),
         tokens_store,
         proxy_base,
         cfg.default_ttl_seconds,
     ));
     let secrets_svc = Arc::new(SecretsService::new(secrets_store));
+
+    let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
+        config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
+        config::BackupSinkKind::S3 => {
+            tracing::error!("s3 backup sink lands in step 9; not yet wired");
+            return ExitCode::from(2);
+        }
+    };
+    let snapshot_svc = Arc::new(SnapshotService::new(
+        cube,
+        instances_store,
+        backup_sink,
+        instance_svc.clone(),
+        pool,
+    ));
+
     let auth = if dangerous_no_auth {
         AuthState::dangerous_no_auth()
     } else {
@@ -95,6 +137,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let app_state = http::AppState {
         secrets: secrets_svc,
         instances: instance_svc,
+        snapshots: snapshot_svc,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
     };
     let app = http::router(app_state, auth);
@@ -225,6 +268,49 @@ async fn run_list(
         path.push_str("include_destroyed=true");
     }
     match client.send_no_body(Method::GET, &path).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_simple_post(cfg: &config::Config, dangerous_no_auth: bool, path: &str) -> ExitCode {
+    let Some(client) = build_api_client(cfg, dangerous_no_auth) else {
+        return ExitCode::FAILURE;
+    };
+    match client
+        .send_json(Method::POST, path, &serde_json::json!({}))
+        .await
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_restore(
+    cfg: &config::Config,
+    dangerous_no_auth: bool,
+    instance: String,
+    snapshot: String,
+    env: Vec<(String, String)>,
+    ttl_seconds: Option<i64>,
+) -> ExitCode {
+    let Some(client) = build_api_client(cfg, dangerous_no_auth) else {
+        return ExitCode::FAILURE;
+    };
+    let env: BTreeMap<String, String> = env.into_iter().collect();
+    let body = serde_json::json!({
+        "snapshot_id": snapshot,
+        "env": env,
+        "ttl_seconds": ttl_seconds,
+    });
+    let path = format!("/v1/instances/{instance}/restore");
+    match client.send_json(Method::POST, &path, &body).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err:#}");

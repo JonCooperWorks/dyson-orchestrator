@@ -63,15 +63,17 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::backup::local::LocalDiskBackupSink;
     use crate::db::instances::SqlxInstanceStore;
     use crate::db::open_in_memory;
     use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::instance::InstanceService;
     use crate::secrets::SecretsService;
+    use crate::snapshot::SnapshotService;
     use crate::traits::{
-        CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore, SandboxInfo,
-        SecretStore, SnapshotInfo, TokenStore,
+        BackupSink, CreateSandboxArgs, CubeClient, InstanceRow, InstanceStatus, InstanceStore,
+        SandboxInfo, SecretStore, SnapshotInfo, TokenStore,
     };
 
     struct StubCube;
@@ -137,18 +139,27 @@ mod tests {
         let cube: Arc<dyn CubeClient> = Arc::new(StubCube);
         let instances_store: Arc<dyn InstanceStore> =
             Arc::new(SqlxInstanceStore::new(pool.clone()));
-        let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool));
+        let tokens_store: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
         let instance_svc = Arc::new(InstanceService::new(
-            cube,
-            instances_store,
+            cube.clone(),
+            instances_store.clone(),
             raw.clone(),
             tokens_store,
             "http://test/llm",
             3600,
         ));
+        let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let snapshot_svc = Arc::new(SnapshotService::new(
+            cube,
+            instances_store,
+            backup,
+            instance_svc.clone(),
+            pool,
+        ));
         let state = AppState {
             secrets: svc,
             instances: instance_svc,
+            snapshots: snapshot_svc,
             sandbox_domain: "cube.test".into(),
         };
         (state, raw)

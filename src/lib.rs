@@ -1,5 +1,6 @@
 pub mod api_client;
 pub mod auth;
+pub mod backup;
 pub mod cli;
 pub mod config;
 pub mod cube_client;
@@ -9,4 +10,5 @@ pub mod http;
 pub mod instance;
 pub mod logging;
 pub mod secrets;
+pub mod snapshot;
 pub mod traits;
