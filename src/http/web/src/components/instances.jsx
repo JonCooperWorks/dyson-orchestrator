@@ -343,10 +343,15 @@ function InstanceDetail({ id }) {
   const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
   // open_url is computed by the backend from `[server] hostname` + the
   // instance id.  Null when warden has no hostname configured (the
-  // host-based proxy is a no-op in that case).  We additionally gate
-  // on status=live + cube_sandbox_id to avoid linking to a sandbox
-  // that hasn't booted yet.
-  const canOpen = !!row.open_url && row.status === 'live' && !!row.cube_sandbox_id;
+  // host-based proxy is a no-op in that case) — that's the only case
+  // we hard-disable the link, since there's literally nowhere to go.
+  //
+  // For status≠live or no sandbox yet we still ship the href: the user
+  // explicitly wants a plain `target="_blank"` to navigate.  Without an
+  // href the browser opens about:blank in the new tab, which is worse
+  // than landing on a 502 / "still warming up" page they can refresh.
+  const canOpen = !!row.open_url;
+  const isWarmingUp = canOpen && (row.status !== 'live' || !row.cube_sandbox_id);
 
   return (
     <main className="detail-pane">
@@ -378,10 +383,10 @@ function InstanceDetail({ id }) {
             aria-disabled={!canOpen}
             onClick={(e) => { if (!canOpen) e.preventDefault(); }}
             title={
-              !row.open_url
+              !canOpen
                 ? 'warden hostname is not configured — set [server] hostname in config.toml'
-                : !canOpen
-                  ? 'sandbox is not live'
+                : isWarmingUp
+                  ? 'sandbox is still warming up — opening anyway'
                   : 'open this dyson in a new tab'
             }
           >
