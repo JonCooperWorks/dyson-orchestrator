@@ -35,6 +35,14 @@ async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 jsonwebtoken = { version = "9", default-features = false }
 
+[dev-dependencies]
+# Used only by the OIDC test to mint a fresh RSA keypair + sign mock JWTs.
+# Not a runtime dep — production OIDC verification only uses the public key
+# delivered via JWKS.
+rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
+rand = "0.8"
+base64 = "0.22"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
