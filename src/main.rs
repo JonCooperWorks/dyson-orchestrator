@@ -20,6 +20,7 @@ use dyson_warden::{
     secrets::SecretsService,
     snapshot::SnapshotService,
     traits::{BackupSink, CubeClient, HealthProber, InstanceStore, SecretStore, TokenStore},
+    ttl,
 };
 
 fn collect_env() -> BTreeMap<String, String> {
@@ -160,6 +161,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         prober.clone(),
         instances_store.clone(),
         Duration::from_secs(cfg.health_probe_interval_seconds),
+    );
+    let _ttl_loop = ttl::spawn_loop(
+        instances_store.clone(),
+        instance_svc.clone(),
+        ttl::DEFAULT_INTERVAL,
     );
 
     let app_state = http::AppState {
