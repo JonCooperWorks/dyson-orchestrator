@@ -1,7 +1,10 @@
+pub mod api_client;
 pub mod cli;
 pub mod config;
 pub mod cube_client;
 pub mod db;
 pub mod error;
+pub mod http;
 pub mod logging;
+pub mod secrets;
 pub mod traits;

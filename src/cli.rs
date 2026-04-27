@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -11,13 +11,40 @@ use clap::Parser;
 )]
 pub struct Cli {
     /// Path to the config TOML.
-    #[arg(long, default_value = "/etc/dyson-warden/config.toml")]
+    #[arg(long, default_value = "/etc/dyson-warden/config.toml", global = true)]
     pub config: PathBuf,
 
     /// Disable the admin-token check on /v1/* routes. Loud and dangerous;
     /// see startup banner for details.
-    #[arg(long = "dangerous-no-auth", default_value_t = false)]
+    #[arg(long = "dangerous-no-auth", default_value_t = false, global = true)]
     pub dangerous_no_auth: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Run the HTTP server (default action when no subcommand is given).
+    Serve,
+
+    /// Per-instance secret material.
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretsAction {
+    /// Set or overwrite a secret on an instance.
+    Set {
+        instance: String,
+        name: String,
+        value: String,
+    },
+    /// Remove a secret from an instance.
+    Clear { instance: String, name: String },
 }
 
 /// Five-line warning emitted when `--dangerous-no-auth` is active.

@@ -2,8 +2,13 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use clap::Parser;
+use reqwest::Method;
 
-use dyson_warden::{cli, config, db, logging};
+use dyson_warden::{
+    api_client::ApiClient,
+    cli::{self, Command, SecretsAction},
+    config, db, logging,
+};
 
 fn collect_env() -> BTreeMap<String, String> {
     std::env::vars()
@@ -27,6 +32,13 @@ async fn main() -> ExitCode {
         }
     };
 
+    match args.command.unwrap_or(Command::Serve) {
+        Command::Serve => run_server(cfg).await,
+        Command::Secrets { action } => run_secrets(&cfg, args.dangerous_no_auth, action).await,
+    }
+}
+
+async fn run_server(cfg: config::Config) -> ExitCode {
     let _pool = match db::open(&cfg.db_path).await {
         Ok(p) => p,
         Err(err) => {
@@ -43,6 +55,44 @@ async fn main() -> ExitCode {
 
     tracing::info!("warden stopped");
     ExitCode::SUCCESS
+}
+
+async fn run_secrets(
+    cfg: &config::Config,
+    dangerous_no_auth: bool,
+    action: SecretsAction,
+) -> ExitCode {
+    let token = if dangerous_no_auth {
+        None
+    } else {
+        Some(cfg.admin_token.clone())
+    };
+    let client = match ApiClient::from_bind(&cfg.bind, token) {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = match action {
+        SecretsAction::Set { instance, name, value } => {
+            let path = format!("/v1/instances/{instance}/secrets/{name}");
+            client
+                .send_json(Method::PUT, &path, &serde_json::json!({"value": value}))
+                .await
+        }
+        SecretsAction::Clear { instance, name } => {
+            let path = format!("/v1/instances/{instance}/secrets/{name}");
+            client.send_no_body(Method::DELETE, &path).await
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn wait_for_shutdown() -> std::io::Result<()> {
