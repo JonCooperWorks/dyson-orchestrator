@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use dyson_warden::{cli, config, logging};
+use dyson_warden::{cli, config, db, logging};
 
 fn collect_env() -> BTreeMap<String, String> {
     std::env::vars()
@@ -23,6 +23,14 @@ async fn main() -> ExitCode {
         Ok(c) => c,
         Err(err) => {
             tracing::error!(error = %err, config = %args.config.display(), "config load failed");
+            return ExitCode::from(2);
+        }
+    };
+
+    let _pool = match db::open(&cfg.db_path).await {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!(error = %err, db = %cfg.db_path.display(), "db open failed");
             return ExitCode::from(2);
         }
     };

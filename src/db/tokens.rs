@@ -1,0 +1,149 @@
+use async_trait::async_trait;
+use sqlx::{Row, SqlitePool};
+use uuid::Uuid;
+
+use crate::error::StoreError;
+use crate::traits::{TokenRecord, TokenStore};
+
+#[derive(Debug, Clone)]
+pub struct SqlxTokenStore {
+    pool: SqlitePool,
+}
+
+impl SqlxTokenStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+fn map_sqlx(e: sqlx::Error) -> StoreError {
+    match e {
+        sqlx::Error::RowNotFound => StoreError::NotFound,
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            StoreError::Constraint(db.to_string())
+        }
+        other => StoreError::Io(other.to_string()),
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[async_trait]
+impl TokenStore for SqlxTokenStore {
+    async fn mint(&self, instance_id: &str, provider: &str) -> Result<String, StoreError> {
+        let token = Uuid::new_v4().simple().to_string();
+        sqlx::query(
+            "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at) \
+             VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind(&token)
+        .bind(instance_id)
+        .bind(provider)
+        .bind(now_secs())
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(token)
+    }
+
+    async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT token, instance_id, provider, created_at, revoked_at \
+             FROM proxy_tokens WHERE token = ? AND revoked_at IS NULL",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| TokenRecord {
+            token: r.get("token"),
+            instance_id: r.get("instance_id"),
+            provider: r.get("provider"),
+            created_at: r.get("created_at"),
+            revoked_at: r.get("revoked_at"),
+        }))
+    }
+
+    async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE proxy_tokens SET revoked_at = ? WHERE instance_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now_secs())
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::instances::SqlxInstanceStore;
+    use crate::db::open_in_memory;
+    use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
+
+    async fn seed(pool: &SqlitePool, id: &str) {
+        let store = SqlxInstanceStore::new(pool.clone());
+        store
+            .create(InstanceRow {
+                id: id.into(),
+                cube_sandbox_id: None,
+                template_id: "t".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "b".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: 0,
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: 0,
+                destroyed_at: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mint_resolve_revoke() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqlxTokenStore::new(pool);
+        let tok = store.mint("i1", "anthropic").await.unwrap();
+        assert_eq!(tok.len(), 32);
+
+        let resolved = store.resolve(&tok).await.unwrap().expect("present");
+        assert_eq!(resolved.instance_id, "i1");
+        assert_eq!(resolved.provider, "anthropic");
+        assert!(resolved.revoked_at.is_none());
+
+        store.revoke_for_instance("i1").await.unwrap();
+        assert!(store.resolve(&tok).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_token_resolves_none() {
+        let pool = open_in_memory().await.unwrap();
+        let store = SqlxTokenStore::new(pool);
+        assert!(store.resolve("not-a-token").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_only_targets_one_instance() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        seed(&pool, "i2").await;
+        let store = SqlxTokenStore::new(pool);
+        let t1 = store.mint("i1", "openai").await.unwrap();
+        let t2 = store.mint("i2", "openai").await.unwrap();
+        store.revoke_for_instance("i1").await.unwrap();
+        assert!(store.resolve(&t1).await.unwrap().is_none());
+        assert!(store.resolve(&t2).await.unwrap().is_some());
+    }
+}
