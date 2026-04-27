@@ -226,6 +226,7 @@ async fn full_walkthrough() {
     let proxy_svc = Arc::new(
         ProxyService::new(
             tokens_store.clone(),
+            instances_store.clone(),
             policies_store,
             audit_store,
             providers,

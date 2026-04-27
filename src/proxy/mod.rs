@@ -18,12 +18,17 @@ use std::time::{Duration, Instant};
 
 use crate::config::{ProviderConfig, Providers};
 use crate::proxy::policy_check::{InstancePolicy, UsageSnapshot};
-use crate::traits::{AuditStore, PolicyStore, ProviderAdapter, TokenStore};
+use crate::traits::{AuditStore, InstanceStore, PolicyStore, ProviderAdapter, TokenStore};
 
 /// Wires the proxy together. Cheap to clone — every field is `Arc` or
 /// scalar.
 pub struct ProxyService {
     pub tokens: Arc<dyn TokenStore>,
+    /// Used to resolve `instance_id → owner_id` on every request so per-user
+    /// budgets/policies can be looked up. The proxy bypasses tenant
+    /// filtering here (it has already authenticated the caller via the
+    /// proxy_token).
+    pub instances: Arc<dyn InstanceStore>,
     pub policies: Arc<dyn PolicyStore>,
     pub audit: Arc<dyn AuditStore>,
     pub providers: Providers,
@@ -36,6 +41,7 @@ pub struct ProxyService {
 impl ProxyService {
     pub fn new(
         tokens: Arc<dyn TokenStore>,
+        instances: Arc<dyn InstanceStore>,
         policies: Arc<dyn PolicyStore>,
         audit: Arc<dyn AuditStore>,
         providers: Providers,
@@ -46,6 +52,7 @@ impl ProxyService {
             .build()?;
         Ok(Self {
             tokens,
+            instances,
             policies,
             audit,
             providers,

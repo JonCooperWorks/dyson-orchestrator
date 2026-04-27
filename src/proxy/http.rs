@@ -59,6 +59,17 @@ async fn handle(
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "token store error"),
     };
 
+    // 1b. Resolve owner. Per-user budgets need it; per-instance
+    // policy/budget were a phase-2 deviation we're correcting here.
+    let instance_row = match state.instances.get(&record.instance_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return error_response(StatusCode::UNAUTHORIZED, "instance gone"),
+        Err(_) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "instance store error")
+        }
+    };
+    let owner_id = instance_row.owner_id;
+
     // 2. Read the body up front. Forwarding a streaming request body is
     // possible but the JSON body needs to be inspected for `model` to enforce
     // policy *before* forwarding — buffering a single LLM request is cheap
@@ -74,13 +85,14 @@ async fn handle(
         serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null)
     };
 
-    // 3. Policy.
-    let policy = match state.policies.get(&record.instance_id).await {
+    // 3. Policy + usage are keyed on owner_id, not instance_id, so a user
+    // with N instances shares one budget envelope.
+    let policy = match state.policies.get(&owner_id).await {
         Ok(Some(p)) => p,
         Ok(None) => state.default_policy.clone(),
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "policy load error"),
     };
-    let usage = state.snapshot(&record.instance_id).await;
+    let usage = state.snapshot(&owner_id).await;
     let ctx = EnforceContext {
         policy: &policy,
         usage: &usage,
@@ -94,6 +106,7 @@ async fn handle(
         write_audit(
             &state,
             AuditEntry {
+                owner_id: owner_id.clone(),
                 instance_id: record.instance_id.clone(),
                 provider: provider.clone(),
                 model,
@@ -159,6 +172,7 @@ async fn handle(
             write_audit(
                 &state,
                 AuditEntry {
+                    owner_id: owner_id.clone(),
                     instance_id: record.instance_id.clone(),
                     provider: provider.clone(),
                     model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
@@ -200,6 +214,7 @@ async fn handle(
     write_audit(
         &state,
         AuditEntry {
+            owner_id: owner_id.clone(),
             instance_id: record.instance_id.clone(),
             provider: provider.clone(),
             model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
@@ -426,12 +441,14 @@ mod tests {
             ollama: None,
         };
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> =
+            Arc::new(crate::db::instances::SqlxInstanceStore::new(pool.clone()));
         let policies: Arc<dyn crate::traits::PolicyStore> =
             Arc::new(crate::db::policies::SqlitePolicyStore::new(pool.clone()));
         let audit: Arc<dyn crate::traits::AuditStore> =
             Arc::new(crate::db::audit::SqliteAuditStore::new(pool));
         Arc::new(
-            ProxyService::new(tokens, policies, audit, providers, policy)
+            ProxyService::new(tokens, instances, policies, audit, providers, policy)
                 .expect("build proxy"),
         )
     }

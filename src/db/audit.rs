@@ -31,9 +31,10 @@ impl AuditStore for SqliteAuditStore {
     async fn insert(&self, entry: &AuditEntry) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO llm_audit \
-             (instance_id, provider, model, prompt_tokens, output_tokens, status_code, duration_ms, occurred_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (owner_id, instance_id, provider, model, prompt_tokens, output_tokens, status_code, duration_ms, occurred_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(&entry.owner_id)
         .bind(&entry.instance_id)
         .bind(&entry.provider)
         .bind(&entry.model)
@@ -48,13 +49,15 @@ impl AuditStore for SqliteAuditStore {
         Ok(())
     }
 
-    async fn daily_tokens(&self, subject: &str, now: i64) -> Result<u64, StoreError> {
+    /// Sums tokens *per-owner* over the past 24h. Per-user budgets hold
+    /// across all of a tenant's instances.
+    async fn daily_tokens(&self, owner_id: &str, now: i64) -> Result<u64, StoreError> {
         let since = now - 86_400;
         let row = sqlx::query(
             "SELECT COALESCE(SUM(COALESCE(prompt_tokens,0) + COALESCE(output_tokens,0)), 0) AS total \
-             FROM llm_audit WHERE instance_id = ? AND occurred_at >= ?",
+             FROM llm_audit WHERE owner_id = ? AND occurred_at >= ?",
         )
-        .bind(subject)
+        .bind(owner_id)
         .bind(since)
         .fetch_one(&self.pool)
         .await
@@ -69,8 +72,9 @@ mod tests {
     use super::*;
     use crate::db::open_in_memory;
 
-    fn r(instance: &str, when: i64, prompt: i64, output: i64) -> AuditEntry {
+    fn r(owner: &str, instance: &str, when: i64, prompt: i64, output: i64) -> AuditEntry {
         AuditEntry {
+            owner_id: owner.into(),
             instance_id: instance.into(),
             provider: "openai".into(),
             model: Some("gpt-4o".into()),
@@ -83,16 +87,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daily_tokens_sums_window() {
+    async fn daily_tokens_sums_window_per_owner() {
         let pool = open_in_memory().await.unwrap();
         let store = SqliteAuditStore::new(pool);
         let now = 1_000_000;
-        store.insert(&r("i1", now - 100, 100, 50)).await.unwrap();
-        store.insert(&r("i1", now - 1000, 200, 100)).await.unwrap();
-        store.insert(&r("i1", now - 86_500, 999, 999)).await.unwrap();
-        store.insert(&r("i2", now - 100, 9999, 9999)).await.unwrap();
+        // Owner u1, two different instances — both should count.
+        store.insert(&r("u1", "i-a", now - 100, 100, 50)).await.unwrap();
+        store.insert(&r("u1", "i-b", now - 1000, 200, 100)).await.unwrap();
+        // Outside window.
+        store.insert(&r("u1", "i-a", now - 86_500, 999, 999)).await.unwrap();
+        // Different owner — not counted.
+        store.insert(&r("u2", "i-c", now - 100, 9999, 9999)).await.unwrap();
 
-        let total = store.daily_tokens("i1", now).await.unwrap();
+        let total = store.daily_tokens("u1", now).await.unwrap();
         assert_eq!(total, 100 + 50 + 200 + 100);
     }
 
@@ -101,10 +108,10 @@ mod tests {
         let pool = open_in_memory().await.unwrap();
         let store = SqliteAuditStore::new(pool);
         let now = 1_000_000;
-        let mut row = r("i1", now - 10, 50, 25);
+        let mut row = r("u1", "i1", now - 10, 50, 25);
         row.prompt_tokens = None;
         store.insert(&row).await.unwrap();
-        assert_eq!(store.daily_tokens("i1", now).await.unwrap(), 25);
+        assert_eq!(store.daily_tokens("u1", now).await.unwrap(), 25);
     }
 
     #[tokio::test]

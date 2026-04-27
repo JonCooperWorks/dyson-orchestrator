@@ -280,6 +280,7 @@ pub trait HealthProber: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
+    pub owner_id: String,
     pub instance_id: String,
     pub provider: String,
     pub model: Option<String>,

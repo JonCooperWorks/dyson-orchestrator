@@ -189,6 +189,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     let proxy_svc = match ProxyService::new(
         tokens_store.clone(),
+        instances_store.clone(),
         policies_store,
         audit_store,
         cfg.providers.clone(),
