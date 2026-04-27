@@ -268,7 +268,7 @@ mod tests {
     use crate::db::snapshots::SqliteSnapshotStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::error::CubeError;
-    use crate::instance::CreateRequest;
+    use crate::instance::{CreateRequest, ENV_MODEL};
     use crate::traits::{
         CreateSandboxArgs, InstanceStore, SandboxInfo, SecretStore, SnapshotInfo, TokenStore,
     };
@@ -361,6 +361,12 @@ mod tests {
         (svc, isvc, cube, secrets, instances, snaps)
     }
 
+    fn env_with_model() -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert(ENV_MODEL.into(), "anthropic/claude-sonnet-4-5".into());
+        m
+    }
+
     #[tokio::test]
     async fn snapshot_writes_manual_row_with_cube_id() {
         let (svc, isvc, _cube, _secrets, _instances, snaps) = build().await;
@@ -369,7 +375,7 @@ mod tests {
                 template_id: "t".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await
@@ -391,7 +397,7 @@ mod tests {
                 template_id: "t".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await
@@ -449,7 +455,7 @@ mod tests {
                 template_id: "t".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await
@@ -472,7 +478,7 @@ mod tests {
                 template_id: "t".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: None,
             })
             .await

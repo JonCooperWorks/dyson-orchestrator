@@ -287,7 +287,7 @@ mod tests {
         create_calls: Arc<AtomicU32>,
         snapshot_calls: Arc<AtomicU32>,
         delete_calls: Arc<AtomicU32>,
-        // Number of 503s to emit before succeeding on /v1/sandboxes.
+        // Number of 503s to emit before succeeding on /sandboxes.
         create_flake_remaining: Arc<AtomicU32>,
     }
 
@@ -301,10 +301,12 @@ mod tests {
             s.create_flake_remaining.fetch_sub(1, Ordering::SeqCst);
             return Err(AxStatus::SERVICE_UNAVAILABLE);
         }
-        // Inspect the env-map round-trip just enough to confirm the body
-        // shape matches the brief.
-        assert_eq!(body["template_id"], "tpl");
-        assert!(body["env"].is_object());
+        // CubeAPI's create payload uses E2B-style camelCase: templateID is
+        // always present; envVars is omitted when the map is empty.
+        assert_eq!(body["templateID"], "tpl");
+        if !body["envVars"].is_null() {
+            assert!(body["envVars"].is_object());
+        }
         Ok(Json(serde_json::json!({
             "sandboxID": "sb-1",
             "hostIP": "10.0.0.5",
@@ -352,10 +354,10 @@ mod tests {
             post(create_handler)
         };
         Router::new()
-            .route("/v1/sandboxes", create_route)
-            .route("/v1/sandboxes/:id", delete(delete_handler))
-            .route("/v1/sandboxes/:id/snapshots", post(snapshot_handler))
-            .route("/v1/snapshots/:id", delete(delete_snap_handler))
+            .route("/sandboxes", create_route)
+            .route("/sandboxes/:id", delete(delete_handler))
+            .route("/sandboxes/:id/snapshots", post(snapshot_handler))
+            .route("/sandboxes/snapshots/:id", delete(delete_snap_handler))
             .with_state(state)
     }
 

@@ -76,7 +76,7 @@ mod tests {
     use crate::db::secrets::SqlxSecretStore;
     use crate::db::tokens::SqlxTokenStore;
     use crate::error::CubeError;
-    use crate::instance::CreateRequest;
+    use crate::instance::{CreateRequest, ENV_MODEL};
     use crate::traits::{
         CreateSandboxArgs, CubeClient, InstanceStatus, InstanceStore, SandboxInfo, SecretStore,
         SnapshotInfo, TokenStore,
@@ -119,6 +119,12 @@ mod tests {
         }
     }
 
+    fn env_with_model() -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert(ENV_MODEL.into(), "anthropic/claude-sonnet-4-5".into());
+        m
+    }
+
     #[tokio::test]
     async fn run_once_destroys_only_expired_unpinned() {
         let pool = open_in_memory().await.unwrap();
@@ -143,7 +149,7 @@ mod tests {
                 template_id: "t".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: Some(1),
             })
             .await
@@ -155,7 +161,7 @@ mod tests {
                 template_id: "t".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: Some(1),
             })
             .await
@@ -168,7 +174,7 @@ mod tests {
                 template_id: "t".into(),
                 name: None,
                 task: None,
-                env: BTreeMap::new(),
+                env: env_with_model(),
                 ttl_seconds: Some(10_000),
             })
             .await
