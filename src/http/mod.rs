@@ -111,7 +111,8 @@ pub fn router(
     //    JWT or user api-key).  Stamps it on extensions.
     // 2. require_admin_role inspects the caller's claims for the
     //    configured admin role.  Bearer-only callers (no claims) and
-    //    OIDC users without the admin role get 403.
+    //    OIDC users without the admin role get 404 (admin surface
+    //    is privileged; we don't advertise its existence).
     //
     // Layers apply outside-in: the LAST `.layer()` runs FIRST.  So we
     // add user_middleware last to make it the outermost.
@@ -392,7 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_route_with_non_admin_role_is_403() {
+    async fn admin_route_with_non_admin_role_is_404() {
         let (state, users) = build_state().await;
         let (user_auth, _id) = crate::auth::user::fixed_user_auth_with_roles(
             users,
@@ -415,7 +416,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), 403);
+        // Denied admin requests return 404, not 403 — see the
+        // require_admin_role docstring for the rationale (privileged
+        // surface, deny-by-omission rather than deny-by-permission).
+        assert_eq!(r.status(), 404);
     }
 
     #[tokio::test]

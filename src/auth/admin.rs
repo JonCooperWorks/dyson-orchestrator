@@ -55,8 +55,16 @@ impl AuthState {
 
 /// Require the caller's JWT to carry the configured admin role.
 /// Expects `user_middleware` to have already stamped a [`CallerIdentity`]
-/// on the request extensions; absent → 401 (not 403, since the
-/// upstream layer should already have caught that).
+/// on the request extensions; absent → 401 (the auth layer's own
+/// rejection class).
+///
+/// Denial returns **404 Not Found**, not 403.  The admin surface is a
+/// privileged path operators don't want to advertise to scanners or
+/// half-curious tenants.  A 403 leaks "this endpoint exists, you're
+/// just not in the right role"; a 404 collapses denial into the same
+/// shape every unmapped path returns and gives nothing away.  The
+/// SPA gates the admin link on the `permissions` claim client-side
+/// so legitimate admins never see the 404 either.
 pub async fn require_admin_role(
     State(auth): State<AuthState>,
     req: Request,
@@ -71,11 +79,13 @@ pub async fn require_admin_role(
 
     let Some(roles) = auth.roles.as_ref() else {
         // Production posture but no [oidc.roles] configured — admin
-        // is unreachable.  Fail closed.
+        // is unreachable.  Fail closed; same 404 shape as the
+        // missing-role path so a misconfiguration doesn't reveal
+        // any more about the admin surface than a regular denial would.
         tracing::warn!(
             "admin route hit but [oidc.roles] not configured — denying"
         );
-        return (StatusCode::FORBIDDEN, "admin role check not configured").into_response();
+        return StatusCode::NOT_FOUND.into_response();
     };
 
     let Some(caller) = req.extensions().get::<CallerIdentity>() else {
@@ -85,7 +95,7 @@ pub async fn require_admin_role(
     };
 
     if !caller_has_role(caller, &roles.claim, &roles.admin) {
-        return (StatusCode::FORBIDDEN, "admin role required").into_response();
+        return StatusCode::NOT_FOUND.into_response();
     }
     next.run(req).await
 }

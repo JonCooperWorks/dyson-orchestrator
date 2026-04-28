@@ -37,11 +37,24 @@ pub enum AuthMode {
     None,
     /// Full OIDC + PKCE.  `required_scopes` is what the SPA appends to
     /// `openid` when constructing the authorize URL.
+    ///
+    /// `admin_claim` / `admin_role` mirror the server-side `[oidc.roles]`
+    /// block so the SPA can hide privileged UI (admin tab, force-mint
+    /// buttons, etc.) from non-admins client-side.  This is purely a UX
+    /// gate — the server still does its own check on every
+    /// `/v1/admin/*` call (and returns 404 to non-admins, hiding the
+    /// surface entirely).  Both fields are `None` when `[oidc.roles]`
+    /// isn't configured, which means the SPA renders no admin UI at all
+    /// (fail closed).
     Oidc {
         issuer: String,
         audience: String,
         client_id: String,
         required_scopes: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        admin_claim: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        admin_role: Option<String>,
     },
 }
 
@@ -78,6 +91,8 @@ impl AuthConfig {
                     audience: o.audience.clone(),
                     client_id: id.clone(),
                     required_scopes: o.spa_scopes.clone(),
+                    admin_claim: o.roles.as_ref().map(|r| r.claim.clone()),
+                    admin_role: o.roles.as_ref().map(|r| r.admin.clone()),
                 },
                 _ => AuthMode::None,
             },
@@ -140,11 +155,37 @@ mod tests {
         };
         let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
         match cfg.mode {
-            AuthMode::Oidc { issuer, audience, client_id, required_scopes } => {
+            AuthMode::Oidc { issuer, audience, client_id, required_scopes, admin_claim, admin_role } => {
                 assert_eq!(issuer, "https://idp.example");
                 assert_eq!(audience, "warden");
                 assert_eq!(client_id, "warden-spa");
                 assert_eq!(required_scopes, vec!["profile", "email"]);
+                assert!(admin_claim.is_none(), "no [oidc.roles] → no admin claim surfaced");
+                assert!(admin_role.is_none());
+            }
+            _ => panic!("expected oidc mode"),
+        }
+    }
+
+    #[test]
+    fn oidc_with_roles_surfaces_admin_claim_and_role() {
+        let oidc = OidcConfigToml {
+            issuer: "https://idp.example".into(),
+            audience: "warden".into(),
+            jwks_url: None,
+            jwks_ttl_seconds: 86_400,
+            spa_client_id: Some("warden-spa".into()),
+            spa_scopes: vec![],
+            roles: Some(crate::config::OidcRoles {
+                claim: "permissions".into(),
+                admin: "admin".into(),
+            }),
+        };
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
+        match cfg.mode {
+            AuthMode::Oidc { admin_claim, admin_role, .. } => {
+                assert_eq!(admin_claim.as_deref(), Some("permissions"));
+                assert_eq!(admin_role.as_deref(), Some("admin"));
             }
             _ => panic!("expected oidc mode"),
         }
@@ -180,6 +221,8 @@ mod tests {
                 audience: "warden".into(),
                 client_id: "warden-spa".into(),
                 required_scopes: vec!["profile".into()],
+                admin_claim: Some("permissions".into()),
+                admin_role: Some("admin".into()),
             },
             default_template_id: Some("tpl-abc".into()),
             default_models: vec!["anthropic/claude-sonnet-4-5".into()],

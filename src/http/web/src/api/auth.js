@@ -318,7 +318,7 @@ export async function bootstrapAuth() {
   const cfg = await loadAuthConfig();
 
   if (cfg.mode === 'none') {
-    return { mode: 'none', config: cfg, getToken: () => null, logout: () => {} };
+    return { mode: 'none', config: cfg, getToken: () => null, logout: () => {}, isAdmin: false };
   }
   if (cfg.mode !== 'oidc') {
     throw new Error(`unknown auth mode: ${cfg.mode}`);
@@ -350,12 +350,39 @@ export async function bootstrapAuth() {
   const onRedirect = () => startAuthorizationFlow(cfg, discovery).catch(() => {});
   scheduleRefresh(cfg, discovery, onRedirect);
 
+  // Read the admin role out of the access token so the SPA can hide
+  // privileged UI from non-admins.  Server still does its own check on
+  // every /v1/admin/* request and returns 404 for non-admins (see
+  // require_admin_role in src/auth/admin.rs); this is purely a UX
+  // gate so legitimate admins don't see "no such endpoint" errors and
+  // non-admins don't see clickable admin chrome that 404s back.
+  const isAdmin = checkAdminClaim(readTokens()?.access_token, cfg);
   return {
     mode: 'oidc',
     config: cfg,
     getToken: () => readTokens()?.access_token || null,
     logout: () => signOut(cfg, discovery, onRedirect),
+    isAdmin,
   };
+}
+
+/// Decode the JWT body (no verification — that's the server's job)
+/// and check whether the configured admin claim contains the configured
+/// admin role.  Returns false on any malformed input — fail closed.
+function checkAdminClaim(token, cfg) {
+  if (!token || !cfg?.admin_claim || !cfg?.admin_role) return false;
+  const parts = token.split('.');
+  if (parts.length < 2) return false;
+  try {
+    // base64url → base64 → JSON.  atob handles base64; we map -/_ → +/.
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '=='.slice((b64.length + 2) % 4);
+    const claims = JSON.parse(atob(padded));
+    const arr = claims[cfg.admin_claim];
+    return Array.isArray(arr) && arr.includes(cfg.admin_role);
+  } catch {
+    return false;
+  }
 }
 
 // RP-initiated logout (OIDC spec).  Clearing the SPA's tokens isn't

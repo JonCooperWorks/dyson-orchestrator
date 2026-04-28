@@ -10,13 +10,20 @@ import { useApi } from '../hooks/useApi.jsx';
 
 export function TopBar({ view }) {
   const { auth } = useApi();
-  const isAdmin = view?.name === 'admin';
+  // `view.name === 'admin'` is the route-active state; `auth.isAdmin`
+  // is the JWT-permissions-claim state from bootstrapAuth.  The admin
+  // link only renders for actual admins — server returns 404 for
+  // non-admins (see require_admin_role on the warden side), so a
+  // visible link would just dead-end into a missing-page error.
+  const onAdminRoute = view?.name === 'admin';
   return (
     <header className="topbar">
       <div className="topbar-brand">warden</div>
       <nav className="topbar-nav">
-        <a className={!isAdmin ? 'active' : ''} href="#/">instances</a>
-        <a className={isAdmin ? 'active' : ''} href="#/admin">admin</a>
+        <a className={!onAdminRoute ? 'active' : ''} href="#/">instances</a>
+        {auth.isAdmin ? (
+          <a className={onAdminRoute ? 'active' : ''} href="#/admin">admin</a>
+        ) : null}
         <span className="topbar-view">· {viewLabel(view)}</span>
       </nav>
       <div className="topbar-actions">

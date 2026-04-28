@@ -196,8 +196,30 @@ impl Authenticator for OidcAuthenticator {
             .kid
             .ok_or_else(|| AuthError::Invalid("missing kid".into()))?;
         let key = self.key_for_kid(&kid).await?;
-        let data = decode::<JsonValue>(&token, &key, &self.validation())
-            .map_err(|e| AuthError::Invalid(format!("verify: {e}")))?;
+        let data = decode::<JsonValue>(&token, &key, &self.validation()).map_err(|e| {
+            // Surface the JWT's iss/aud claims on validation failure —
+            // they're the two knobs that go wrong on first OIDC setup
+            // (Auth0 custom domains, mismatched API identifiers, etc.).
+            // We re-decode without verification just to read the claims;
+            // the original error from the verifier is what we propagate.
+            let mut nv = Validation::new(Algorithm::RS256);
+            nv.insecure_disable_signature_validation();
+            nv.validate_aud = false;
+            nv.required_spec_claims.clear();
+            if let Ok(unverified) = decode::<JsonValue>(&token, &key, &nv) {
+                let iss = unverified.claims.get("iss").and_then(|v| v.as_str()).unwrap_or("?");
+                let aud = unverified.claims.get("aud").map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+                tracing::debug!(
+                    error = %e,
+                    token_iss = %iss,
+                    token_aud = %aud,
+                    expected_iss = %self.cfg.issuer,
+                    expected_aud = %self.cfg.audience,
+                    "oidc verify failed"
+                );
+            }
+            AuthError::Invalid(format!("verify: {e}"))
+        })?;
         let claims = data.claims;
         let subject = claims
             .get("sub")

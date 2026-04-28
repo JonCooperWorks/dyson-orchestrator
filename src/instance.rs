@@ -178,6 +178,22 @@ pub struct ReconfigureBody {
     pub models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
+    /// The per-instance proxy_token warden minted at create-time.
+    /// Becomes the value of `providers.<agent.provider>.api_key` in
+    /// the running dyson's `dyson.json` — the agent uses this as its
+    /// bearer when calling warden's `/llm/...` endpoints.  Without
+    /// this push the api_key stays at the boot-time `warmup-placeholder`
+    /// (cube's snapshot/restore freezes `/proc/self/environ`, so the
+    /// `WARDEN_PROXY_TOKEN` warden injects on create never reaches
+    /// the dyson process — same root cause as the missing `models`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_token: Option<String>,
+    /// The /llm proxy URL (`https://<hostname>/llm`).  Patched into
+    /// `providers.<agent.provider>.base_url` so the dyson's api client
+    /// hits Caddy → warden instead of the loopback URL frozen at
+    /// warmup.  Skipped when None (warden runs without a hostname).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_base: Option<String>,
 }
 
 impl InstanceService {
@@ -323,6 +339,18 @@ impl InstanceService {
                 task: req.task.clone().filter(|s| !s.is_empty()),
                 models,
                 instance_id: Some(id.clone()),
+                // Push the freshly-minted proxy_token + the resolved
+                // /llm base URL into the running dyson's dyson.json so
+                // the agent stops trying to call upstream with the
+                // boot-time `warmup-placeholder` api_key.  The /openrouter/v1
+                // suffix matches what `dyson warden`'s warmup config
+                // writer constructs — keeps dyson's admin handler
+                // agnostic to which provider the agent fronts.
+                proxy_token: Some(proxy_token.clone()),
+                proxy_base: Some(format!(
+                    "{}/openrouter/v1",
+                    self.proxy_base.trim_end_matches('/')
+                )),
             };
             let r = reconfigurer.clone();
             let id_for_log = id.clone();
@@ -425,6 +453,10 @@ impl InstanceService {
                 task: Some(task.to_owned()).filter(|s| !s.is_empty()),
                 models: Vec::new(), // identity-only update; leave models alone
                 instance_id: Some(id.to_owned()),
+                // Identity update doesn't touch provider config; leave
+                // proxy_token / proxy_base unchanged on the dyson side.
+                proxy_token: None,
+                proxy_base: None,
             };
             let r = r.clone();
             let id_owned = id.to_owned();
@@ -478,6 +510,9 @@ impl InstanceService {
             task: None,
             models,
             instance_id: Some(id.to_owned()),
+            // Edit-models-only path: provider config stays as-is.
+            proxy_token: None,
+            proxy_base: None,
         };
         push_with_retry(&**r, id, sandbox_id, &body)
             .await

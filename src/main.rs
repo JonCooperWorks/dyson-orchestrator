@@ -133,7 +133,23 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let users_store: Arc<dyn UserStore> =
         Arc::new(db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()));
 
-    let proxy_base = format!("http://{}/llm", cfg.bind);
+    // Dyson agents inside cube sandboxes can't reach warden's bind
+    // (which is loopback 127.0.0.1:8080 by design — Caddy is the only
+    // public-facing listener).  Cube's default outbound policy also
+    // blocks RFC1918 + CGNAT (`100.64.0.0/10`, the tailnet range), so
+    // even a non-loopback bind on the host's tailnet IP would be
+    // unreachable.  When `hostname` is set, route the agent's /llm
+    // calls back through Caddy at the public hostname instead — public
+    // DNS, public TLS (Let's Encrypt or whatever Caddy issued), works
+    // through the same internet path the cube already trusts.
+    //
+    // Local-dev callers without a hostname keep the loopback URL, since
+    // the agent runs on the same machine in that path.
+    let proxy_base = match cfg.hostname.as_deref().filter(|h| !h.is_empty()) {
+        Some(host) => format!("https://{host}/llm"),
+        None => format!("http://{}/llm", cfg.bind),
+    };
+    tracing::info!(proxy_base = %proxy_base, "agent /llm proxy URL");
     let mut instance_svc = InstanceService::new(
         cube.clone(),
         instances_store.clone(),
