@@ -43,6 +43,15 @@ pub struct DysonReconfigurerHttp {
     sandbox_domain: String,
     /// Where the per-instance configure secret is sealed.
     system_secrets: Arc<SystemSecretsService>,
+    /// Per-instance mint serialiser.  Without this, two parallel pushes
+    /// for the same instance both miss the cached secret, both mint a
+    /// fresh UUID, and only the second `put` survives — but the first
+    /// one's request body had already been signed with the now-orphaned
+    /// secret.  Dyson TOFU-pins whichever plaintext arrived first and
+    /// rejects the other forever.  The mutex closes that race.
+    mint_locks: Arc<std::sync::Mutex<
+        std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    >>,
 }
 
 impl DysonReconfigurerHttp {
@@ -73,6 +82,7 @@ impl DysonReconfigurerHttp {
             http: b.build()?,
             sandbox_domain: sandbox_domain.into(),
             system_secrets,
+            mint_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -81,11 +91,26 @@ impl DysonReconfigurerHttp {
     /// return the same plaintext so dyson's TOFU hash stays valid.
     async fn ensure_secret(&self, instance_id: &str) -> Result<String, String> {
         let name = configure_secret_name(instance_id);
+        // Fast path: secret already sealed.
         if let Some(plain) = self.system_secrets.get(&name).await.map_err(|e| e.to_string())? {
             return String::from_utf8(plain)
                 .map_err(|_| "non-utf8 configure secret in system_secrets".to_string());
         }
-        // First push for this instance — mint, seal, return.
+        // Slow path: serialise on the per-instance mint lock so two
+        // concurrent first-pushes don't mint two distinct UUIDs.
+        let lock = {
+            let mut map = self.mint_locks.lock().expect("mint_locks poisoned");
+            map.entry(instance_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+        // Re-check under the lock — another caller may have minted while
+        // we were waiting.
+        if let Some(plain) = self.system_secrets.get(&name).await.map_err(|e| e.to_string())? {
+            return String::from_utf8(plain)
+                .map_err(|_| "non-utf8 configure secret in system_secrets".to_string());
+        }
         let s = uuid::Uuid::new_v4().simple().to_string();
         self.system_secrets
             .put(&name, s.as_bytes())
@@ -175,5 +200,63 @@ pub async fn forget_secret(
             instance = %instance_id,
             "reconfigure: forget_secret failed; sealed plaintext lingers"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use crate::db::open_in_memory;
+    use crate::db::secrets::SqlxSystemSecretStore;
+    use crate::envelope::AgeCipherDirectory;
+    use crate::traits::SystemSecretStore;
+
+    /// Regression: two parallel first-push pushes for the same instance
+    /// must mint exactly one configure-secret plaintext.  Without the
+    /// per-instance lock both callers race past the read, both mint
+    /// fresh UUIDs, and the put-loser's request body has already been
+    /// signed with a now-orphaned secret — dyson TOFU-pins the winner
+    /// and rejects the loser permanently.
+    #[tokio::test]
+    async fn parallel_ensure_secret_returns_one_plaintext() {
+        let pool = open_in_memory().await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let store: Arc<dyn SystemSecretStore> =
+            Arc::new(SqlxSystemSecretStore::new(pool));
+        let system_secrets = Arc::new(SystemSecretsService::new(store, cipher_dir));
+
+        let r = DysonReconfigurerHttp::new("cube.test:8443", system_secrets.clone()).unwrap();
+        let r = Arc::new(r);
+        let instance_id = "i-test";
+
+        // Fire 16 ensure_secret calls in parallel.  Without the lock we
+        // expect 16 distinct UUIDs minted (only the last `put` survives,
+        // rendering all other in-flight pushes' signatures orphaned).
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let r = r.clone();
+            handles.push(tokio::spawn(async move { r.ensure_secret(instance_id).await }));
+        }
+        let mut secrets = Vec::with_capacity(16);
+        for h in handles {
+            secrets.push(h.await.unwrap().unwrap());
+        }
+        // Every caller must see the same sealed plaintext.
+        let first = secrets[0].clone();
+        for s in &secrets {
+            assert_eq!(s, &first, "ensure_secret must not mint twice for one instance");
+        }
+        // And the sealed value must equal what callers observed.
+        let sealed = system_secrets
+            .get(&configure_secret_name(instance_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf8(sealed).unwrap(), first);
     }
 }

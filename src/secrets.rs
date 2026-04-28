@@ -83,19 +83,13 @@ impl SecretsService {
         let rows = self.store.list(instance_id).await?;
         let mut out = Vec::with_capacity(rows.len());
         for (name, ct) in rows {
-            match cipher.open(ct.as_bytes()) {
-                Ok(plain) => match String::from_utf8(plain) {
-                    Ok(s) => out.push((name, s)),
-                    Err(_) => tracing::warn!(
-                        instance = %instance_id, name = %name,
-                        "instance_secret decrypted to non-utf8 — skipping"
-                    ),
-                },
-                Err(_) => tracing::warn!(
-                    instance = %instance_id, name = %name,
-                    "instance_secret failed to decrypt with owner key — skipping"
-                ),
-            }
+            if let Ok(plain) = cipher.open(ct.as_bytes()) { if let Ok(s) = String::from_utf8(plain) { out.push((name, s)) } else { tracing::warn!(
+                instance = %instance_id, name = %name,
+                "instance_secret decrypted to non-utf8 — skipping"
+            ); } } else { tracing::warn!(
+                instance = %instance_id, name = %name,
+                "instance_secret failed to decrypt with owner key — skipping"
+            ); }
         }
         Ok(out)
     }

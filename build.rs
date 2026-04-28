@@ -18,6 +18,7 @@
 //     pulls it in via `include!`.
 
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -33,12 +34,10 @@ fn main() {
 
     watch_inputs(&web);
 
-    if !web.join("index.html").exists() {
-        panic!(
-            "frontend source missing at {} — did the checkout preserve the web/ directory?",
-            web.display(),
-        );
-    }
+    assert!(web.join("index.html").exists(), 
+        "frontend source missing at {} — did the checkout preserve the web/ directory?",
+        web.display(),
+    );
 
     let dist = web.join("dist");
     if needs_rebuild(&web, &dist) {
@@ -117,10 +116,7 @@ fn walk(root: &Path) -> Vec<PathBuf> {
             if name.starts_with('.') || name == "node_modules" {
                 continue;
             }
-            let ft = match e.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
+            let Ok(ft) = e.file_type() else { continue };
             if ft.is_dir() {
                 stack.push(path);
             } else if ft.is_file() {
@@ -135,21 +131,19 @@ fn ensure_npm_available() {
     let ok = Command::new("npm")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !ok {
-        panic!(
-            "npm is required to build the swarm frontend.  Install Node.js 20+ \
-             (https://nodejs.org) and retry `cargo build`.  The frontend lives \
-             at {WEB_REL}/ and is bundled into the binary."
-        );
-    }
+        .is_ok_and(|o| o.status.success());
+    assert!(
+        ok,
+        "npm is required to build the swarm frontend.  Install Node.js 20+ \
+         (https://nodejs.org) and retry `cargo build`.  The frontend lives \
+         at {WEB_REL}/ and is bundled into the binary."
+    );
 }
 
 fn ensure_node_modules(web: &Path) {
     let stamp = web.join("node_modules").join(".swarm-lock-hash");
     let lock = web.join("package-lock.json");
-    let hash = fs::read(&lock).map(hash_bytes).unwrap_or(0);
+    let hash = fs::read(&lock).map_or(0, hash_bytes);
 
     let existing = fs::read_to_string(&stamp).ok().and_then(|s| s.trim().parse::<u64>().ok());
     if existing == Some(hash) && web.join("node_modules").exists() {
@@ -168,9 +162,7 @@ fn ensure_node_modules(web: &Path) {
         .current_dir(web)
         .status()
         .expect("failed to spawn npm install");
-    if !status.success() {
-        panic!("npm {cmd} failed in {}", web.display());
-    }
+    assert!(status.success(), "npm {cmd} failed in {}", web.display());
     let _ = fs::write(&stamp, hash.to_string());
 }
 
@@ -185,12 +177,11 @@ fn run_npm_build(web: &Path) {
         .current_dir(web)
         .status()
         .expect("failed to spawn npm run build:nocheck");
-    if !status.success() {
-        panic!(
-            "npm run build:nocheck failed in {} — see stderr above.",
-            web.display(),
-        );
-    }
+    assert!(
+        status.success(),
+        "npm run build:nocheck failed in {} — see stderr above.",
+        web.display(),
+    );
 }
 
 fn hash_bytes(bytes: Vec<u8>) -> u64 {
@@ -218,7 +209,7 @@ fn generate_asset_table(dist: &Path, out: &Path) {
     src.push_str("// file via include_bytes!.  Binary size follows dist/ exactly.\n\n");
     src.push_str("pub const ASSETS: &[(&str, &[u8], &str)] = &[\n");
     for (url, abs, ct) in &entries {
-        src.push_str(&format!("    ({url:?}, include_bytes!({abs:?}), {ct:?}),\n"));
+        writeln!(src, "    ({url:?}, include_bytes!({abs:?}), {ct:?}),").unwrap();
     }
     src.push_str("];\n");
 

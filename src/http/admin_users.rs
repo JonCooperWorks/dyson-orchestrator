@@ -4,13 +4,12 @@
 //! - `GET    /v1/admin/users` — list all users (auto-created + provisioned)
 //! - `POST   /v1/admin/users/:id/activate` — flip status to `active`
 //! - `POST   /v1/admin/users/:id/suspend` — flip status to `suspended`,
-//!                                          revoke OR key upstream
+//!   revoke OR key upstream
 //! - `POST   /v1/admin/users/:id/keys` — mint an opaque bearer for the user
 //! - `DELETE /v1/admin/users/keys/:token` — revoke an api key by value
 //! - `PATCH  /v1/admin/users/:id/openrouter_limit` — set OR USD cap
 //! - `POST   /v1/admin/users/:id/openrouter_key/mint` — force a fresh
-//!                                                     mint, returns the
-//!                                                     plaintext once
+//!   mint, returns the plaintext once
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;

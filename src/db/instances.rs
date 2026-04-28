@@ -125,7 +125,7 @@ impl InstanceStore for SqlxInstanceStore {
         filter: ListFilter,
     ) -> Result<Vec<InstanceRow>, StoreError> {
         let status_filter: Option<String> = filter.status.map(|s| s.as_str().to_owned());
-        let all_owners = if owner_id == "*" { 1i64 } else { 0i64 };
+        let all_owners = i64::from(owner_id == "*");
         let rows = sqlx::query(
             "SELECT * FROM instances \
              WHERE (?1 = 1 OR owner_id = ?2) \

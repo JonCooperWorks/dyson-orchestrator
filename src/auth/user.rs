@@ -82,8 +82,9 @@ async fn resolve_caller(
 ) -> Result<CallerIdentity, Response> {
     let identity = match authenticator.authenticate(headers).await {
         Ok(id) => id,
-        Err(AuthError::Missing) => return Err(StatusCode::UNAUTHORIZED.into_response()),
-        Err(AuthError::Unsupported) => return Err(StatusCode::UNAUTHORIZED.into_response()),
+        Err(AuthError::Missing | AuthError::Unsupported) => {
+            return Err(StatusCode::UNAUTHORIZED.into_response());
+        }
         Err(AuthError::Invalid(reason)) => {
             tracing::debug!(%reason, "auth invalid");
             return Err(StatusCode::UNAUTHORIZED.into_response());

@@ -1,5 +1,4 @@
 bind = "0.0.0.0:8080"
-admin_token = "CHANGE_ME"
 db_path = "/var/lib/dyson-swarm/state.db"
 
 # Public hostname swarm answers on. When set, every Dyson is reachable at
@@ -15,7 +14,6 @@ db_path = "/var/lib/dyson-swarm/state.db"
 # CLI, admin panel) works fine without it.
 hostname = "swarm.example.com"
 
-default_ttl_seconds = 86400
 health_probe_interval_seconds = 60
 health_probe_timeout_seconds = 5
 

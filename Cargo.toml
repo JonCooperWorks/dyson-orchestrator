@@ -16,33 +16,38 @@ name = "swarm"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "macros", "signal", "sync", "fs"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
-rust-s3 = { version = "0.34", default-features = false, features = ["tokio-rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = { version = "0.8", default-features = false, features = ["parse"] }
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage"] }
-tracing = { version = "0.1", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json"] }
-thiserror = "1"
-uuid = { version = "1", default-features = false, features = ["v4", "serde"] }
-async-trait = "0.1"
-futures = { version = "0.3", default-features = false, features = ["std"] }
-jsonwebtoken = { version = "9", default-features = false }
-age = { version = "0.10", default-features = false, features = ["armor"] }
+# Versions are pinned to the current minor — Cargo.lock pins exact patch.
+# Bumping a minor is a deliberate operation; SemVer-major bumps require
+# a code review and a security/breakage check.
+axum = { version = "0.7.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+tokio = { version = "1.52", default-features = false, features = ["rt-multi-thread", "net", "macros", "signal", "sync", "fs"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+# rust-s3 0.37 closes RUSTSEC-2026-0098 / 2026-0099 / 2026-0104 (rustls-webpki
+# 0.101 chain shipped with 0.34).  See deploy/README.md for upgrade notes.
+rust-s3 = { version = "0.37.1", default-features = false, features = ["tokio-rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+clap = { version = "4.6", default-features = false, features = ["derive", "std", "help", "usage"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "json"] }
+thiserror = "1.0.69"
+uuid = { version = "1.23", default-features = false, features = ["v4", "serde"] }
+async-trait = "0.1.89"
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
+jsonwebtoken = { version = "9.3", default-features = false }
+age = { version = "0.10.1", default-features = false, features = ["armor"] }
 # argon2id for the per-instance configure secret (Stage 8) — swarm
 # generates a plaintext on instance create, sends it to dyson on every
 # /api/admin/configure call; dyson stores the argon2id hash on its
 # disk on first call (TOFU) and verifies on subsequent calls.  Same
 # crate dyson already uses for its bearer-auth hashing path.
-argon2 = "0.5"
+argon2 = "0.5.3"
 # CSPRNG for fresh api-key tokens (Stage 4).  Dev-deps already pulled
 # this in; promoting to a runtime dep so mint_api_key can use it
 # directly without hand-rolling a getrandom wrapper.
-rand = "0.8"
+rand = "0.8.6"
 
 [features]
 default = []
@@ -54,10 +59,11 @@ postgres = ["sqlx/postgres"]
 [dev-dependencies]
 # Used only by the OIDC test to mint a fresh RSA keypair + sign mock JWTs.
 # Not a runtime dep — production OIDC verification only uses the public key
-# delivered via JWKS.
-rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
-base64 = "0.22"
-tempfile = "3"
+# delivered via JWKS.  RUSTSEC-2023-0071 (Marvin timing attack) is a no-op
+# here: tests sign, never decrypt.
+rsa = { version = "0.9.10", default-features = false, features = ["std", "pem"] }
+base64 = "0.22.1"
+tempfile = "3.27"
 
 [profile.release]
 lto = "thin"
@@ -65,3 +71,30 @@ codegen-units = 1
 strip = true
 panic = "abort"
 opt-level = 3
+
+# Lint policy.  Pedantic is on; the categories below are allowed because
+# they're pure stylistic nits ("missing backticks", "missing # Errors
+# section", "could have #[must_use]") on this codebase, ~200 hits with
+# no runtime impact.  The substantive pedantic checks — cast safety,
+# allocation, match-arm dedup, manual_let_else — stay on.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Doc-only nits that don't change runtime behaviour.
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+# Several short helpers take `String` by value to keep call sites
+# ergonomic at the cost of one move.
+needless_pass_by_value = "allow"
+# `pub use crate::foo::Foo` is deliberate.
+module_name_repetitions = "allow"
+# A handful of long handler functions are linear request flows; splitting
+# them obscures the sequence.
+too_many_lines = "allow"
+# `i64` is the SQLite-native int type — lossless u32/u16 → i64 promotions
+# in the DB layer are intentional.
+cast_lossless = "allow"
+# Mostly fixture-naming collisions in tests.
+similar_names = "allow"

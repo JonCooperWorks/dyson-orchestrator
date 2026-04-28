@@ -183,9 +183,8 @@ impl OidcAuthenticator {
 #[async_trait]
 impl Authenticator for OidcAuthenticator {
     async fn authenticate(&self, headers: &HeaderMap) -> Result<UserIdentity, AuthError> {
-        let token = match extract_bearer(headers) {
-            Some(t) => t,
-            None => return Err(AuthError::Missing),
+        let Some(token) = extract_bearer(headers) else {
+            return Err(AuthError::Missing);
         };
         if !looks_like_jwt(&token) {
             return Err(AuthError::Unsupported);
@@ -208,7 +207,7 @@ impl Authenticator for OidcAuthenticator {
             nv.required_spec_claims.clear();
             if let Ok(unverified) = decode::<JsonValue>(&token, &key, &nv) {
                 let iss = unverified.claims.get("iss").and_then(|v| v.as_str()).unwrap_or("?");
-                let aud = unverified.claims.get("aud").map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+                let aud = unverified.claims.get("aud").map_or_else(|| "?".into(), std::string::ToString::to_string);
                 tracing::debug!(
                     error = %e,
                     token_iss = %iss,
@@ -263,6 +262,7 @@ struct JwksKey {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_statements)] // test fixtures define helpers inline
 mod tests {
     use super::*;
     use axum::extract::State;
@@ -330,10 +330,14 @@ mod tests {
         let kid_for_state = kid.clone();
         let calls_for_state = jwks_calls.clone();
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let issuer = format!("http://{addr}");
-        let issuer_for_state = issuer.clone();
+#[derive(Clone)]
+        struct DiscoveryState {
+            issuer: String,
+            jwks_calls: Arc<AtomicU32>,
+            n: String,
+            e: String,
+            kid: String,
+        }
 
         async fn discovery(State(s): State<DiscoveryState>) -> Json<JsonValue> {
             Json(serde_json::json!({
@@ -356,14 +360,11 @@ mod tests {
             }))
         }
 
-        #[derive(Clone)]
-        struct DiscoveryState {
-            issuer: String,
-            jwks_calls: Arc<AtomicU32>,
-            n: String,
-            e: String,
-            kid: String,
-        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let issuer = format!("http://{addr}");
+        let issuer_for_state = issuer.clone();
+
         let state = DiscoveryState {
             issuer: issuer_for_state.clone(),
             jwks_calls: calls_for_state,

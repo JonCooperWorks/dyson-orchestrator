@@ -325,7 +325,9 @@ fn pseudo_jitter(attempt: u32) -> u64 {
     use std::time::Instant;
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let s = START.get_or_init(Instant::now);
-    s.elapsed().as_nanos() as u64 ^ (attempt as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    // Jitter only — truncation to u64 is fine; we don't need the upper bits.
+    let nanos = u64::try_from(s.elapsed().as_nanos() & u128::from(u64::MAX)).unwrap_or(0);
+    nanos ^ u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 #[cfg(test)]

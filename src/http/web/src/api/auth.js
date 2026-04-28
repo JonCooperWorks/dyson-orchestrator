@@ -61,49 +61,55 @@ function writeTokens(tokens) {
 // carry Authorization headers; the proxy reads this cookie as a Bearer
 // fallback when the header is absent.
 //
-// Domain is derived from the apex hostname (everything after the first
-// label), so the cookie is sent for both `apex.example.com` and every
-// `<sub>.apex.example.com`.  SameSite=Lax keeps it off cross-site POSTs;
-// the proxy has no state-changing cookie-only verbs anyway.  Secure
-// gates it to HTTPS (the deployment is HTTPS-only via Caddy).
+// `Domain=<host>` scopes the cookie to the apex AND every subdomain
+// underneath it (the per-Dyson reverse-proxy origins).  We deliberately
+// DO NOT walk up to the parent domain — `swarm.example.com` cookies must
+// not leak to `wiki.example.com`.  SameSite=Lax keeps it off cross-site
+// POSTs; the proxy has no state-changing cookie-only verbs anyway.
+// Secure gates it to HTTPS (the deployment is HTTPS-only via Caddy).
 const COOKIE_NAME = 'dyson_swarm_session';
-function cookieDomain() {
-  const host = window.location.hostname;
-  // No-op when running on localhost / a single-label host (cookies work
-  // fine without an explicit Domain attribute in those cases).
+
+// Pure helper — exported for tests.  `host` is `window.location.hostname`.
+// Returns the value to use for the cookie's Domain attribute, or null
+// when the cookie should be scoped to the host implicitly (single-label
+// hosts and bare IPv4 — browsers reject Domain= on either).
+export function computeCookieDomain(host) {
+  if (!host) return null;
+  // No-op when running on localhost / a single-label host / a bare IP.
   if (!host.includes('.') || /^[\d.]+$/.test(host)) return null;
-  // Strip the leading label so the cookie covers parent + every sibling
-  // subdomain.  e.g. host="dyson.myprivate.network" -> ".myprivate.network".
-  // For a single-label-deep deployment ("foo.bar"), this yields ".bar"
-  // which is fine — browsers reject TLD-only cookies anyway.
-  const parts = host.split('.');
-  if (parts.length <= 2) return host;
-  return parts.slice(1).join('.');
+  // Scope to the host itself.  Cookies with `Domain=<host>` are sent for
+  // the host and every subdomain — exactly what the dyson_proxy needs
+  // for `<id>.<host>` — without leaking to siblings of the parent.
+  return host;
 }
-function setSessionCookie(token, expiresAtMs) {
-  if (!token) return;
-  const parts = [
-    `${COOKIE_NAME}=${encodeURIComponent(token)}`,
-    'Path=/',
-    'SameSite=Lax',
-  ];
-  if (window.location.protocol === 'https:') parts.push('Secure');
-  const dom = cookieDomain();
+
+// Pure helper — exported for tests.  Builds the attribute list (without
+// the `name=value` segment) for the session cookie.
+export function computeCookieAttributes({ host, protocol, expiresAtMs } = {}) {
+  const parts = ['Path=/', 'SameSite=Lax'];
+  if (protocol === 'https:') parts.push('Secure');
+  const dom = computeCookieDomain(host);
   if (dom) parts.push(`Domain=${dom}`);
   if (expiresAtMs) parts.push(`Expires=${new Date(expiresAtMs).toUTCString()}`);
-  document.cookie = parts.join('; ');
+  return parts;
+}
+
+function setSessionCookie(token, expiresAtMs) {
+  if (!token) return;
+  const attrs = computeCookieAttributes({
+    host: window.location.hostname,
+    protocol: window.location.protocol,
+    expiresAtMs,
+  });
+  document.cookie = [`${COOKIE_NAME}=${encodeURIComponent(token)}`, ...attrs].join('; ');
 }
 function clearSessionCookie() {
-  const parts = [
-    `${COOKIE_NAME}=`,
-    'Path=/',
-    'SameSite=Lax',
-    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
-  ];
-  if (window.location.protocol === 'https:') parts.push('Secure');
-  const dom = cookieDomain();
-  if (dom) parts.push(`Domain=${dom}`);
-  document.cookie = parts.join('; ');
+  const attrs = computeCookieAttributes({
+    host: window.location.hostname,
+    protocol: window.location.protocol,
+    expiresAtMs: Date.parse('1970-01-01T00:00:00Z'),
+  });
+  document.cookie = [`${COOKIE_NAME}=`, ...attrs].join('; ');
 }
 
 function readPending() {

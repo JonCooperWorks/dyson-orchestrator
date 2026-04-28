@@ -40,7 +40,7 @@ impl Authenticator for ChainAuthenticator {
                 Ok(id) => return Ok(id),
                 Err(AuthError::Missing) => last_missing_or_unsupported = AuthError::Missing,
                 Err(AuthError::Unsupported) => {
-                    last_missing_or_unsupported = AuthError::Unsupported
+                    last_missing_or_unsupported = AuthError::Unsupported;
                 }
                 Err(other) => return Err(other),
             }

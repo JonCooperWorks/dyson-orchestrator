@@ -135,9 +135,6 @@ mod tests {
             secrets,
             tokens,
             "http://t/llm",
-            // Tiny default TTL so the unpinned instance below qualifies as
-            // expired by the time we sweep.
-            1,
         ));
 
         // a: unpinned, will expire shortly

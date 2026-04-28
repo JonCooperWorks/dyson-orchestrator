@@ -163,7 +163,7 @@ mod tests {
                 assert!(admin_claim.is_none(), "no [oidc.roles] → no admin claim surfaced");
                 assert!(admin_role.is_none());
             }
-            _ => panic!("expected oidc mode"),
+            AuthMode::None => panic!("expected oidc mode"),
         }
     }
 
@@ -187,7 +187,7 @@ mod tests {
                 assert_eq!(admin_claim.as_deref(), Some("permissions"));
                 assert_eq!(admin_role.as_deref(), Some("admin"));
             }
-            _ => panic!("expected oidc mode"),
+            AuthMode::None => panic!("expected oidc mode"),
         }
     }
 

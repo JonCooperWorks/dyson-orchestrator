@@ -106,15 +106,14 @@ pub(crate) fn store_err_to_status(e: StoreError) -> StatusCode {
     match e {
         StoreError::NotFound => StatusCode::NOT_FOUND,
         StoreError::Constraint(_) => StatusCode::CONFLICT,
-        StoreError::Malformed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        StoreError::Malformed(_) | StoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
 /// SecretsError → HTTP status.  Envelope failures (corrupt ciphertext,
 /// unreachable key file) are 500 — the user can't act on them.
 pub(crate) fn secrets_err_to_status(e: crate::secrets::SecretsError) -> StatusCode {
-    use crate::secrets::SecretsError::*;
+    use crate::secrets::SecretsError::{Store, Envelope};
     match e {
         Store(s) => store_err_to_status(s),
         Envelope(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -225,9 +224,9 @@ mod tests {
     ) {
         let pool = open_in_memory().await.unwrap();
         let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let _keys_tmp = tempfile::tempdir().unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
-            Arc::new(crate::envelope::AgeCipherDirectory::new(_keys_tmp.path()).unwrap());
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let svc = Arc::new(SecretsService::new(raw.clone(), cipher_dir.clone()));
         let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
@@ -257,7 +256,6 @@ mod tests {
             raw.clone(),
             tokens_store.clone(),
             "http://test/llm",
-            3600,
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let snapshots_store: Arc<dyn crate::traits::SnapshotStore> =

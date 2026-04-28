@@ -116,7 +116,7 @@ async fn list_instances(
     uri: Uri,
 ) -> Result<Json<Vec<InstanceView>>, StatusCode> {
     let q = parse_query(uri.query().unwrap_or(""));
-    let status = match q.get("status").map(|s| s.as_str()) {
+    let status = match q.get("status").map(std::string::String::as_str) {
         Some(s) => match InstanceStatus::parse(s) {
             Some(p) => Some(p),
             None => return Err(StatusCode::BAD_REQUEST),
@@ -124,7 +124,7 @@ async fn list_instances(
         None => None,
     };
     let include_destroyed = matches!(
-        q.get("include_destroyed").map(|s| s.as_str()),
+        q.get("include_destroyed").map(std::string::String::as_str),
         Some("1" | "true" | "yes")
     );
     let filter = ListFilter {
@@ -174,7 +174,7 @@ async fn destroy_instance(
     // path that bubbles cube errors as 502.
     let q = parse_query(uri.query().unwrap_or(""));
     let force = !matches!(
-        q.get("force").map(|s| s.as_str()),
+        q.get("force").map(std::string::String::as_str),
         Some("0" | "false" | "no")
     );
     match state.instances.destroy(&caller.user_id, &id, force).await {
@@ -284,13 +284,11 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
     match e {
         SwarmError::NotFound => StatusCode::NOT_FOUND,
         SwarmError::PolicyDenied(_) => StatusCode::FORBIDDEN,
-        SwarmError::Cube(_) => StatusCode::BAD_GATEWAY,
+        // Internal: surfaced when create-time configure-push to dyson
+        // exhausts its retry budget; the SPA will see 502 and the user
+        // can retry the create.
+        SwarmError::Cube(_) | SwarmError::Internal(_) => StatusCode::BAD_GATEWAY,
         SwarmError::Store(s) => store_err_to_status(s),
-        SwarmError::Backup(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        SwarmError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        // Surfaced when create-time configure-push to dyson exhausts
-        // its retry budget; the SPA will see 502 and the user can
-        // retry the create.
-        SwarmError::Internal(_) => StatusCode::BAD_GATEWAY,
+        SwarmError::Backup(_) | SwarmError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

@@ -217,9 +217,9 @@ mod tests {
     async fn build_state() -> (AppState, Arc<dyn crate::traits::UserStore>) {
         let pool = open_in_memory().await.unwrap();
         let raw: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
-        let _keys_tmp = tempfile::tempdir().unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
-            Arc::new(crate::envelope::AgeCipherDirectory::new(_keys_tmp.path()).unwrap());
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap());
         let svc = Arc::new(SecretsService::new(raw.clone(), cipher_dir.clone()));
         let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
             Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
@@ -246,7 +246,6 @@ mod tests {
             raw.clone(),
             tokens_store.clone(),
             "http://test/llm",
-            3600,
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let snapshots_store: Arc<dyn SnapshotStore> =

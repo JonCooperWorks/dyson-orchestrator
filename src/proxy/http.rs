@@ -31,6 +31,12 @@ use crate::proxy::policy_check::{enforce, EnforceContext};
 use crate::proxy::ProxyService;
 use crate::traits::{AuditEntry, TokenRecord};
 
+/// Wallclock duration → audit-row millis.  `Duration::as_millis()` returns
+/// `u128`; saturating to `i64::MAX` (~292M years) is safer than wrapping.
+fn elapsed_ms(started: Instant) -> i64 {
+    i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
 /// Build the `/llm/*` router. Carries its own state and per-instance-bearer
 /// middleware — the admin auth layer does not apply here.
 pub fn router(state: Arc<ProxyService>) -> Router {
@@ -51,9 +57,8 @@ async fn handle(
     // 1. Resolve the proxy bearer. The middleware would normally do this but
     // we keep it inline so the audit row gets the instance id even when
     // resolution fails.
-    let token = match extract_bearer(&parts.headers) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "missing bearer"),
+    let Some(token) = extract_bearer(&parts.headers) else {
+        return error_response(StatusCode::UNAUTHORIZED, "missing bearer");
     };
     let record: TokenRecord = match state.tokens.resolve(&token).await {
         Ok(Some(r)) => r,
@@ -77,9 +82,8 @@ async fn handle(
     // policy *before* forwarding — buffering a single LLM request is cheap
     // (a handful of KB) so we accept that cost. The response is still
     // streamed back unbuffered (step 6).
-    let body_bytes = match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "body too large"),
+    let Ok(body_bytes) = axum::body::to_bytes(body, 8 * 1024 * 1024).await else {
+        return error_response(StatusCode::BAD_REQUEST, "body too large");
     };
     let body_json: serde_json::Value = if body_bytes.is_empty() {
         serde_json::Value::Null
@@ -115,7 +119,7 @@ async fn handle(
                 prompt_tokens: None,
                 output_tokens: None,
                 status_code: 403,
-                duration_ms: started.elapsed().as_millis() as i64,
+                duration_ms: elapsed_ms(started),
                 occurred_at: now_secs(),
             },
         )
@@ -128,28 +132,41 @@ async fn handle(
         Some(a) => a.clone(),
         None => return error_response(StatusCode::NOT_FOUND, "unknown provider"),
     };
-    let provider_cfg = match state.provider_config(&provider) {
-        Some(c) => c,
-        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "provider not configured"),
+    let Some(provider_cfg) = state.provider_config(&provider) else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "provider not configured");
     };
-    // Stage 6: when the per-user OR key resolver is wired in,
-    // /llm/openrouter/* swaps the global `[providers.openrouter]
-    // api_key` for the caller's own minted key.  Lazy-mint on first
-    // call.  Resolver failures fall back to the global key — this
-    // keeps the proxy serving even if the OR Provisioning API is
-    // temporarily unreachable, at the cost of attribution.
-    let real_key: String = if provider == "openrouter"
-        && let Some(resolver) = state.user_or_keys.as_ref()
-    {
+    // Stage 6: `/llm/openrouter/*` MUST use the caller's own per-user
+    // OR bearer.  We never fall back to the global `[providers.openrouter]
+    // api_key` — silently doing so would shift the user's spend onto
+    // the operator's plan and bypass the per-user budget cap entirely.
+    // The resolver lazy-mints on first call (`create if not exists`);
+    // anything that prevents that — resolver not configured, OR
+    // Provisioning API down, decrypt failure — is a 503 the agent can
+    // retry rather than a billing leak the operator catches a month
+    // late.
+    let real_key: String = if provider == "openrouter" {
+        let Some(resolver) = state.user_or_keys.as_ref() else {
+            tracing::warn!(
+                user = %owner_id,
+                "openrouter request but no per-user resolver configured; failing closed",
+            );
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "openrouter per-user key unavailable",
+            );
+        };
         match resolver.resolve_plaintext(&owner_id).await {
             Ok(k) => k,
             Err(err) => {
                 tracing::warn!(
                     error = %err,
                     user = %owner_id,
-                    "openrouter per-user key resolve failed; falling back to global"
+                    "openrouter per-user key resolve failed; failing closed",
                 );
-                provider_cfg.api_key.clone().unwrap_or_default()
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "openrouter per-user key unavailable",
+                );
             }
         }
     } else {
@@ -185,7 +202,7 @@ async fn handle(
         .http
         .request(method, upstream_uri.to_string())
         .body(body_bytes.clone());
-    for (k, v) in parts.headers.iter() {
+    for (k, v) in &parts.headers {
         if !is_hop_by_hop(k) {
             req_builder = req_builder.header(k.as_str(), v);
         }
@@ -203,12 +220,22 @@ async fn handle(
                     prompt_tokens: prompt_tokens_in,
                     output_tokens: None,
                     status_code: 502,
-                    duration_ms: started.elapsed().as_millis() as i64,
+                    duration_ms: elapsed_ms(started),
                     occurred_at: now_secs(),
                 },
             )
             .await;
-            return error_response(StatusCode::BAD_GATEWAY, &format!("upstream: {e}"));
+            // Don't surface `e` to the client.  reqwest's Display includes
+            // the upstream URL, which for Gemini carries `?key=<real_key>`
+            // (see proxy::adapters::gemini) — echoing the error would leak
+            // the platform-wide provider key to the agent on any timeout
+            // or TLS hiccup.  Log server-side, return a fixed string.
+            tracing::warn!(
+                provider = %provider,
+                error = %e,
+                "upstream request failed",
+            );
+            return error_response(StatusCode::BAD_GATEWAY, "upstream request failed");
         }
     };
     let upstream_status = upstream_resp.status().as_u16();
@@ -222,7 +249,7 @@ async fn handle(
         .status(StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY));
     {
         let headers = response.headers_mut().expect("fresh builder has headers");
-        for (k, v) in upstream_headers.iter() {
+        for (k, v) in &upstream_headers {
             if !is_hop_by_hop_str(k.as_str()) {
                 headers.insert(k.clone(), v.clone());
             }
@@ -244,8 +271,8 @@ async fn handle(
             model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
             prompt_tokens: prompt_tokens_in,
             output_tokens: None,
-            status_code: upstream_status as i64,
-            duration_ms: started.elapsed().as_millis() as i64,
+            status_code: i64::from(upstream_status),
+            duration_ms: elapsed_ms(started),
             occurred_at: now_secs(),
         },
     )
@@ -326,7 +353,7 @@ async fn write_audit(state: &ProxyService, entry: AuditEntry) {
 fn estimate_prompt_tokens(body: &serde_json::Value) -> Option<i64> {
     body.get("usage")
         .and_then(|u| u.get("prompt_tokens"))
-        .and_then(|t| t.as_i64())
+        .and_then(serde_json::Value::as_i64)
 }
 
 #[cfg(test)]
@@ -440,17 +467,57 @@ mod tests {
     /// Build a `ProxyService` whose only configured provider points at
     /// `upstream_url`, with `policy` as the per-instance policy and a stub
     /// API key.
-    async fn build_service(pool: SqlitePool, upstream_url: String, policy: InstancePolicy) -> Arc<ProxyService> {
-        let providers = Providers {
-            anthropic: None,
-            openai: Some(ProviderConfig {
-                api_key: Some("sk-real-server".into()),
-                upstream: upstream_url,
-                anthropic_version: None,
-            }),
-            gemini: None,
-            openrouter: None,
-            ollama: None,
+    fn build_service(pool: SqlitePool, upstream_url: String, policy: InstancePolicy) -> Arc<ProxyService> {
+        build_service_for(pool, "openai", upstream_url, "sk-real-server", policy)
+    }
+
+    /// Variant of `build_service` that lets the caller pick which provider
+    /// is configured + what real_key the upstream rewrite uses.  Used by
+    /// the regression test that proves the BAD_GATEWAY body never echoes
+    /// the upstream URL (which for Gemini carries the real key as a query
+    /// parameter).
+    fn build_service_for(
+        pool: SqlitePool,
+        provider: &str,
+        upstream_url: String,
+        real_key: &str,
+        policy: InstancePolicy,
+    ) -> Arc<ProxyService> {
+        let cfg = ProviderConfig {
+            api_key: Some(real_key.into()),
+            upstream: upstream_url,
+            anthropic_version: None,
+        };
+        let providers = match provider {
+            "openai" => Providers {
+                anthropic: None,
+                openai: Some(cfg),
+                gemini: None,
+                openrouter: None,
+                ollama: None,
+            },
+            "gemini" => Providers {
+                anthropic: None,
+                openai: None,
+                gemini: Some(cfg),
+                openrouter: None,
+                ollama: None,
+            },
+            "anthropic" => Providers {
+                anthropic: Some(cfg),
+                openai: None,
+                gemini: None,
+                openrouter: None,
+                ollama: None,
+            },
+            "openrouter" => Providers {
+                anthropic: None,
+                openai: None,
+                gemini: None,
+                openrouter: Some(cfg),
+                ollama: None,
+            },
+            other => panic!("build_service_for: unsupported provider {other}"),
         };
         let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
         let instances: Arc<dyn InstanceStore> =
@@ -491,7 +558,7 @@ mod tests {
 
         let pool = open_in_memory().await.unwrap();
         let (_id, token) = seed_instance_with_token(&pool).await;
-        let svc = build_service(pool, upstream_url, permissive_policy()).await;
+        let svc = build_service(pool, upstream_url, permissive_policy());
         let proxy_base = spawn_proxy(svc).await;
 
         let client = reqwest::Client::new();
@@ -512,7 +579,7 @@ mod tests {
     async fn missing_bearer_returns_401() {
         let pool = open_in_memory().await.unwrap();
         let (upstream_url, _) = spawn_streaming_upstream(vec![b"x".to_vec()]).await;
-        let svc = build_service(pool, upstream_url, permissive_policy()).await;
+        let svc = build_service(pool, upstream_url, permissive_policy());
         let base = spawn_proxy(svc).await;
         let resp = reqwest::Client::new()
             .post(format!("{base}/llm/openai/v1/chat/completions"))
@@ -532,7 +599,7 @@ mod tests {
             .await
             .unwrap();
         let (upstream_url, _) = spawn_streaming_upstream(vec![b"x".to_vec()]).await;
-        let svc = build_service(pool, upstream_url, permissive_policy()).await;
+        let svc = build_service(pool, upstream_url, permissive_policy());
         let base = spawn_proxy(svc).await;
         let resp = reqwest::Client::new()
             .post(format!("{base}/llm/openai/v1/chat/completions"))
@@ -553,7 +620,7 @@ mod tests {
         policy.allowed_models = vec!["claude-only".into()];
 
         let (upstream_url, _) = spawn_streaming_upstream(vec![b"x".to_vec()]).await;
-        let svc = build_service(pool.clone(), upstream_url, policy).await;
+        let svc = build_service(pool.clone(), upstream_url, policy);
         let base = spawn_proxy(svc).await;
         let resp = reqwest::Client::new()
             .post(format!("{base}/llm/openai/v1/chat/completions"))
@@ -581,7 +648,7 @@ mod tests {
         let pool = open_in_memory().await.unwrap();
         let (_id, token) = seed_instance_with_token(&pool).await;
         let (upstream_url, _) = spawn_streaming_upstream(vec![b"x".to_vec()]).await;
-        let svc = build_service(pool, upstream_url, permissive_policy()).await;
+        let svc = build_service(pool, upstream_url, permissive_policy());
         let base = spawn_proxy(svc).await;
         let resp = reqwest::Client::new()
             .post(format!("{base}/llm/zzz/v1/chat"))
@@ -598,7 +665,7 @@ mod tests {
         let pool = open_in_memory().await.unwrap();
         let (id, token) = seed_instance_with_token(&pool).await;
         let (upstream_url, _) = spawn_streaming_upstream(vec![b"ok".to_vec()]).await;
-        let svc = build_service(pool.clone(), upstream_url, permissive_policy()).await;
+        let svc = build_service(pool.clone(), upstream_url, permissive_policy());
         let base = spawn_proxy(svc).await;
         reqwest::Client::new()
             .post(format!("{base}/llm/openai/v1/chat/completions"))
@@ -633,6 +700,98 @@ mod tests {
         assert!(r.contains_key("gemini"));
         assert!(r.contains_key("ollama"));
         assert_eq!(r.len(), 5);
+    }
+
+    /// Regression: `/llm/openrouter/*` must NEVER use the global
+    /// `[providers.openrouter].api_key`.  When the deployment has no
+    /// per-user resolver configured, a request for OR must 503 — not
+    /// fall back to the operator's global key (which would invisibly
+    /// shift the user's spend onto the operator's plan and bypass the
+    /// per-user budget cap).  This pins fail-closed behaviour at the
+    /// integration layer so a future "make it work" patch can't
+    /// silently re-introduce the leak.
+    #[tokio::test]
+    async fn openrouter_with_no_resolver_fails_closed_with_503() {
+        let real_global_key = "sk-or-v1-OPERATOR-GLOBAL-NEVER-USE-FOR-USERS";
+        // Spawn a counting upstream so we can prove zero traffic was
+        // forwarded with the global key.
+        let (upstream_url, upstream_calls) = spawn_streaming_upstream(vec![b"x".to_vec()]).await;
+
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token(&pool).await;
+        let svc = build_service_for(
+            pool,
+            "openrouter",
+            upstream_url,
+            real_global_key,
+            permissive_policy(),
+        );
+        // user_or_keys deliberately left None — this is the "no
+        // resolver configured" path the fix targets.
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/openrouter/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "moonshotai/kimi-k2.6"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            upstream_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no upstream traffic should have been emitted with the global key",
+        );
+    }
+
+    /// Regression: the 502 surfaced when the upstream connection fails
+    /// must not echo `reqwest::Error`'s Display, which embeds the
+    /// upstream URL.  For Gemini that URL is `…?key=<real_key>` —
+    /// echoing it leaks the platform-wide provider key to whoever can
+    /// reach the proxy.  The fix replaces the formatted error with a
+    /// fixed string and routes details to the server log.
+    #[tokio::test]
+    async fn upstream_failure_502_does_not_leak_real_key_in_body() {
+        // Bind a TCP port, drop the listener, use the now-free port as
+        // the upstream URL.  Any connect attempt fails with
+        // "connection refused".
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        let upstream_url = format!("http://{dead_addr}");
+
+        let real_key = "AIza-very-secret-real-key-do-not-leak";
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token(&pool).await;
+        let svc = build_service_for(
+            pool,
+            "gemini",
+            upstream_url.clone(),
+            real_key,
+            permissive_policy(),
+        );
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/gemini/v1beta/models/gemini-pro:generateContent"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gemini-pro"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_GATEWAY);
+        let body = resp.text().await.unwrap();
+        assert!(
+            !body.contains(real_key),
+            "BAD_GATEWAY body leaked the real upstream key: {body}",
+        );
+        // Belt-and-braces: the upstream URL itself shouldn't be echoed
+        // either (other adapters may grow URL-embedded auth in future).
+        assert!(
+            !body.contains(&upstream_url),
+            "BAD_GATEWAY body echoed the upstream URL: {body}",
+        );
     }
 
 }

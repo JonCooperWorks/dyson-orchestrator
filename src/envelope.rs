@@ -187,9 +187,8 @@ impl AgeCipher {
         // the only shape we ever generate; multi is accepted for
         // operator-managed keys.  Plugin entries are rejected — only
         // X25519 is in scope.
-        let identity = match identities.into_iter().next().expect("len > 0 above") {
-            age::IdentityFileEntry::Native(i) => i,
-        };
+        let age::IdentityFileEntry::Native(identity) =
+            identities.into_iter().next().expect("len > 0 above");
         let recipient = identity.to_public();
         Ok(Self {
             identity,
@@ -413,7 +412,7 @@ mod tests {
         let path = tmp.path().join("k.age");
         AgeCipher::generate_if_missing(&path).unwrap();
         let c = AgeCipher::from_key_file(&path).unwrap();
-        let plain: Vec<u8> = (0..16_384).map(|i| (i % 251) as u8).collect();
+        let plain: Vec<u8> = (0u32..16_384).map(|i| u8::try_from(i % 251).unwrap()).collect();
         let cipher = c.seal(&plain).unwrap();
         assert_eq!(c.open(&cipher).unwrap(), plain);
     }

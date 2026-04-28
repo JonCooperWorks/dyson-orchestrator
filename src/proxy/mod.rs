@@ -128,7 +128,10 @@ impl RateWindow {
         let now = Instant::now();
         q.push_back(now);
         prune(q, now);
-        q.len() as u32
+        // RPS counter is u32; capping at u32::MAX is fine — anything north of
+        // 4 billion entries in the per-second window has already failed open
+        // and the policy check will reject regardless.
+        u32::try_from(q.len()).unwrap_or(u32::MAX)
     }
 }
 

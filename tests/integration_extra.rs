@@ -135,12 +135,15 @@ impl HealthProber for StubProber {
     }
 }
 
+/// `(name, label, limit_usd)` recorded for every mint call.
+type MintCall = (String, Option<String>, f64);
+
 /// Recording OpenRouter Provisioning client.  Every mint returns a
 /// per-call deterministic plaintext so the test can prove the proxy
 /// substituted it on the way upstream.
 #[derive(Clone, Default)]
 struct RecordingProvisioning {
-    minted: Arc<Mutex<Vec<(String, Option<String>, f64)>>>,
+    minted: Arc<Mutex<Vec<MintCall>>>,
     deleted: Arc<Mutex<Vec<String>>>,
     next_seq: Arc<AtomicU32>,
 }
@@ -236,7 +239,6 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         secrets_store.clone(),
         tokens_store.clone(),
         "http://swarm.test/llm",
-        3600,
     ));
     let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone(), cipher_dir.clone()));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));

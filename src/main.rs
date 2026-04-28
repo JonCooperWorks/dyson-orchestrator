@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -164,7 +165,6 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         secrets_store.clone(),
         tokens_store.clone(),
         proxy_base,
-        cfg.default_ttl_seconds,
     );
     let secrets_svc = Arc::new(SecretsService::new(secrets_store, cipher_dir.clone()));
     let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
@@ -199,6 +199,38 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     }
     let instance_svc = Arc::new(instance_svc);
 
+    // Image-generation rewire sweep.  Every swarm restart re-pushes
+    // the current image-gen defaults to every Live instance so a
+    // bumped model id (or a fresh OpenRouter image provider entry)
+    // rolls out without operator-side intervention.  Idempotent —
+    // dysons that already have the right values get the same JSON
+    // written back.  Spawned so the HTTP server doesn't wait on
+    // possibly-cold cubeproxy timeouts.
+    {
+        let svc = instance_svc.clone();
+        tokio::spawn(async move {
+            // Brief delay so the cubeproxy / SQL pool / token store
+            // all have time to settle past their first
+            // dyson_proxy::dispatch resolutions.  Push timing isn't
+            // load-bearing — the loop is best-effort with retries
+            // through `push_with_retry` inside the per-row push call.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            match svc.rewire_image_generation_all().await {
+                Ok((visited, succeeded)) => {
+                    tracing::info!(
+                        visited,
+                        succeeded,
+                        "rewire-image-gen: startup sweep complete"
+                    );
+                }
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "rewire-image-gen: startup sweep aborted"
+                ),
+            }
+        });
+    }
+
     let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
         config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
         config::BackupSinkKind::S3 => {
@@ -226,25 +258,20 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     let auth = if dangerous_no_auth {
         AuthState::dangerous_no_auth()
-    } else {
-        match cfg.oidc.as_ref().and_then(|o| o.roles.clone()) {
-            Some(roles) => AuthState::enforced(roles),
-            None => {
-                tracing::warn!(
-                    "no [oidc.roles] in config — admin endpoints will return 403 \
-                     for everyone.  Set oidc.roles.{{claim,admin}} or pass \
-                     --dangerous-no-auth for local dev."
-                );
-                AuthState::enforced(crate::config::OidcRoles {
-                    // Sentinel that no real JWT carries → all admin
-                    // requests denied.  Using a placeholder rather
-                    // than a different code path keeps the layer
-                    // ordering uniform.
-                    claim: String::new(),
-                    admin: String::new(),
-                })
-            }
-        }
+    } else if let Some(roles) = cfg.oidc.as_ref().and_then(|o| o.roles.clone()) { AuthState::enforced(roles) } else {
+        tracing::warn!(
+            "no [oidc.roles] in config — admin endpoints will return 403 \
+             for everyone.  Set oidc.roles.{{claim,admin}} or pass \
+             --dangerous-no-auth for local dev."
+        );
+        AuthState::enforced(crate::config::OidcRoles {
+            // Sentinel that no real JWT carries → all admin
+            // requests denied.  Using a placeholder rather
+            // than a different code path keeps the layer
+            // ordering uniform.
+            claim: String::new(),
+            admin: String::new(),
+        })
     };
 
     let prober: Arc<dyn HealthProber> = match HttpHealthProber::new(
@@ -692,7 +719,7 @@ async fn run_list(
     };
     let mut path = String::from("/v1/instances?");
     if let Some(s) = status {
-        path.push_str(&format!("status={s}&"));
+        let _ = write!(path, "status={s}&");
     }
     if include_destroyed {
         path.push_str("include_destroyed=true");

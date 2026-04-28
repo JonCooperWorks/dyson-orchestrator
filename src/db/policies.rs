@@ -56,9 +56,12 @@ impl PolicyStore for SqlitePolicyStore {
         Ok(Some(PolicyRecord {
             allowed_providers: split_csv(&providers),
             allowed_models: split_csv(&models),
-            daily_token_budget: daily.map(|n| n as u64),
+            // Both budgets are non-negative caps stored as signed sqlite ints.
+            // Anything negative would be corrupted state — clamp to 0 rather
+            // than panic on a `try_from` failure.
+            daily_token_budget: daily.map(|n| u64::try_from(n.max(0)).unwrap_or(0)),
             monthly_usd_budget: monthly,
-            rps_limit: rps.map(|n| n as u32),
+            rps_limit: rps.map(|n| u32::try_from(n.clamp(0, i64::from(u32::MAX))).unwrap_or(0)),
         }))
     }
 
@@ -77,9 +80,12 @@ impl PolicyStore for SqlitePolicyStore {
         .bind(subject)
         .bind(join_csv(&policy.allowed_providers))
         .bind(join_csv(&policy.allowed_models))
-        .bind(policy.daily_token_budget.map(|n| n as i64))
+        // u64 → i64 saturates at i64::MAX. Token budgets above ~9 exabytes
+        // are nonsensical, but saturating is safer than wrapping into a
+        // negative budget that the read path would clamp back to 0.
+        .bind(policy.daily_token_budget.map(|n| i64::try_from(n).unwrap_or(i64::MAX)))
         .bind(policy.monthly_usd_budget)
-        .bind(policy.rps_limit.map(|n| n as i64))
+        .bind(policy.rps_limit.map(i64::from))
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;

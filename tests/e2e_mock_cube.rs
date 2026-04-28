@@ -197,7 +197,6 @@ async fn full_walkthrough() {
         secrets_store.clone(),
         tokens_store.clone(),
         "http://swarm.test/llm",
-        3600,
     ));
     let secrets_svc = Arc::new(SecretsService::new(secrets_store.clone(), cipher_dir.clone()));
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));

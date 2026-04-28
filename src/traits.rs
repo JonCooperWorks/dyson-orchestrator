@@ -366,6 +366,15 @@ pub trait TokenStore: Send + Sync {
     async fn mint(&self, instance_id: &str, provider: &str) -> Result<String, StoreError>;
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError>;
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError>;
+    /// Reverse of `resolve`: given an instance id, return the active
+    /// (non-revoked) proxy_token for that instance.  Used by the
+    /// image-gen rewire sweep — it needs the same token already
+    /// embedded in the instance's chat provider so the new image
+    /// provider entry authenticates against swarm's `/llm` proxy.
+    /// Returns `None` for instances created before Stage 8 (no
+    /// proxy_token row exists) so callers can skip them quietly.
+    async fn lookup_by_instance(&self, instance_id: &str)
+        -> Result<Option<String>, StoreError>;
 }
 
 #[async_trait]

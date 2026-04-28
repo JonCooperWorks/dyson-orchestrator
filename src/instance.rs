@@ -123,7 +123,6 @@ pub struct InstanceService {
     /// Public base URL of the swarm's `/llm/` proxy mount, e.g.
     /// `http://swarm:8080/llm`.
     proxy_base: String,
-    default_ttl_seconds: i64,
     /// Dyson reconfigurer — lets us push SWARM_MODEL / SWARM_TASK /
     /// SWARM_NAME into a freshly-created sandbox via Dyson's
     /// `/api/admin/configure` endpoint.  Stage 8 fix for cube's
@@ -131,6 +130,12 @@ pub struct InstanceService {
     /// time (when SWARM_* are unset → "warmup-placeholder" model).
     /// `None` skips reconfigure entirely (test/local-dev).
     reconfigurer: Option<Arc<dyn DysonReconfigurer>>,
+    /// Image-generation defaults pushed at create-time and re-pushed
+    /// by the startup sweep.  Hard-coded today (OpenRouter +
+    /// Gemini 3 image preview); `None` disables image-gen wiring
+    /// entirely so the sweep doesn't fight an operator's manual
+    /// override of dyson.json.
+    image_gen_defaults: Option<ImageGenDefaults>,
 }
 
 /// Anything that can push swarm-side identity/task/model state to a
@@ -206,6 +211,77 @@ pub struct ReconfigureBody {
     /// warmup.  Skipped when None (swarm runs without a hostname).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_base: Option<String>,
+    /// Name to register the image-generation provider under.  Mirrors
+    /// `ConfigureBody::image_provider_name` on the dyson side.  When
+    /// set alongside `image_provider_block` the dyson handler inserts
+    /// (or replaces) `providers.<image_provider_name>` in dyson.json.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_provider_name: Option<String>,
+    /// Full provider entry for the image-generation provider — the
+    /// JSON body that lands at `providers.<image_provider_name>`.
+    /// Same shape as the chat provider entry: `{ type, base_url,
+    /// api_key, models }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_provider_block: Option<serde_json::Value>,
+    /// Sets `agent.image_generation_provider`.  Usually equal to
+    /// `image_provider_name`, but kept independent so a future caller
+    /// could point the field at an already-registered provider
+    /// without re-uploading its block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_generation_provider: Option<String>,
+    /// Sets `agent.image_generation_model`.  Lets swarm bump the
+    /// image-gen model id (e.g. preview → ga rename) without forcing
+    /// every operator to re-hire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_generation_model: Option<String>,
+}
+
+/// Image-generation defaults a swarm-managed dyson should run with.
+/// Pushed at `create()` time and re-pushed by the startup sweep
+/// (`rewire_image_generation_all`) so existing instances inherit
+/// changes after a swarm redeploy without operator intervention.
+///
+/// `provider_block` is whatever JSON shape dyson's loader expects for
+/// a provider entry; today that's `{ "type", "base_url", "api_key",
+/// "models" }`.  The orchestrator templates it with the swarm's
+/// `/llm/openrouter` proxy URL and the per-instance proxy_token at
+/// the call site so the running dyson can use the same swarm hop the
+/// chat path uses.
+#[derive(Debug, Clone)]
+pub struct ImageGenDefaults {
+    pub provider_name: String,
+    pub provider_type: String,
+    pub model: String,
+}
+
+impl ImageGenDefaults {
+    /// Default wiring: a second OpenRouter provider entry pointed at
+    /// the same `/llm/openrouter` swarm proxy as chat, defaulting to
+    /// the Gemini 3 image preview.  Centralised here (and mirrored in
+    /// the `dyson swarm` boot writer) so a future bump is a one-line
+    /// constant change in two known files.
+    pub fn openrouter_gemini3_image() -> Self {
+        Self {
+            provider_name: "openrouter-image".to_string(),
+            provider_type: "openrouter".to_string(),
+            model: "google/gemini-3-pro-image-preview".to_string(),
+        }
+    }
+
+    /// Render the provider block dyson.json expects.  `proxy_base`
+    /// already includes the `/openrouter` segment (built by
+    /// [`InstanceService::image_proxy_base`]) and `api_key` is the
+    /// per-instance proxy_token.  Both pieces are required — without
+    /// the swarm hop the dyson would talk to upstream OpenRouter
+    /// directly with a token OpenRouter doesn't recognise.
+    pub fn provider_block(&self, proxy_base: &str, api_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": self.provider_type,
+            "base_url": proxy_base,
+            "api_key": api_key,
+            "models": [self.model],
+        })
+    }
 }
 
 impl InstanceService {
@@ -215,7 +291,6 @@ impl InstanceService {
         secrets: Arc<dyn SecretStore>,
         tokens: Arc<dyn TokenStore>,
         proxy_base: impl Into<String>,
-        default_ttl_seconds: i64,
     ) -> Self {
         Self {
             cube,
@@ -223,8 +298,12 @@ impl InstanceService {
             secrets,
             tokens,
             proxy_base: proxy_base.into(),
-            default_ttl_seconds,
             reconfigurer: None,
+            // Default to ON: every newly-deployed swarm rewires the
+            // image-gen path on its dysons by default.  Tests that
+            // want to suppress it call `with_image_gen_defaults(None)`
+            // to keep their `pushed` recordings tight.
+            image_gen_defaults: Some(ImageGenDefaults::openrouter_gemini3_image()),
         }
     }
 
@@ -233,6 +312,99 @@ impl InstanceService {
     pub fn with_reconfigurer(mut self, r: Arc<dyn DysonReconfigurer>) -> Self {
         self.reconfigurer = Some(r);
         self
+    }
+
+    /// Builder-style: override the image-generation defaults pushed
+    /// to dysons.  `None` disables image-gen wiring entirely (e.g.
+    /// tests that don't want to assert on the extra body fields).
+    pub fn with_image_gen_defaults(mut self, defaults: Option<ImageGenDefaults>) -> Self {
+        self.image_gen_defaults = defaults;
+        self
+    }
+
+    /// Build the `<proxy_base>/openrouter` URL the image-gen provider
+    /// uses for its `base_url`.  Same shape as `swarm_provider_base_url`
+    /// on the dyson-binary side — the trailing `/v1` is added by
+    /// dyson's `OpenRouterImageProvider` when it builds the request.
+    fn image_proxy_base(&self) -> String {
+        format!("{}/openrouter", self.proxy_base.trim_end_matches('/'))
+    }
+
+    /// Re-push the image-generation defaults to every Live instance.
+    /// Idempotent — a dyson that already has the right values gets
+    /// the same JSON written back.  Best-effort: a sandbox that's
+    /// asleep / mid-restore will fail the push and be retried on the
+    /// next sweep.  Returns `(visited, succeeded)` so the caller can
+    /// log a one-line summary.
+    pub async fn rewire_image_generation_all(&self) -> Result<(usize, usize), SwarmError> {
+        let Some(defaults) = self.image_gen_defaults.clone() else {
+            return Ok((0, 0));
+        };
+        let Some(reconfigurer) = self.reconfigurer.as_ref() else {
+            return Ok((0, 0));
+        };
+        let proxy_base = self.image_proxy_base();
+        let live = self
+            .instances
+            .list(SYSTEM_OWNER, ListFilter {
+                status: Some(InstanceStatus::Live),
+                include_destroyed: false,
+            })
+            .await?;
+        let mut succeeded = 0usize;
+        for row in &live {
+            let Some(sandbox_id) = &row.cube_sandbox_id else {
+                tracing::debug!(
+                    instance = %row.id,
+                    "rewire-image-gen: skipping — no cube_sandbox_id on row"
+                );
+                continue;
+            };
+            // Use the per-instance proxy_token (re-mint NOT needed —
+            // the existing token is still valid).  Look it up from
+            // the token store.
+            let token = match self.tokens.lookup_by_instance(&row.id).await {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    tracing::debug!(
+                        instance = %row.id,
+                        "rewire-image-gen: skipping — no proxy_token (instance pre-Stage-8?)"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        instance = %row.id,
+                        error = %e,
+                        "rewire-image-gen: token lookup failed — skipping"
+                    );
+                    continue;
+                }
+            };
+            let body = ReconfigureBody {
+                image_provider_name: Some(defaults.provider_name.clone()),
+                image_provider_block: Some(defaults.provider_block(&proxy_base, &token)),
+                image_generation_provider: Some(defaults.provider_name.clone()),
+                image_generation_model: Some(defaults.model.clone()),
+                ..Default::default()
+            };
+            match reconfigurer.push(&row.id, sandbox_id, &body).await {
+                Ok(()) => {
+                    succeeded += 1;
+                    tracing::debug!(instance = %row.id, "rewire-image-gen: pushed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        instance = %row.id,
+                        error = %e,
+                        "rewire-image-gen: push failed (will retry next sweep)"
+                    );
+                }
+            }
+        }
+        let visited = live.len();
+        tracing::info!(visited, succeeded, "rewire-image-gen: sweep complete");
+        Ok((visited, succeeded))
     }
 
     pub async fn create(
@@ -244,7 +416,7 @@ impl InstanceService {
         // catch the missing-model case here with a clean error instead
         // of letting the cube start a doomed sandbox we then have to
         // garbage-collect. Trim-empty counts as missing.
-        if !req.env.get(ENV_MODEL).is_some_and(|s| !s.trim().is_empty()) {
+        if req.env.get(ENV_MODEL).is_none_or(|s| s.trim().is_empty()) {
             return Err(SwarmError::PolicyDenied(format!(
                 "{ENV_MODEL} is required in the create request's `env` \
                  (e.g. \"anthropic/claude-sonnet-4-5\"); there is no default"
@@ -377,6 +549,30 @@ impl InstanceService {
                     "{}/openrouter",
                     self.proxy_base.trim_end_matches('/')
                 )),
+                // Image-generation defaults — register the dedicated
+                // image provider entry and point the agent at it.  The
+                // same proxy_token authenticates against swarm's `/llm`
+                // proxy for both chat and image traffic, so we reuse
+                // it as the api_key on the image provider block.  When
+                // `image_gen_defaults` is None on InstanceService all
+                // four fields stay None and the dyson handler skips
+                // the patch.
+                image_provider_name: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_provider_block: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
+                image_generation_provider: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_generation_model: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.model.clone()),
             };
             // Await the configure-push before returning Live.  Previously
             // this was tokio::spawn'd (fire-and-forget): the SPA could
@@ -487,6 +683,7 @@ impl InstanceService {
                 // proxy_token / proxy_base unchanged on the dyson side.
                 proxy_token: None,
                 proxy_base: None,
+                ..Default::default()
             };
             let r = r.clone();
             let id_owned = id.to_owned();
@@ -543,6 +740,7 @@ impl InstanceService {
             // Edit-models-only path: provider config stays as-is.
             proxy_token: None,
             proxy_base: None,
+            ..Default::default()
         };
         push_with_retry(&**r, id, sandbox_id, &body)
             .await
@@ -838,7 +1036,6 @@ mod tests {
             secrets.clone(),
             tokens.clone(),
             "http://swarm.test:8080/llm",
-            3600,
         );
         (svc, cube, tokens, secrets, instances)
     }
@@ -1128,7 +1325,6 @@ mod tests {
             secrets,
             tokens,
             "https://dyson.example.com/llm",
-            3600,
         );
         let recorder = Arc::new(RecordingReconfigurer::default());
         let svc = svc.with_reconfigurer(recorder.clone());

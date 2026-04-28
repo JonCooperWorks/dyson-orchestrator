@@ -81,9 +81,8 @@ pub async fn dispatch(
     let Some(base) = state.hostname.as_deref() else {
         return next.run(req).await;
     };
-    let host = match req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
-        Some(h) => h,
-        None => return next.run(req).await,
+    let Some(host) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return next.run(req).await;
     };
     let Some(instance_id) = extract_instance_subdomain(host, base) else {
         return next.run(req).await;
@@ -107,7 +106,7 @@ pub fn extract_instance_subdomain<'a>(host: &'a str, base: &str) -> Option<&'a s
         return None;
     }
     let dot_idx = host_no_port.len() - suffix_len;
-    if !host_no_port.as_bytes().get(dot_idx).is_some_and(|&b| b == b'.') {
+    if host_no_port.as_bytes().get(dot_idx).is_none_or(|&b| b != b'.') {
         return None;
     }
     let prefix = &host_no_port[..dot_idx];
@@ -208,16 +207,15 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     );
 
     // 4. Body (8 MiB cap, mirrors the LLM proxy).
-    let body_bytes = match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "request body too large"),
+    let Ok(body_bytes) = axum::body::to_bytes(body, 8 * 1024 * 1024).await else {
+        return error_response(StatusCode::BAD_REQUEST, "request body too large");
     };
 
     // 5. Outbound headers: strip hop-by-hop + cookie + host + the
     //    inbound Authorization (swarm's OIDC bearer, useless to
     //    Dyson), then stamp the per-instance bearer.
     let mut out_headers = HeaderMap::new();
-    for (k, v) in parts.headers.iter() {
+    for (k, v) in &parts.headers {
         if is_hop_by_hop(k) || k == header::COOKIE || k == header::HOST || k == header::AUTHORIZATION {
             continue;
         }
@@ -230,7 +228,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
 
     // 6. Send.
     let mut req_builder = state.app.dyson_http.request(method, &upstream_url);
-    for (k, v) in out_headers.iter() {
+    for (k, v) in &out_headers {
         req_builder = req_builder.header(k.as_str(), v);
     }
     if !body_bytes.is_empty() {
@@ -252,7 +250,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         .map_err(|e| std::io::Error::other(e.to_string()));
     let mut builder = Response::builder().status(status);
     if let Some(h) = builder.headers_mut() {
-        for (k, v) in resp_headers.iter() {
+        for (k, v) in &resp_headers {
             if is_hop_by_hop(k) {
                 continue;
             }

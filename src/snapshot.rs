@@ -342,7 +342,6 @@ mod tests {
             secrets.clone(),
             tokens,
             "http://t/llm",
-            3600,
         ));
         let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let svc = SnapshotService::new(
@@ -413,9 +412,9 @@ mod tests {
         // legacy seeded user wouldn't suffice here because we need two.
         use crate::traits::{UserRow, UserStatus};
         let pool = open_in_memory().await.unwrap();
-        let _keys_tmp = tempfile::tempdir().unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
-            crate::envelope::AgeCipherDirectory::new(_keys_tmp.path()).unwrap(),
+            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
         );
         let users: Arc<dyn crate::traits::UserStore> = Arc::new(
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
@@ -444,7 +443,7 @@ mod tests {
         let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
         let snaps_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
         let isvc = Arc::new(InstanceService::new(
-            cube.clone(), instances.clone(), secrets, tokens, "http://t/llm", 3600,
+            cube.clone(), instances.clone(), secrets, tokens, "http://t/llm",
         ));
         let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let svc = SnapshotService::new(

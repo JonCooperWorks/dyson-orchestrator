@@ -65,6 +65,26 @@ impl TokenStore for SqlxTokenStore {
         .map_err(map_sqlx)?;
         Ok(())
     }
+
+    async fn lookup_by_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        // Multiple non-revoked rows for one instance shouldn't happen
+        // (mint is called once per create), but order-by-created_at
+        // makes the choice deterministic if it ever does.  LIMIT 1
+        // keeps the query cheap regardless.
+        let row = sqlx::query(
+            "SELECT token FROM proxy_tokens \
+             WHERE instance_id = ? AND revoked_at IS NULL \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.get::<String, _>("token")))
+    }
 }
 
 #[cfg(test)]

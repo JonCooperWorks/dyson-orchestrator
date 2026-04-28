@@ -57,7 +57,7 @@ impl AuditStore for SqliteAuditStore {
         .await
         .map_err(map_sqlx)?;
         let total: i64 = row.try_get("total").map_err(map_sqlx)?;
-        Ok(total.max(0) as u64)
+        Ok(u64::try_from(total.max(0)).unwrap_or(0))
     }
 }
 

@@ -43,8 +43,6 @@ pub struct Config {
     #[serde(default)]
     pub cube_facing_addr: Option<String>,
 
-    #[serde(default = "default_ttl")]
-    pub default_ttl_seconds: i64,
     #[serde(default = "default_probe_interval")]
     pub health_probe_interval_seconds: u64,
     #[serde(default = "default_probe_timeout")]
@@ -168,9 +166,6 @@ fn default_jwks_ttl() -> u64 {
     24 * 60 * 60
 }
 
-fn default_ttl() -> i64 {
-    86_400
-}
 fn default_probe_interval() -> u64 {
     60
 }
@@ -297,7 +292,7 @@ impl Config {
     /// Implemented by hand — no `figment`.
     fn apply_env(&mut self, env: &BTreeMap<String, String>) {
         if let Some(v) = env.get("SWARM_BIND") {
-            self.bind = v.clone();
+            self.bind.clone_from(v);
         }
         if let Some(v) = env.get("SWARM_DB_PATH") {
             self.db_path = PathBuf::from(v);
@@ -309,13 +304,13 @@ impl Config {
             self.hostname = if v.is_empty() { None } else { Some(v.clone()) };
         }
         if let Some(v) = env.get("SWARM_CUBE_URL") {
-            self.cube.url = v.clone();
+            self.cube.url.clone_from(v);
         }
         if let Some(v) = env.get("SWARM_CUBE_API_KEY") {
-            self.cube.api_key = v.clone();
+            self.cube.api_key.clone_from(v);
         }
         if let Some(v) = env.get("SWARM_CUBE_SANDBOX_DOMAIN") {
-            self.cube.sandbox_domain = v.clone();
+            self.cube.sandbox_domain.clone_from(v);
         }
 
         for (provider, slot) in [
@@ -332,7 +327,7 @@ impl Config {
                     p.api_key = Some(v.clone());
                 }
                 if let Some(v) = env.get(&upstream_key) {
-                    p.upstream = v.clone();
+                    p.upstream.clone_from(v);
                 }
             }
         }
@@ -342,22 +337,22 @@ impl Config {
         }
         if let Some(s3) = self.backup.s3.as_mut() {
             if let Some(v) = env.get("SWARM_BACKUP_S3_ENDPOINT") {
-                s3.endpoint = v.clone();
+                s3.endpoint.clone_from(v);
             }
             if let Some(v) = env.get("SWARM_BACKUP_S3_REGION") {
-                s3.region = v.clone();
+                s3.region.clone_from(v);
             }
             if let Some(v) = env.get("SWARM_BACKUP_S3_BUCKET") {
-                s3.bucket = v.clone();
+                s3.bucket.clone_from(v);
             }
             if let Some(v) = env.get("SWARM_BACKUP_S3_PREFIX") {
-                s3.prefix = v.clone();
+                s3.prefix.clone_from(v);
             }
             if let Some(v) = env.get("SWARM_BACKUP_S3_ACCESS_KEY_ID") {
-                s3.access_key_id = v.clone();
+                s3.access_key_id.clone_from(v);
             }
             if let Some(v) = env.get("SWARM_BACKUP_S3_SECRET_ACCESS_KEY") {
-                s3.secret_access_key = v.clone();
+                s3.secret_access_key.clone_from(v);
             }
         }
     }
@@ -459,7 +454,6 @@ local_cache_dir = "/tmp/cache"
         let cfg = Config::load(&path, &BTreeMap::new(), false).expect("loads");
         assert_eq!(cfg.bind, "0.0.0.0:8080");
         assert_eq!(cfg.cube.api_key, "k");
-        assert_eq!(cfg.default_ttl_seconds, 86_400);
         assert_eq!(cfg.health_probe_interval_seconds, 60);
         assert_eq!(cfg.backup.sink, BackupSinkKind::Local);
         assert_eq!(cfg.providers.anthropic.as_ref().unwrap().api_key.as_deref(), Some("a"));

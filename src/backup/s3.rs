@@ -51,12 +51,11 @@ impl S3BackupSink {
             None,
         )
         .map_err(|e| BackupError::Sink(format!("aws-creds: {e}")))?;
-        let mut bucket = Box::new(
-            Bucket::new(&cfg.bucket, region, credentials)
-                .map_err(|e| BackupError::Sink(format!("rust-s3: {e}")))?,
-        );
+        // rust-s3 0.37: `Bucket::new` returns `Box<Bucket>` directly.
+        let mut bucket: Box<Bucket> = Bucket::new(&cfg.bucket, region, credentials)
+            .map_err(|e| BackupError::Sink(format!("rust-s3: {e}")))?;
         if cfg.path_style {
-            *bucket = bucket.with_path_style();
+            bucket = bucket.with_path_style();
         }
         Ok(Self {
             bucket,

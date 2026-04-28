@@ -71,7 +71,7 @@ mod tests {
     use super::*;
 
     fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| x.to_string()).collect()
+        items.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]
