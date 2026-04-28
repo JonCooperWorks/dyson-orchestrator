@@ -20,17 +20,30 @@ export function InstancesView({ view }) {
     selectInstance(selectedId);
   }, [selectedId]);
 
+  // Mobile: rail is a slide-in drawer.  Desktop CSS pins it open and
+  // ignores this state.  Auto-close whenever the URL hash advances —
+  // tapping a row navigates and the drawer should get out of the way.
+  const [sidebarOpen, setSidebarOpen] = React.useState(false);
+  React.useEffect(() => {
+    setSidebarOpen(false);
+  }, [selectedId]);
+
   return (
-    <div className="instances-pane">
-      <InstanceList selectedId={selectedId}/>
-      <InstanceDetail id={selectedId}/>
+    <div className={`instances-pane ${sidebarOpen ? 'rail-open' : ''}`}>
+      <InstanceList selectedId={selectedId} onNavigate={() => setSidebarOpen(false)}/>
+      <div
+        className="rail-scrim"
+        onClick={() => setSidebarOpen(false)}
+        aria-hidden="true"
+      />
+      <InstanceDetail id={selectedId} onOpenSidebar={() => setSidebarOpen(true)}/>
     </div>
   );
 }
 
 // ─── List ─────────────────────────────────────────────────────────
 
-function InstanceList({ selectedId }) {
+function InstanceList({ selectedId, onNavigate }) {
   const { client } = useApi();
   const { byId, order } = useAppState(s => s.instances);
   const [creating, setCreating] = React.useState(false);
@@ -77,7 +90,7 @@ function InstanceList({ selectedId }) {
           const label = row.name && row.name.trim() ? row.name : `(unnamed) ${shortId(id)}`;
           return (
             <li key={id} className={`rail-row ${selectedId === id ? 'selected' : ''}`}>
-              <a href={`#/i/${encodeURIComponent(id)}`}>
+              <a href={`#/i/${encodeURIComponent(id)}`} onClick={() => onNavigate && onNavigate()}>
                 <div className="rail-row-name">{label}</div>
                 <div className="rail-row-id muted small">{shortId(id)}</div>
                 <div className="rail-row-meta">
@@ -441,7 +454,7 @@ function KvField({ label, value }) {
 
 // ─── Detail ───────────────────────────────────────────────────────
 
-function InstanceDetail({ id }) {
+function InstanceDetail({ id, onOpenSidebar }) {
   const { client } = useApi();
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
   const [busy, setBusy] = React.useState(false);
@@ -509,8 +522,13 @@ function InstanceDetail({ id }) {
     };
   }, [openUrl]);
 
-  if (!id) return <EmptyDetail/>;
-  if (!row) return <main className="detail-pane"><p className="muted">loading…</p></main>;
+  if (!id) return <EmptyDetail onOpenSidebar={onOpenSidebar}/>;
+  if (!row) return (
+    <main className="detail-pane">
+      <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
+      <p className="muted">loading…</p>
+    </main>
+  );
 
   const probe = async () => {
     setBusy(true); setErr(null);
@@ -557,6 +575,7 @@ function InstanceDetail({ id }) {
 
   return (
     <main className="detail-pane">
+      <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
       <header className="detail-header">
         <div className="employee-card">
           <h2 className="employee-name">{displayName}</h2>
@@ -714,11 +733,28 @@ function EditEmployeeModal({ instance, onClose, onSaved }) {
   );
 }
 
-function EmptyDetail() {
+function EmptyDetail({ onOpenSidebar }) {
   return (
     <main className="detail-pane detail-empty">
+      <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
       <div className="muted">select an instance, or click "new" to create one.</div>
     </main>
+  );
+}
+
+// Hamburger that's only visible on mobile (CSS-gated).  Lives at the
+// top of the detail pane so the user can pop the rail open without
+// hunting for it; desktop layouts ignore the button entirely.
+function MobileRailToggle({ onOpenSidebar }) {
+  return (
+    <button
+      type="button"
+      className="rail-toggle"
+      onClick={() => onOpenSidebar && onOpenSidebar()}
+      aria-label="show instances list"
+    >
+      ☰ instances
+    </button>
   );
 }
 
