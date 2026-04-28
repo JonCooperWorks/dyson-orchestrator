@@ -41,25 +41,39 @@ export function InstancesView({ view }) {
     setSidebarOpen(false);
   }, [selectedId]);
 
+  // Lifted up so the empty detail pane's hero CTA can also pop the
+  // create modal (otherwise the only path to "new" is via the rail
+  // header, which is hidden on mobile until the user opens the rail).
+  const [creating, setCreating] = React.useState(false);
+
   return (
     <div className={`instances-pane ${sidebarOpen ? 'rail-open' : ''}`}>
-      <InstanceList selectedId={selectedId} onNavigate={() => setSidebarOpen(false)}/>
+      <InstanceList
+        selectedId={selectedId}
+        onNavigate={() => setSidebarOpen(false)}
+        creating={creating}
+        onNew={() => setCreating(true)}
+        onCloseCreate={() => setCreating(false)}
+      />
       <div
         className="rail-scrim"
         onClick={() => setSidebarOpen(false)}
         aria-hidden="true"
       />
-      <InstanceDetail id={selectedId} onOpenSidebar={() => setSidebarOpen(true)}/>
+      <InstanceDetail
+        id={selectedId}
+        onOpenSidebar={() => setSidebarOpen(true)}
+        onNew={() => setCreating(true)}
+      />
     </div>
   );
 }
 
 // ─── List ─────────────────────────────────────────────────────────
 
-function InstanceList({ selectedId, onNavigate }) {
+function InstanceList({ selectedId, onNavigate, creating, onNew, onCloseCreate }) {
   const { client } = useApi();
   const { byId, order } = useAppState(s => s.instances);
-  const [creating, setCreating] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
@@ -92,12 +106,12 @@ function InstanceList({ selectedId, onNavigate }) {
           <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={refreshing} title="refresh">
             {refreshing ? '…' : '↻'}
           </button>
-          <button className="btn btn-sm" onClick={() => setCreating(true)}>new</button>
+          <button className="btn btn-sm" onClick={onNew}>new</button>
         </div>
       </div>
       <ul className="rail-list">
         {order.length === 0 ? (
-          <li className="rail-empty muted small">no instances. click "new" to spin one up.</li>
+          <li className="rail-empty muted small">your roster's empty — hire one →</li>
         ) : order.map(id => {
           const row = byId[id];
           const label = row.name && row.name.trim() ? row.name : `(unnamed) ${shortId(id)}`;
@@ -115,7 +129,7 @@ function InstanceList({ selectedId, onNavigate }) {
           );
         })}
       </ul>
-      {creating ? <CreateModal onClose={() => setCreating(false)} onCreated={refresh}/> : null}
+      {creating ? <CreateModal onClose={onCloseCreate} onCreated={refresh}/> : null}
     </aside>
   );
 }
@@ -467,9 +481,10 @@ function KvField({ label, value }) {
 
 // ─── Detail ───────────────────────────────────────────────────────
 
-function InstanceDetail({ id, onOpenSidebar }) {
+function InstanceDetail({ id, onOpenSidebar, onNew }) {
   const { client } = useApi();
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
+  const totalInstances = useAppState(s => s.instances.order.length);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
   // Hoisted above the conditional returns so the hook order is stable
@@ -535,7 +550,13 @@ function InstanceDetail({ id, onOpenSidebar }) {
     };
   }, [openUrl]);
 
-  if (!id) return <EmptyDetail onOpenSidebar={onOpenSidebar}/>;
+  if (!id) return (
+    <EmptyDetail
+      onOpenSidebar={onOpenSidebar}
+      onNew={onNew}
+      hasInstances={totalInstances > 0}
+    />
+  );
   if (!row) return (
     <main className="detail-pane">
       <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
@@ -751,12 +772,71 @@ function EditEmployeeModal({ instance, onClose, onSaved }) {
   );
 }
 
-function EmptyDetail({ onOpenSidebar }) {
+function EmptyDetail({ onOpenSidebar, onNew, hasInstances }) {
   return (
     <main className="detail-pane detail-empty">
       <MobileRailToggle onOpenSidebar={onOpenSidebar}/>
-      <div className="muted">select an instance, or click "new" to create one.</div>
+      <div className="empty-hero">
+        <DysonSphereGlyph/>
+        {hasInstances ? (
+          <>
+            <h1 className="empty-title">pick a dyson</h1>
+            <p className="empty-sub">
+              your roster is on the left — pick one to inspect, edit, or
+              fire it up. or hire a new employee for a new task.
+            </p>
+            <div className="empty-actions">
+              <button className="btn btn-primary" onClick={onNew}>+ hire a dyson</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h1 className="empty-title">build your swarm</h1>
+            <p className="empty-sub">
+              dysons are long-lived agents you put to work — one per task,
+              each with its own brief, model, and memory. start with one
+              employee; scale to hundreds.
+            </p>
+            <div className="empty-actions">
+              <button className="btn btn-primary btn-lg" onClick={onNew}>
+                hire your first dyson
+              </button>
+            </div>
+            <p className="empty-hint muted small">
+              you can always change a dyson's brief or model later — nothing
+              you set now is final.
+            </p>
+          </>
+        )}
+      </div>
     </main>
+  );
+}
+
+/* Dyson-sphere logomark.  Three concentric arc-rings on a dim radial
+ * gradient — the brand cue without shipping an image asset.  Spins
+ * very slowly (90s) so it has presence on a static page without
+ * being distracting.  All CSS / SVG; no fonts, no network, no JS. */
+function DysonSphereGlyph() {
+  return (
+    <div className="empty-sphere" aria-hidden="true">
+      <svg viewBox="0 0 120 120" width="120" height="120">
+        <defs>
+          <radialGradient id="ds-core" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.95"/>
+            <stop offset="55%" stopColor="var(--accent)" stopOpacity="0.25"/>
+            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0"/>
+          </radialGradient>
+        </defs>
+        <circle cx="60" cy="60" r="56" fill="url(#ds-core)"/>
+        <g className="empty-sphere-rings" stroke="var(--accent)" fill="none" strokeWidth="1.2">
+          <ellipse cx="60" cy="60" rx="52" ry="20" opacity="0.9"/>
+          <ellipse cx="60" cy="60" rx="52" ry="20" opacity="0.55" transform="rotate(60 60 60)"/>
+          <ellipse cx="60" cy="60" rx="52" ry="20" opacity="0.55" transform="rotate(120 60 60)"/>
+        </g>
+        <circle cx="60" cy="60" r="6" fill="var(--accent)"/>
+      </svg>
+    </div>
   );
 }
 

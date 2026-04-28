@@ -221,6 +221,72 @@
 .detail-empty {
   align-items: center;
   justify-content: center;
+  text-align: center;
+  /* Soft radial spotlight behind the hero so the empty pane reads as
+   * intentional product surface, not a missing component.  Anchored
+   * top-centre so the glyph sits in its glow. */
+  background:
+    radial-gradient(
+      ellipse at 50% 38%,
+      color-mix(in srgb, var(--accent) 14%, transparent) 0%,
+      transparent 55%
+    ),
+    var(--bg);
+}
+
+.empty-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 440px;
+  padding: 0 24px;
+}
+.empty-sphere {
+  width: 120px;
+  height: 120px;
+  filter:
+    drop-shadow(0 0 24px color-mix(in srgb, var(--accent) 35%, transparent))
+    drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 60%, transparent));
+}
+.empty-sphere-rings {
+  transform-origin: 60px 60px;
+  animation: empty-sphere-spin 90s linear infinite;
+}
+@keyframes empty-sphere-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .empty-sphere-rings { animation: none; }
+}
+.empty-title {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 8px 0 0;
+  color: var(--fg);
+}
+.empty-sub {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--fg-muted);
+  margin: 0;
+  max-width: 38ch;
+}
+.empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.btn-lg {
+  padding: 10px 20px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.empty-hint {
+  margin-top: 4px;
+  max-width: 38ch;
 }
 
 .detail-header {
