@@ -101,9 +101,15 @@ struct SandboxNetwork<'a> {
     deny_out: &'a [&'static str],
 }
 
-/// Explicit allow-all so the eBPF policy stays in blacklist mode —
-/// see comment on `SandboxNetwork::allow_out`.
-const DEFAULT_ALLOW_OUT: &[&str] = &["0.0.0.0/0"];
+/// `0.0.0.0/0` keeps the eBPF policy in blacklist mode (see
+/// `SandboxNetwork::allow_out`).  `192.168.0.1/32` punches a hole
+/// in the always-denied `192.168.0.0/16` for the cube → host path:
+/// the cube image ships an `/etc/hosts` entry mapping
+/// `dyson.myprivate.network` to `192.168.0.1` (cube-dev gateway IP)
+/// to dodge the host's NAT-hairpin failure when reaching the host's
+/// own public IP.  The eBPF rule is "allow > deny > default-allow",
+/// so the /32 here wins over the /16 deny.
+const DEFAULT_ALLOW_OUT: &[&str] = &["0.0.0.0/0", "192.168.0.1/32"];
 
 /// Default outbound deny list — same as CubeNet's hardcoded
 /// `alwaysDeniedSandboxCIDRs`.  Duplicated here on purpose so swarm's
@@ -472,7 +478,12 @@ mod tests {
             .iter()
             .map(|x| x.as_str().unwrap())
             .collect();
-        assert_eq!(allow, vec!["0.0.0.0/0"]);
+        // 0.0.0.0/0 keeps the policy in blacklist mode; 192.168.0.1/32
+        // punches a /32 hole in the always-denied 192.168.0.0/16 so the
+        // cube can reach the host on the cube-dev gateway IP (path 1
+        // for the NAT-hairpin: cube reaches Caddy via /etc/hosts entry
+        // pointing dyson.myprivate.network at 192.168.0.1).
+        assert_eq!(allow, vec!["0.0.0.0/0", "192.168.0.1/32"]);
         let deny: Vec<&str> = v["network"]["denyOut"]
             .as_array()
             .unwrap()

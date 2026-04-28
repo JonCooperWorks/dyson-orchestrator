@@ -29,6 +29,20 @@ pub struct Config {
     #[serde(default)]
     pub hostname: Option<String>,
 
+    /// `host:port` the cube uses to call swarm's `/llm` proxy back.
+    /// Decoupled from `hostname` because the cube cannot reach the
+    /// host's own public IP (NAT hairpin: cube SNAT → host_pub_ip
+    /// → kernel loops to local socket → reply never DNAT'd back to
+    /// the cube's TAP, SYN sits in syn_sent).  Set to the host's
+    /// cube-dev gateway IP (e.g. `"192.168.0.1:8080"`) so the cube
+    /// reaches swarm directly via local routing — no Caddy, no TLS,
+    /// no hairpin.  When unset, falls back to `https://{hostname}/llm`
+    /// for back-compat.  Swarm's `cube_client` ships a
+    /// `192.168.0.1/32` allow_out so the always-denied
+    /// `192.168.0.0/16` doesn't drop the cube's outbound SYN.
+    #[serde(default)]
+    pub cube_facing_addr: Option<String>,
+
     #[serde(default = "default_ttl")]
     pub default_ttl_seconds: i64,
     #[serde(default = "default_probe_interval")]

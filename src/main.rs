@@ -145,9 +145,17 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     //
     // Local-dev callers without a hostname keep the loopback URL, since
     // the agent runs on the same machine in that path.
-    let proxy_base = match cfg.hostname.as_deref().filter(|h| !h.is_empty()) {
-        Some(host) => format!("https://{host}/llm"),
-        None => format!("http://{}/llm", cfg.bind),
+    // Prefer the explicit cube-facing address when set: the cube can't
+    // hairpin through the host's own public IP (which is what
+    // `https://{hostname}/llm` resolves to in production), so a deploy
+    // points this at the host's cube-dev gateway IP instead.  See the
+    // doc on `Config::cube_facing_addr` for the full failure mode.
+    let proxy_base = match cfg.cube_facing_addr.as_deref().filter(|a| !a.is_empty()) {
+        Some(addr) => format!("http://{addr}/llm"),
+        None => match cfg.hostname.as_deref().filter(|h| !h.is_empty()) {
+            Some(host) => format!("https://{host}/llm"),
+            None => format!("http://{}/llm", cfg.bind),
+        },
     };
     tracing::info!(proxy_base = %proxy_base, "agent /llm proxy URL");
     let mut instance_svc = InstanceService::new(
