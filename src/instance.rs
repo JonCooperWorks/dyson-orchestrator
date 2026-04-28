@@ -371,25 +371,29 @@ impl InstanceService {
                     self.proxy_base.trim_end_matches('/')
                 )),
             };
-            let r = reconfigurer.clone();
-            let id_for_log = id.clone();
-            let sandbox_id = info.sandbox_id.clone();
-            // Spawn so we can return CreatedInstance immediately —
-            // the SPA's create flow already shows a "provisioning"
-            // spinner that the dispatch layer drives via the
-            // detail-page useEffect.  If the push fails we log;
-            // the user can retry by editing the dyson, which lands
-            // on the same /api/admin/configure code path.
-            tokio::spawn(async move {
-                if let Err(err) = push_with_retry(&*r, &id_for_log, &sandbox_id, &body).await {
+            // Await the configure-push before returning Live.  Previously
+            // this was tokio::spawn'd (fire-and-forget): the SPA could
+            // race the user's first chat turn against the patch, and
+            // dyson's per-chat agent cached the warmup-placeholder
+            // client (warmup api_key + api.openai.com base_url).  Even
+            // dev Claude's per-chat HotReloader can't recover, because
+            // its baseline mtime is set AFTER the cached agent build,
+            // so a subsequent turn sees no dyson.json change and
+            // reuses the stale client.  Blocking here costs the create
+            // call ~1s on the happy path and avoids the race entirely.
+            // Failure is fatal to the create — we'd rather surface the
+            // problem at create time than ship a half-broken instance.
+            push_with_retry(reconfigurer.as_ref(), &id, &info.sandbox_id, &body)
+                .await
+                .map_err(|err| {
                     tracing::warn!(
                         error = %err,
-                        instance = %id_for_log,
-                        sandbox = %sandbox_id,
-                        "reconfigure: failed; dyson may stay on warmup-placeholder"
+                        instance = %id,
+                        sandbox = %info.sandbox_id,
+                        "reconfigure: failed during create — instance would stay on warmup-placeholder"
                     );
-                }
-            });
+                    SwarmError::Internal(format!("configure-push failed: {err}"))
+                })?;
         }
 
         Ok(CreatedInstance {

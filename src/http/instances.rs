@@ -277,5 +277,9 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
         SwarmError::Store(s) => store_err_to_status(s),
         SwarmError::Backup(_) => StatusCode::INTERNAL_SERVER_ERROR,
         SwarmError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        // Surfaced when create-time configure-push to dyson exhausts
+        // its retry budget; the SPA will see 502 and the user can
+        // retry the create.
+        SwarmError::Internal(_) => StatusCode::BAD_GATEWAY,
     }
 }

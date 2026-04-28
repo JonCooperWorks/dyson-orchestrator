@@ -46,4 +46,9 @@ pub enum SwarmError {
     PolicyDenied(String),
     #[error("not found")]
     NotFound,
+    /// Used for failures we surface but don't have a more specific variant
+    /// for — currently only the create-time configure-push retry budget
+    /// exhaustion (which would otherwise leave the cube in warmup mode).
+    #[error("internal: {0}")]
+    Internal(String),
 }
