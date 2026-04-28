@@ -342,13 +342,20 @@ impl InstanceService {
                 // Push the freshly-minted proxy_token + the resolved
                 // /llm base URL into the running dyson's dyson.json so
                 // the agent stops trying to call upstream with the
-                // boot-time `warmup-placeholder` api_key.  The /openrouter/v1
-                // suffix matches what `dyson warden`'s warmup config
-                // writer constructs — keeps dyson's admin handler
-                // agnostic to which provider the agent fronts.
+                // boot-time `warmup-placeholder` api_key.  The
+                // `/openrouter` suffix matches what `dyson warden`'s
+                // warmup config writer constructs — keeps dyson's admin
+                // handler agnostic to which provider the agent fronts.
                 proxy_token: Some(proxy_token.clone()),
+                // `<proxy_base>/openrouter` — the trailing `/v1` is added
+                // by dyson's `OpenAiCompatClient` when it builds the
+                // request URL (`{base_url}/v1/chat/completions`).  Stamping
+                // `/v1` here too doubles it up and routes to OR's
+                // marketing site, which dyson surfaces as a generic
+                // "upstream HTTP error".  See the regression test
+                // `create_pushes_proxy_base_without_trailing_v1`.
                 proxy_base: Some(format!(
-                    "{}/openrouter/v1",
+                    "{}/openrouter",
                     self.proxy_base.trim_end_matches('/')
                 )),
             };
@@ -972,5 +979,92 @@ mod tests {
         // Existing secrets are persisted under the new instance id too.
         let copied = secrets.list(&restored.id).await.unwrap();
         assert_eq!(copied, vec![("K".into(), "v-existing".into())]);
+    }
+
+    /// Recorder reconfigurer.  Captures every body push so tests can
+    /// inspect the values warden chose.  Always succeeds — failure paths
+    /// have their own coverage in the retry/backoff tests.
+    #[derive(Default)]
+    struct RecordingReconfigurer {
+        pushed: Mutex<Vec<(String, String, ReconfigureBody)>>,
+    }
+
+    #[async_trait]
+    impl DysonReconfigurer for RecordingReconfigurer {
+        async fn push(
+            &self,
+            instance_id: &str,
+            sandbox_id: &str,
+            body: &ReconfigureBody,
+        ) -> Result<(), String> {
+            self.pushed
+                .lock()
+                .unwrap()
+                .push((instance_id.into(), sandbox_id.into(), body.clone()));
+            Ok(())
+        }
+    }
+
+    /// Regression for the chat-hang-then-`upstream HTTP error` bug.
+    ///
+    /// `proxy_base` ends up in dyson.json's `providers.openrouter.base_url`,
+    /// and dyson's `OpenAiCompatClient` appends `/v1/chat/completions` to
+    /// it on every request.  If warden hands dyson a base ending in `/v1`,
+    /// the URL doubles up to `.../openrouter/v1/v1/chat/completions` —
+    /// OpenRouter's CDN serves the marketing site at that path and dyson
+    /// surfaces the resulting non-200 as a generic "upstream HTTP error".
+    /// This test pins the contract: warden's reconfigure push uses
+    /// `<proxy_base>/openrouter`, with no trailing `/v1`.
+    #[tokio::test]
+    async fn create_pushes_proxy_base_without_trailing_v1() {
+        let pool = open_in_memory().await.unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool));
+        let svc = InstanceService::new(
+            cube.clone(),
+            instances,
+            secrets,
+            tokens,
+            "https://dyson.example.com/llm",
+            3600,
+        );
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let svc = svc.with_reconfigurer(recorder.clone());
+
+        svc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: Some("alice".into()),
+            task: Some("review prs".into()),
+            env: env_with_model(),
+            ttl_seconds: None,
+        })
+        .await
+        .unwrap();
+
+        // The reconfigure push happens in a tokio::spawn — give it a
+        // moment to land.  Five 50ms probes is plenty for the in-process
+        // recorder.
+        for _ in 0..5 {
+            if !recorder.pushed.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1, "exactly one reconfigure push expected");
+        let (_, _, body) = &pushed[0];
+        let proxy_base = body
+            .proxy_base
+            .as_deref()
+            .expect("proxy_base must be set on create-time push");
+        assert_eq!(
+            proxy_base, "https://dyson.example.com/llm/openrouter",
+            "proxy_base must NOT end in /v1 — dyson's openai client appends \
+             /v1/chat/completions itself, doubling /v1 hits OR's marketing \
+             site at /v1/v1/... and surfaces as 'upstream HTTP error'"
+        );
     }
 }
