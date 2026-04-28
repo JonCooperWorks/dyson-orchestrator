@@ -257,7 +257,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // `[providers.openrouter].api_key`.  Constructed up front so both
     // the proxy and the admin endpoints share one resolver.
     let or_provisioning: Option<Arc<dyn dyson_warden::openrouter::Provisioning>> =
-        match resolve_or_provisioning(&cfg) {
+        match resolve_or_provisioning_async(&cfg, system_secrets_svc.as_ref()).await {
             Ok(Some(client)) => Some(Arc::new(client) as Arc<dyn dyson_warden::openrouter::Provisioning>),
             Ok(None) => None,
             Err(err) => {
@@ -430,18 +430,30 @@ async fn overlay_provider_keys(
     Ok(providers)
 }
 
-/// Build the OpenRouter Provisioning client from `[openrouter]` if
-/// configured.  Returns `Ok(None)` when the section is omitted or the
-/// key path/inline is empty — that's a valid deployment posture
-/// (Stage 6 disabled, fall back to global OR key).  Returns `Err` only
-/// when the operator clearly intended to enable it (path set) but the
-/// file is unreadable / empty.
-fn resolve_or_provisioning(
+/// Stage 3 sibling: the OpenRouter Provisioning key.  Same secret-
+/// store-first pattern as `overlay_provider_keys`, but for the secret
+/// warden uses to mint per-user OR bearers via /api/v1/keys.
+///
+/// Lookup name: `openrouter.provisioning_key`.  Operators set it via
+/// `warden secrets system-set openrouter.provisioning_key <value>`.
+/// Returns the resolved plaintext (or None if neither system_secrets
+/// nor the legacy [openrouter] block carry one).
+async fn resolve_or_provisioning_secret(
     cfg: &config::Config,
-) -> Result<Option<dyson_warden::openrouter::OpenRouterProvisioning>, String> {
+    secrets: &dyson_warden::secrets::SystemSecretsService,
+) -> Result<Option<String>, String> {
+    if let Some(value) = secrets
+        .get_str("openrouter.provisioning_key")
+        .await
+        .map_err(|e| format!("system_secrets[openrouter.provisioning_key]: {e}"))?
+        .filter(|v| !v.trim().is_empty())
+    {
+        tracing::info!("stage 3: openrouter provisioning key sourced from system_secrets");
+        return Ok(Some(value.trim().to_owned()));
+    }
     let Some(or_cfg) = &cfg.openrouter else { return Ok(None); };
-    let key = match (or_cfg.provisioning_key.as_deref(), or_cfg.provisioning_key_path.as_deref()) {
-        (Some(k), _) if !k.trim().is_empty() => k.trim().to_string(),
+    match (or_cfg.provisioning_key.as_deref(), or_cfg.provisioning_key_path.as_deref()) {
+        (Some(k), _) if !k.trim().is_empty() => Ok(Some(k.trim().to_owned())),
         (_, Some(p)) => {
             let raw = std::fs::read_to_string(p)
                 .map_err(|e| format!("read {}: {e}", p.display()))?;
@@ -449,13 +461,27 @@ fn resolve_or_provisioning(
             if trimmed.is_empty() {
                 return Err(format!("openrouter provisioning key file {} is empty", p.display()));
             }
-            trimmed
+            Ok(Some(trimmed))
         }
-        _ => return Ok(None),
+        _ => Ok(None),
+    }
+}
+
+/// Async resolver that prefers `system_secrets[openrouter.provisioning_key]`
+/// then falls back to `[openrouter]` config.  Builds the Provisioning
+/// client when a key is found, returns Ok(None) when the operator
+/// hasn't enabled Stage 6.
+async fn resolve_or_provisioning_async(
+    cfg: &config::Config,
+    secrets: &dyson_warden::secrets::SystemSecretsService,
+) -> Result<Option<dyson_warden::openrouter::OpenRouterProvisioning>, String> {
+    let Some(key) = resolve_or_provisioning_secret(cfg, secrets).await? else {
+        return Ok(None);
     };
-    let upstream = or_cfg
-        .upstream
-        .clone()
+    let upstream = cfg
+        .openrouter
+        .as_ref()
+        .and_then(|o| o.upstream.clone())
         .or_else(|| cfg.providers.openrouter.as_ref().map(|p| p.upstream.clone()))
         .unwrap_or_else(|| "https://openrouter.ai/api".to_string());
     dyson_warden::openrouter::OpenRouterProvisioning::new(upstream, key)
