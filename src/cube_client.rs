@@ -80,14 +80,30 @@ struct CreateBody<'a> {
 
 #[derive(Debug, Serialize)]
 struct SandboxNetwork<'a> {
+    /// Explicit "allow everything not denied below".  Required because
+    /// the cube template injects `119.29.29.29/32` (DNSPod) into
+    /// allow_out by default, which flips the eBPF policy into
+    /// whitelist mode — the cube then can only reach IPs in
+    /// allow_out, not the rest of the public internet.  Sending
+    /// `0.0.0.0/0` here keeps the policy in blacklist mode (allow
+    /// all, subtract deny_out) and is unioned with whatever the
+    /// template also adds.  Symptom when missing: cube TCP SYN to
+    /// `dyson.myprivate.network:443` stays in `syn_sent` until the
+    /// cubevs session reaper kills it.
+    #[serde(rename = "allowOut")]
+    allow_out: &'a [&'static str],
     /// Mirrors `alwaysDeniedSandboxCIDRs` in CubeNet (`netpolicy.go`).
     /// The eBPF layer always appends these to the deny trie, but
     /// passing them here forces `build_cubevs_context` to return
-    /// `Some(...)` so the per-ifindex inner LPM maps are populated
-    /// explicitly rather than left to default state.
+    /// `Some(...)` and keeps the policy view auditable from the
+    /// orchestrator side.
     #[serde(rename = "denyOut")]
     deny_out: &'a [&'static str],
 }
+
+/// Explicit allow-all so the eBPF policy stays in blacklist mode —
+/// see comment on `SandboxNetwork::allow_out`.
+const DEFAULT_ALLOW_OUT: &[&str] = &["0.0.0.0/0"];
 
 /// Default outbound deny list — same as CubeNet's hardcoded
 /// `alwaysDeniedSandboxCIDRs`.  Duplicated here on purpose so swarm's
@@ -144,6 +160,7 @@ impl CubeClient for HttpCubeClient {
             from_snapshot: from_snap_path.as_deref().map(|path| FromSnapshot { path }),
             allow_internet_access: true,
             network: SandboxNetwork {
+                allow_out: DEFAULT_ALLOW_OUT,
                 deny_out: DEFAULT_DENY_OUT,
             },
         };
@@ -344,7 +361,12 @@ mod tests {
         }
         // Egress policy is always sent so CubeVSContext is non-None on
         // the API side — see `network_denylist.py` in CubeSandbox/examples.
+        // `allowOut: ["0.0.0.0/0"]` keeps the eBPF policy in
+        // blacklist mode; without it, the cube template's default
+        // `119.29.29.29/32` flips it into whitelist mode and blocks
+        // all real upstreams.
         assert_eq!(body["allow_internet_access"], true);
+        assert_eq!(body["network"]["allowOut"][0], "0.0.0.0/0");
         assert!(body["network"]["denyOut"].is_array());
         Ok(Json(serde_json::json!({
             "sandboxID": "sb-1",
@@ -432,12 +454,25 @@ mod tests {
             from_snapshot: None,
             allow_internet_access: true,
             network: SandboxNetwork {
+                allow_out: DEFAULT_ALLOW_OUT,
                 deny_out: DEFAULT_DENY_OUT,
             },
         };
         let v = serde_json::to_value(&body).unwrap();
         assert_eq!(v["templateID"], "tpl");
         assert_eq!(v["allow_internet_access"], true);
+        // Explicit allow-all keeps the eBPF policy in blacklist mode
+        // even when the cube template injects its own allow_out
+        // entries (e.g. DNSPod 119.29.29.29/32).  Without this, the
+        // template's allow_out flips the policy into whitelist mode
+        // and silently drops all egress except the templated CIDRs.
+        let allow: Vec<&str> = v["network"]["allowOut"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert_eq!(allow, vec!["0.0.0.0/0"]);
         let deny: Vec<&str> = v["network"]["denyOut"]
             .as_array()
             .unwrap()
