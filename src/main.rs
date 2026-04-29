@@ -104,6 +104,74 @@ async fn main() -> ExitCode {
             )
             .await
         }
+        Command::DysonSkills { id } => run_dyson_skills(&cfg, id).await,
+    }
+}
+
+/// Diagnostic: probe `/api/admin/skills` on a running dyson.  Reads
+/// the instance's sandbox_id from the swarm DB, builds a
+/// reconfigurer (same one the regular configure path uses), and
+/// pretty-prints the JSON response.  Best-run on the swarm host —
+/// the cube root CA + sandbox_domain in /etc/dyson-swarm/config.toml
+/// are required to reach cubeproxy.
+async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
+    use dyson_swarm::dyson_reconfig::DysonReconfigurerHttp;
+    let pool = match dyson_swarm::db::open(&cfg.db_path).await {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("db open: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let instances_store: std::sync::Arc<dyn dyson_swarm::traits::InstanceStore> = std::sync::Arc::new(
+        dyson_swarm::db::instances::SqlxInstanceStore::new(pool.clone()),
+    );
+    let row = match instances_store.get(&id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            eprintln!("instance not found: {id}");
+            return ExitCode::from(2);
+        }
+        Err(err) => {
+            eprintln!("instance lookup: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let sandbox_id = match row.cube_sandbox_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => s.to_owned(),
+        None => {
+            eprintln!("instance has no cube_sandbox_id");
+            return ExitCode::from(2);
+        }
+    };
+    let cipher_dir = match dyson_swarm::envelope::AgeCipherDirectory::new(cfg.keys_dir.clone().unwrap_or_default()) {
+        Ok(d) => std::sync::Arc::new(d) as std::sync::Arc<dyn dyson_swarm::envelope::CipherDirectory>,
+        Err(err) => {
+            eprintln!("keys_dir open: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let system_secrets_store: std::sync::Arc<dyn dyson_swarm::traits::SystemSecretStore> =
+        std::sync::Arc::new(dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool));
+    let system_secrets = std::sync::Arc::new(
+        dyson_swarm::secrets::SystemSecretsService::new(system_secrets_store, cipher_dir),
+    );
+    let reconfigurer = match DysonReconfigurerHttp::new(cfg.cube.sandbox_domain.clone(), system_secrets) {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("reconfigurer init: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    match reconfigurer.get_skills(&id, &sandbox_id).await {
+        Ok(v) => {
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()));
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("get_skills: {err}");
+            ExitCode::from(2)
+        }
     }
 }
 

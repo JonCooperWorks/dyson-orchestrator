@@ -90,6 +90,11 @@ pub enum Command {
     /// Take a snapshot then promote it via the configured backup sink (kind=backup).
     Backup { id: String },
 
+    /// Diagnostic: GET /api/admin/skills on the running dyson and
+    /// pretty-print the response.  Surfaces which MCP servers
+    /// actually loaded (handshake errors otherwise log silently).
+    DysonSkills { id: String },
+
     /// Restore a new instance from a snapshot id.
     Restore {
         /// Source instance id (informational; the snapshot id below decides the bytes).

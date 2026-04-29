@@ -161,6 +161,42 @@ impl DysonReconfigurerHttp {
     }
 }
 
+impl DysonReconfigurerHttp {
+    /// Diagnostic: GET `/api/admin/skills` on the running dyson and
+    /// return the JSON it produces.  Lets an operator inspect which
+    /// MCP servers actually loaded — pairs with the matching dyson
+    /// route added to debug the silent on_load failure path.
+    pub async fn get_skills(
+        &self,
+        instance_id: &str,
+        sandbox_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        let secret = self.ensure_secret(instance_id).await?;
+        let port: u16 = std::env::var("SWARM_CUBE_INTERNAL_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(80);
+        let url = format!(
+            "https://{port}-{sandbox_id}.{}/api/admin/skills",
+            self.sandbox_domain
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header(CONFIGURE_HEADER, &secret)
+            .header(CSRF_HEADER, "swarm-internal")
+            .send()
+            .await
+            .map_err(|e| format!("send: {e}"))?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("dyson /api/admin/skills {status}: {body}"));
+        }
+        serde_json::from_str(&body).map_err(|e| format!("parse: {e}"))
+    }
+}
+
 #[async_trait::async_trait]
 impl DysonReconfigurer for DysonReconfigurerHttp {
     async fn push(
