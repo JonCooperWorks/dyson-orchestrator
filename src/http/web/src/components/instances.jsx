@@ -41,19 +41,18 @@ export function InstancesView({ view }) {
     setSidebarOpen(false);
   }, [selectedId]);
 
-  // Lifted up so the empty detail pane's hero CTA can also pop the
-  // create modal (otherwise the only path to "new" is via the rail
-  // header, which is hidden on mobile until the user opens the rail).
-  const [creating, setCreating] = React.useState(false);
+  // "New" is a dedicated page (#/new) rather than a modal — gives the
+  // configuration surface room to breathe (advanced options, future
+  // network-policy picker, etc.).  Both the rail header and the empty
+  // detail pane's hero CTA navigate there.
+  const goNew = () => { window.location.hash = '#/new'; };
 
   return (
     <div className={`instances-pane ${sidebarOpen ? 'rail-open' : ''}`}>
       <InstanceList
         selectedId={selectedId}
         onNavigate={() => setSidebarOpen(false)}
-        creating={creating}
-        onNew={() => setCreating(true)}
-        onCloseCreate={() => setCreating(false)}
+        onNew={goNew}
       />
       <div
         className="rail-scrim"
@@ -63,7 +62,7 @@ export function InstancesView({ view }) {
       <InstanceDetail
         id={selectedId}
         onOpenSidebar={() => setSidebarOpen(true)}
-        onNew={() => setCreating(true)}
+        onNew={goNew}
       />
     </div>
   );
@@ -71,7 +70,7 @@ export function InstancesView({ view }) {
 
 // ─── List ─────────────────────────────────────────────────────────
 
-function InstanceList({ selectedId, onNavigate, creating, onNew, onCloseCreate }) {
+function InstanceList({ selectedId, onNavigate, onNew }) {
   const { client } = useApi();
   const { byId, order } = useAppState(s => s.instances);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -129,7 +128,6 @@ function InstanceList({ selectedId, onNavigate, creating, onNew, onCloseCreate }
           );
         })}
       </ul>
-      {creating ? <CreateModal onClose={onCloseCreate} onCreated={refresh}/> : null}
     </aside>
   );
 }
@@ -142,13 +140,41 @@ function StatusBadge({ status }) {
   return <span className={`badge badge-${cls}`}>{status}</span>;
 }
 
-// ─── Create modal — onboarding-shaped ──────────────────────────────
+// ─── New instance — dedicated page ─────────────────────────────────
 //
 // Each Dyson is an employee.  The form reads top-down like an offer
-// letter: who they are, what they do, then the boring infrastructure
-// bits (template, ttl) collapsed under "advanced".
+// letter: who they are, what they do, then the infrastructure bits.
+// Promoted from a modal to a dedicated page so there's room for the
+// full configuration surface (template, ttl, and — coming next —
+// per-instance network policy fed to the cube's BPF egress filter).
 
-function CreateModal({ onClose, onCreated }) {
+export function NewInstancePage() {
+  // ESC navigates back to the list — same affordance the modal had,
+  // preserved on the page so muscle memory still works.
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') window.location.hash = '#/';
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  return (
+    <main className="page page-new">
+      <header className="page-header">
+        <a className="btn btn-ghost btn-sm" href="#/">← back</a>
+        <h1 className="page-title">hire a new dyson</h1>
+        <p className="page-sub muted">
+          Each Dyson is a long-lived employee.  Fill in the offer letter,
+          then click hire.
+        </p>
+      </header>
+      <NewInstanceForm/>
+    </main>
+  );
+}
+
+function NewInstanceForm() {
   const { client, auth } = useApi();
   const [name, setName] = React.useState('');
   const [task, setTask] = React.useState('');
@@ -172,7 +198,6 @@ function CreateModal({ onClose, onCreated }) {
     auth?.config?.default_template_id || ''
   );
   const [ttlSeconds, setTtlSeconds] = React.useState('');
-  const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
@@ -208,12 +233,12 @@ function CreateModal({ onClose, onCreated }) {
       // is provisioned (pre-warmed inside instance.create()), so by
       // the time this resolves the new dyson is fully reachable.
       const result = await client.createInstance(req);
-      onCreated && onCreated();
 
       if (result?.id) {
         window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
+      } else {
+        window.location.hash = '#/';
       }
-      onClose && onClose();
       return;
     } catch (err) {
       setError(err?.detail || err?.message || 'create failed');
@@ -225,19 +250,20 @@ function CreateModal({ onClose, onCreated }) {
 
   if (phase === 'provisioning') {
     return (
-      <ModalShell onClose={null} title="provisioning">
+      <section className="page-section">
         <p className="muted small">getting your dyson ready…</p>
         <div className="progress-bar"><div className="progress-bar-indeterminate"/></div>
         <p className="muted small" style={{ marginTop: 12 }}>
-          By the time this closes, your dyson is live and reachable.
+          By the time this redirects, your dyson is live and reachable.
         </p>
-      </ModalShell>
+      </section>
     );
   }
 
   return (
-    <ModalShell onClose={onClose} title="hire a new dyson">
-      <form onSubmit={submit} className="form">
+    <form onSubmit={submit} className="form page-form">
+      <section className="page-section">
+        <h2 className="section-title">identity</h2>
         <label className="field">
           <span>name</span>
           <input
@@ -254,7 +280,7 @@ function CreateModal({ onClose, onCreated }) {
             value={task}
             onChange={e => setTask(e.target.value)}
             placeholder="What this employee does, in prose. Example:\n\nWatch for new PRs in github.com/foo/bar. Comment with style-guide violations and link to the relevant section. Don't approve or merge."
-            rows={6}
+            rows={8}
           />
           <span className="hint muted small">
             The agent reads this on first boot as <code>SWARM_TASK</code>.
@@ -262,54 +288,61 @@ function CreateModal({ onClose, onCreated }) {
             running employee.
           </span>
         </label>
+      </section>
+
+      <section className="page-section">
+        <h2 className="section-title">model</h2>
         <ModelMultiPicker
           defaultModels={defaultModels}
           selected={models}
           onChange={setModels}
         />
+      </section>
+
+      <section className="page-section">
+        <h2 className="section-title">infrastructure</h2>
+        <label className="field">
+          <span>template id</span>
+          <input
+            value={templateId}
+            onChange={e => setTemplateId(e.target.value)}
+            placeholder="dyson-default"
+            required
+          />
+          <span className="hint muted small">
+            The cube template the sandbox boots from.  Operators
+            curate <code>default_template_id</code>; override here for
+            staged rollouts.
+          </span>
+        </label>
+        <label className="field">
+          <span>ttl (seconds, optional)</span>
+          <input
+            value={ttlSeconds}
+            onChange={e => setTtlSeconds(e.target.value)}
+            placeholder="86400"
+            inputMode="numeric"
+          />
+          <span className="hint muted small">
+            Auto-destroyed by the TTL sweeper after this many seconds.
+            Leave blank for a long-lived employee.
+          </span>
+        </label>
+      </section>
+
+      {error ? <div className="error">{error}</div> : null}
+      <div className="page-actions">
         <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          onClick={() => setShowAdvanced(s => !s)}
+          type="submit"
+          className="btn btn-primary"
+          disabled={submitting || models.length === 0 || !templateId.trim()}
+          title={models.length === 0 ? 'pick at least one model' : ''}
         >
-          {showAdvanced ? '▾ advanced' : '▸ advanced'}
+          {submitting ? 'hiring…' : 'hire'}
         </button>
-        {showAdvanced ? (
-          <>
-            <label className="field">
-              <span>template id</span>
-              <input
-                value={templateId}
-                onChange={e => setTemplateId(e.target.value)}
-                placeholder="dyson-default"
-                required
-              />
-            </label>
-            <label className="field">
-              <span>ttl (seconds, optional)</span>
-              <input
-                value={ttlSeconds}
-                onChange={e => setTtlSeconds(e.target.value)}
-                placeholder="86400"
-                inputMode="numeric"
-              />
-            </label>
-          </>
-        ) : null}
-        {error ? <div className="error">{error}</div> : null}
-        <div className="modal-actions">
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={submitting || models.length === 0}
-            title={models.length === 0 ? 'pick at least one model' : ''}
-          >
-            {submitting ? 'hiring…' : 'hire'}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>cancel</button>
-        </div>
-      </form>
-    </ModalShell>
+        <a className="btn btn-ghost" href="#/">cancel</a>
+      </div>
+    </form>
   );
 }
 

@@ -93,6 +93,7 @@ export function selectInstance(id) {
 // single mount path so the IdP redirect stays one config entry):
 //   #/           → instances list (default)
 //   #/i/<id>     → instance detail
+//   #/new        → dedicated hire page (replaces the old CreateModal)
 //   #/admin      → admin (users, proxy tokens)  [phase 5]
 //
 // Anything else falls back to the list.
@@ -102,6 +103,7 @@ export function parseHashView() {
   const h = window.location.hash || '#/';
   const m = h.match(/^#\/i\/([^/?#]+)/);
   if (m) return { name: 'instance', id: decodeURIComponent(m[1]) };
+  if (h.startsWith('#/new')) return { name: 'instance-new', id: null };
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };
   return { name: 'instances', id: null };
 }

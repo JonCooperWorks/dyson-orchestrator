@@ -519,6 +519,56 @@
   margin-top: 16px;
 }
 
+/* Dedicated "new instance" page (replaces the old CreateModal).
+ * Centred column with section breaks so the form reads like an
+ * onboarding flow rather than a cramped dialog. */
+.page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+}
+.page-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 24px;
+}
+.page-header > .btn { align-self: flex-start; margin-bottom: 4px; }
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0;
+}
+.page-sub { font-size: 13px; margin: 0; }
+.page-form {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.page-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin: 0 0 4px;
+}
+.page-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
 .form { display: flex; flex-direction: column; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .field span { color: var(--fg-muted); }

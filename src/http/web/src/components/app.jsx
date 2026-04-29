@@ -10,7 +10,7 @@ import React from 'react';
 import { useAppState } from '../hooks/useAppState.js';
 import { setView, parseHashView } from '../store/app.js';
 import { TopBar } from './topbar.jsx';
-import { InstancesView } from './instances.jsx';
+import { InstancesView, NewInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
 
 export function App() {
@@ -40,6 +40,8 @@ function renderView(view) {
     case 'instances':
     case 'instance':
       return <InstancesView view={view}/>;
+    case 'instance-new':
+      return <NewInstancePage/>;
     case 'admin':
       return <AdminView/>;
     default:
