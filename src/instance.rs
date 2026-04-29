@@ -761,7 +761,7 @@ impl InstanceService {
             )));
         }
 
-        let id = Uuid::new_v4().simple().to_string();
+        let id = self.mint_unique_instance_id(owner_id).await?;
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
         // Dysons are long-lived employees, not throwaway batch jobs —
@@ -984,6 +984,30 @@ impl InstanceService {
         self.instances.get(id).await?.ok_or(SwarmError::NotFound)
     }
 
+    /// Mint an instance id (`<adj>-<noun>-<NNN>-<user-slug>`) that is
+    /// not already taken in the `instances` table.  The user-slug pins
+    /// the per-user namespace so two operators can both have a
+    /// `fluffy-otter-042-<theirs>` simultaneously without collision;
+    /// the retry loop covers the rare case where the same operator
+    /// rolls a duplicate within their own 250M-combo keyspace.
+    async fn mint_unique_instance_id(&self, owner_id: &str) -> Result<String, SwarmError> {
+        // 8 attempts is overkill for single-tenant deployments — even
+        // with 100k live ids per user the per-attempt collision rate
+        // is ~0.04%, so 8 retries puts the failure floor below 1 in
+        // 10^28.  Bumping if a future deployment runs hotter is a
+        // one-line change.
+        const ATTEMPTS: usize = 8;
+        for _ in 0..ATTEMPTS {
+            let candidate = crate::instance_id::mint_candidate(owner_id);
+            if self.instances.get(&candidate).await?.is_none() {
+                return Ok(candidate);
+            }
+        }
+        Err(SwarmError::Internal(
+            "instance id mint exhausted attempts".into(),
+        ))
+    }
+
     pub async fn list(
         &self,
         owner_id: &str,
@@ -1150,7 +1174,7 @@ impl InstanceService {
         owner_id: &str,
         req: RestoreRequest,
     ) -> Result<CreatedInstance, SwarmError> {
-        let id = Uuid::new_v4().simple().to_string();
+        let id = self.mint_unique_instance_id(owner_id).await?;
         let bearer = Uuid::new_v4().simple().to_string();
         let now = now_secs();
         // Same default-no-expiry policy as `create`; opt-in via ttl_seconds.

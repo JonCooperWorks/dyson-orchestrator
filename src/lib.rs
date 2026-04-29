@@ -10,6 +10,7 @@ pub mod envelope;
 pub mod error;
 pub mod http;
 pub mod instance;
+pub mod instance_id;
 pub mod logging;
 pub mod network_policy;
 pub mod openrouter;

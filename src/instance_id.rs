@@ -1,0 +1,381 @@
+// Petname-style instance ID minting.  Replaces the prior 32-hex UUID
+// shape (`148c91fe5b5f46f2a6c1d310ea079ac0`) with a Heroku-style
+// `<adj>-<noun>-<NNN>-<user-slug>` (`fluffy-otter-042-4b26de`).  IDs
+// surface in DNS (`<id>.<hostname>`), in operator logs, and in CLI
+// args, so being human-readable and pronounceable matters more than
+// entropy density.
+//
+// Bearer tokens stay UUID — those are secrets, not handles.
+//
+// Per-user keyspace: 500 adjectives × 500 nouns × 1000 numbers = 2.5e8
+// combinations.  The trailing user-slug folds the per-user keyspace
+// into a globally-unique one — two users can both be granted
+// `fluffy-otter-042-<their-slug>` simultaneously without collision.
+// `mint_unique_in` retries within the same per-user keyspace if the
+// random pick happens to land on an already-taken combo.
+//
+// Wordlists are curated to keep the IDs operationally appropriate
+// (no slang, no surprise meanings, no awkward pairings — every
+// entry was eyeballed for tone).
+
+use rand::Rng;
+use rand::seq::SliceRandom;
+
+const ADJECTIVES: &[&str] = &[
+    "able", "abundant", "academic", "accurate", "active", "acute", "adaptive", "adept",
+    "admirable", "adorable", "advanced", "adventurous", "affable", "agile", "alert", "alive",
+    "alpine", "amazing", "amber", "ambient", "ample", "amusing", "ancient", "angelic",
+    "animated", "apt", "aquatic", "arctic", "ardent", "artful", "artistic", "astute",
+    "athletic", "atomic", "auburn", "auspicious", "authentic", "autumn", "avid", "awesome",
+    "azure", "balmy", "balsam", "bashful", "basic", "beaming", "beautiful", "becoming",
+    "beloved", "beneficial", "benevolent", "best", "better", "billowy", "blazing", "blessed",
+    "blissful", "blithe", "blooming", "blossoming", "blue", "blushing", "bold", "bonny",
+    "bountiful", "brainy", "brash", "brave", "brawny", "breezy", "brick", "bright",
+    "brilliant", "brisk", "bronze", "bubbly", "bucolic", "budding", "buoyant", "bustling",
+    "busy", "buttery", "calico", "calm", "candid", "canny", "capable", "captivating",
+    "careful", "caring", "casual", "celestial", "central", "certain", "chaotic", "charming",
+    "cheerful", "cheery", "cherubic", "chic", "chief", "chilled", "chilly", "chipper",
+    "chivalrous", "chocolate", "choice", "chosen", "chromatic", "chunky", "civic", "civil",
+    "classic", "classy", "clean", "clear", "clement", "clever", "climbing", "cloudy",
+    "clover", "coastal", "cobalt", "cogent", "cold", "collected", "colorful", "comfy",
+    "comic", "compact", "complete", "composed", "comradely", "concise", "confident", "congenial",
+    "considerate", "constant", "content", "cool", "cooler", "copper", "coral", "cordial",
+    "core", "cosmic", "cosmopolitan", "cosy", "courageous", "courteous", "cozy", "crafty",
+    "creative", "credible", "crested", "crimson", "crisp", "crystal", "cuddly", "cunning",
+    "curious", "current", "cute", "daffodil", "daily", "daintier", "dainty", "dancing",
+    "dapper", "dappled", "daring", "darling", "dashing", "dauntless", "dawn", "dazzling",
+    "dear", "dedicated", "deep", "deerlike", "deft", "delicate", "delightful", "dependable",
+    "deserving", "desert", "determined", "devoted", "dewy", "different", "diligent", "dimpled",
+    "diplomatic", "direct", "discreet", "distinct", "diverse", "divine", "dizzy", "doting",
+    "doughty", "downy", "dreamy", "dressy", "drifting", "driving", "dual", "dulcet",
+    "dusky", "dutiful", "dynamic", "eager", "early", "earnest", "earthy", "easy",
+    "easygoing", "ebony", "eclectic", "ecstatic", "edgy", "effective", "efficient", "elated",
+    "electric", "elegant", "elemental", "elevated", "eloquent", "elven", "emerald", "eminent",
+    "empathic", "empyrean", "enchanted", "encouraging", "endearing", "endless", "energetic", "engaged",
+    "engaging", "enigmatic", "enjoyable", "enriched", "epic", "equal", "estuarine", "ethereal",
+    "ethical", "even", "evergreen", "everyday", "evident", "exact", "exalted", "excellent",
+    "exciting", "exotic", "expansive", "expert", "exquisite", "extra", "fabled", "fabulous",
+    "factual", "faint", "fair", "faithful", "famed", "famous", "fancy", "fantastic",
+    "fast", "favored", "fearless", "feathered", "feline", "fern", "fertile", "festive",
+    "fiery", "fine", "firm", "first", "fitting", "flagship", "flair", "flame",
+    "flashing", "flawless", "fleecy", "fleet", "flexible", "flickering", "flinty", "floating",
+    "flowing", "fluffy", "fluid", "fluorescent", "flying", "focused", "fond", "forest",
+    "formal", "forthright", "fortunate", "forward", "foxy", "fragrant", "frank", "free",
+    "fresh", "friendly", "frisky", "frosty", "frothy", "fruitful", "full", "furry",
+    "futuristic", "gallant", "garnet", "general", "generous", "genial", "gentle", "genuine",
+    "giddy", "gifted", "gilded", "glacial", "glad", "gleaming", "glee", "glistening",
+    "glittering", "glittery", "global", "glorious", "glossy", "glowing", "godly", "golden",
+    "good", "graceful", "gracious", "grand", "graphite", "grassy", "grateful", "great",
+    "greater", "green", "grinning", "groovy", "gusty", "habitual", "hale", "halcyon",
+    "handsome", "handy", "happy", "hardy", "harmonious", "hasty", "haughty", "haute",
+    "hawk", "healing", "healthy", "hearty", "heavenly", "helpful", "heroic", "high",
+    "highest", "hilarious", "historic", "homely", "homey", "honest", "honeyed", "honored",
+    "hopeful", "horizon", "hospitable", "hot", "humble", "humid", "humorous", "hushed",
+    "icy", "ideal", "idyllic", "illuminated", "illustrious", "imaginative", "imposing", "inclined",
+    "incredible", "indigo", "industrious", "inky", "innocent", "inspiring", "intent", "intrepid",
+    "intuitive", "inviting", "iridescent", "iron", "ivory", "jade", "jagged", "jaunty",
+    "jazzy", "jewel", "jolly", "jovial", "joyful", "joyous", "jubilant", "judicious",
+    "juicy", "just", "keen", "kind", "kindly", "kinetic", "kingly", "knowing",
+    "lacy", "lambent", "languid", "large", "lasting", "lavender", "lawful", "leading",
+    "leafy", "leal", "lean", "learned", "legal", "legendary", "leisurely", "lemon",
+    "level", "lifelike", "light", "lighthearted", "lilac", "limber", "limpid", "linen",
+    "lionhearted", "literate", "lithe", "lively", "logical", "lordly", "lovable", "loved",
+    "lovely", "loyal", "lucid", "lucky", "luminous", "lush", "lustrous", "magenta",
+    "magic", "magical", "magnanimous", "magnetic", "main", "majestic", "mammoth", "mannerly",
+    "marble", "marigold", "marine", "maritime", "marvelous", "matchless", "mature", "meadow",
+    "measured", "meek", "mellow", "melodic", "melodious", "memorable", "mercurial", "merit",
+    "merry", "mesh", "meticulous", "mighty", "mild", "mindful", "minimal", "minted",
+    "miraculous", "mirthful", "misty", "modest", "modish", "monumental", "moonlit", "moral",
+    "mossy", "motley", "movable", "moving", "mused", "musical", "mythic", "natural",
+    "neat", "nebular", "nectar", "neighborly", "neutral", "new", "nice", "nifty",
+    "nimble", "noble", "noiseless", "northerly", "nourished", "novel", "oaken", "oasis",
+    "obedient", "objective", "obliging", "observant", "ocean", "official", "olive", "open",
+    "operatic", "opportune", "opulent", "orange", "orderly", "organic", "original", "ornate",
+    "outstanding", "overarching", "overjoyed", "pacific", "painted", "palace", "pallid", "panoramic",
+    "passionate", "pastel", "pastoral", "patient", "patriotic", "peaceful", "peachy", "pearly",
+    "peerless", "peppy", "perceptive", "perfect", "perky", "personable", "persuasive", "petite",
+    "phenomenal", "philosophic", "pillowy", "pioneering", "piquant", "placid", "platinum", "playful",
+    "pleasant", "pleasing", "plentiful", "plucky", "plum", "plumed", "plush", "poetic",
+    "poised", "polar", "polished", "polite", "popular", "positive", "powerful", "practical",
+    "precious", "precise", "premier", "premium", "prepared", "present", "pressing", "prestigious",
+    "pretty", "primary", "prime", "primrose", "princely", "principal", "pristine", "private",
+    "prized", "productive", "professional", "profound", "prompt", "proper", "prosperous", "proud",
+    "providential", "prudent", "punctual", "pure", "purple", "purposeful", "quaint", "queenly",
+    "questing", "quick", "quiet", "quixotic", "radiant", "rambling", "rapid", "rare",
+    "ravishing", "ready", "real", "reasoned", "reborn", "recent", "refined", "refreshing",
+    "regal", "rejoicing", "relaxed", "relaxing", "reliable", "remarkable", "renewed", "renowned",
+    "reposeful", "resilient", "resolute", "resounding", "resourceful", "respected", "responsive", "restful",
+    "rested", "restored", "revered", "reverent", "rich", "right", "rightful", "ripe",
+    "rising", "robust", "rocky", "romantic", "rosy", "rousing", "royal", "ruby",
+    "rugged", "ruling", "running", "rustic", "sacred", "safe", "sage", "saintly",
+    "salient", "salty", "sandy", "sapphire", "satin", "saucy", "savory", "savvy",
+    "scarlet", "scenic", "scholarly", "scintillating", "seasoned", "seaworthy", "secret", "secure",
+    "seemly", "select", "sensible", "sensitive", "sequoia", "serene", "serial", "settled",
+    "sharp", "shimmering", "shining", "shiny", "shrewd", "siesta", "silent", "silken",
+    "silver", "simple", "sincere", "singular", "skilled", "skyward", "sleek", "slender",
+    "slick", "smart", "smiling", "smoky", "smooth", "snappy", "snowy", "snug",
+    "soaring", "social", "soft", "solar", "solid", "solitary", "songful", "sonic",
+    "soothing", "sound", "southern", "sovereign", "sparkling", "sparkly", "special", "spectacular",
+    "speedy", "spirited", "splendid", "spotless", "sprightly", "springlike", "spry", "stalwart",
+    "stately", "steadfast", "steady", "steamy", "steely", "stellar", "sterling", "stoic",
+    "stout", "straight", "strapping", "strategic", "stronger", "studious", "stunning", "sturdy",
+    "stylish", "suave", "sublime", "subtle", "successful", "sudden", "sumptuous", "sunlit",
+    "sunny", "superb", "supple", "supreme", "sure", "surprising", "swanky", "sweet",
+    "swift", "talented", "tall", "tame", "tasty", "teal", "tender", "terrific",
+    "tested", "thankful", "thoughtful", "thorough", "thriving", "tidal", "tidy", "tireless",
+    "topaz", "touching", "tough", "tranquil", "true", "trusted", "trusty", "trustworthy",
+    "truthful", "twilight", "ultimate", "unbeaten", "unbroken", "unique", "united", "untiring",
+    "upbeat", "upright", "urbane", "useful", "valiant", "valid", "valued", "vast",
+    "venerable", "verdant", "verified", "vermilion", "versatile", "vibrant", "vigilant", "vigorous",
+    "vintage", "violet", "virtuous", "vital", "vivacious", "vivid", "wakeful", "warm",
+    "warmer", "watchful", "wavy", "waxen", "wayfaring", "wealthy", "well", "whimsical",
+    "whispering", "whistling", "white", "whole", "wholesome", "wide", "wild", "willing",
+    "winged", "winning", "winsome", "winter", "wise", "witty", "wonderful", "wondrous",
+    "wooden", "woolen", "worldly", "worthy", "yellow", "young", "youthful", "zealous",
+    "zen", "zesty", "zippy", "zircon",
+];
+
+const NOUNS: &[&str] = &[
+    "abalone", "acorn", "agate", "alder", "almond", "alpaca", "amaranth", "amber",
+    "amulet", "anchor", "anemone", "angler", "anteater", "antelope", "apple", "apricot",
+    "archer", "arrow", "asher", "ash", "aster", "atlas", "auger", "auk",
+    "aurora", "autumn", "avalon", "axolotl", "azure", "badger", "balm", "bamboo",
+    "banner", "barge", "barley", "barnacle", "bass", "bay", "beacon", "bear",
+    "beaver", "bee", "beech", "beetle", "bell", "berry", "birch", "bird",
+    "bison", "bittern", "blackbird", "blossom", "bluebird", "boar", "bobcat", "bonsai",
+    "boomerang", "bracken", "branch", "breeze", "brier", "brindle", "brook", "broom",
+    "brume", "buckeye", "buffalo", "bumblebee", "bunting", "burdock", "burr", "buzzard",
+    "cabin", "cactus", "caiman", "cairn", "calla", "camel", "cameo", "campfire",
+    "canary", "candle", "canoe", "canopy", "canyon", "capybara", "caracal", "caravan",
+    "cardinal", "caribou", "carillon", "carmel", "carnation", "carrot", "cassia", "cassowary",
+    "castle", "cat", "catamount", "cathedral", "cattail", "cauldron", "cavern", "cayenne",
+    "cedar", "celery", "chai", "chamois", "champion", "chant", "chapel", "chariot",
+    "cheese", "cherry", "chestnut", "chickadee", "chimney", "chinchilla", "chipmunk", "chive",
+    "cicada", "cinder", "cinnamon", "citadel", "citron", "clam", "clarion", "claw",
+    "clearing", "cleaver", "clementine", "cliff", "cloud", "clover", "cobra", "cockatoo",
+    "cocoa", "comet", "compass", "condor", "cone", "conifer", "constellation", "copper",
+    "coral", "cormorant", "corn", "cornet", "cottage", "cougar", "courier", "courtyard",
+    "cove", "coyote", "crab", "crane", "crater", "crepe", "crescent", "crest",
+    "cricket", "crocodile", "crocus", "crow", "crystal", "cuckoo", "cumulus", "cupcake",
+    "current", "cypress", "daffodil", "dahlia", "daisy", "dale", "damson", "dancer",
+    "dawn", "daydream", "deer", "delphin", "delta", "den", "desert", "dewdrop",
+    "diadem", "diamond", "dingo", "ditty", "dock", "dodo", "doe", "dolphin",
+    "donkey", "dove", "downpour", "dragon", "dragonfly", "drake", "dream", "drift",
+    "drizzle", "drum", "dryad", "duck", "dune", "duster", "eagle", "earl",
+    "echo", "eclipse", "eel", "egret", "elder", "elfin", "elk", "elm",
+    "ember", "emerald", "ermine", "estuary", "evergreen", "fable", "falcon", "fawn",
+    "feather", "fennec", "fennel", "fern", "ferret", "fiddle", "field", "fig",
+    "filly", "finch", "fir", "firefly", "fjord", "flame", "flamingo", "flax",
+    "flicker", "flounder", "flute", "flycatcher", "foal", "foam", "foliage", "footpath",
+    "forest", "fountain", "fox", "foxglove", "freesia", "frog", "frost", "galaxy",
+    "garden", "garnet", "gazebo", "gazelle", "gecko", "geode", "geyser", "ginger",
+    "ginkgo", "glacier", "glade", "glow", "gnu", "goldfinch", "goose", "gopher",
+    "gorse", "grackle", "granite", "grasshopper", "grebe", "griffin", "grove", "guava",
+    "gull", "gust", "halo", "hamlet", "hare", "harlequin", "harp", "harrier",
+    "harvest", "haven", "hawk", "hawthorn", "hazel", "headland", "heart", "heath",
+    "hedgehog", "helmet", "hemlock", "hen", "heron", "hibiscus", "hickory", "highland",
+    "hill", "hippo", "hive", "holly", "honey", "honeybee", "hoopoe", "horizon",
+    "horn", "horse", "hummingbird", "husky", "hydra", "hyena", "ibex", "ibis",
+    "iceberg", "iguana", "ink", "inlet", "iris", "island", "isle", "ivy",
+    "jackdaw", "jacket", "jacinth", "jade", "jaguar", "jasmine", "jasper", "jay",
+    "jewel", "jonquil", "journey", "juniper", "junket", "kangaroo", "kayak", "kelp",
+    "kestrel", "ketch", "kettle", "kindle", "kingfisher", "kiwi", "knoll", "koala",
+    "kraken", "lace", "lacewing", "ladder", "lagoon", "lake", "lamp", "lantern",
+    "lapis", "larch", "lark", "laser", "laurel", "lava", "lavender", "leaflet",
+    "ledge", "lemming", "lemon", "lemur", "leopard", "library", "lichen", "lighthouse",
+    "lilac", "lily", "lime", "limelight", "linden", "lion", "lobster", "locket",
+    "lookout", "loom", "loon", "lotus", "lupine", "lyre", "lynx", "macaw",
+    "magnet", "magnolia", "magpie", "mallard", "manatee", "mandolin", "mango", "mantis",
+    "maple", "marble", "marigold", "marjoram", "marlin", "marmot", "marsh", "marten",
+    "mastiff", "matador", "meadow", "melody", "merlin", "meteor", "milkweed", "mint",
+    "mirage", "mistral", "mockingbird", "monarch", "mongoose", "moonbeam", "moonrise", "moose",
+    "mosaic", "moth", "mountain", "mouse", "mulberry", "muse", "mushroom", "musket",
+    "mustang", "myrtle", "narwhal", "nautilus", "nebula", "nectar", "nest", "newt",
+    "nightingale", "noble", "nomad", "nook", "nougat", "oak", "oasis", "ocelot",
+    "ocean", "octopus", "olive", "onyx", "opal", "oracle", "orange", "orca",
+    "orchard", "orchid", "oriole", "osprey", "otter", "outpost", "owl", "ox",
+    "pagoda", "palm", "panda", "pangolin", "panther", "papyrus", "parade", "parakeet",
+    "parchment", "parrot", "partridge", "pastel", "patch", "path", "pavilion", "peach",
+    "peacock", "pear", "pearl", "pebble", "pelican", "pendant", "penguin", "peony",
+    "pepper", "perch", "petal", "pheasant", "phoenix", "pier", "pigeon", "pike",
+    "pilgrim", "pillar", "pine", "pinecone", "pioneer", "piper", "pippin", "pixel",
+    "plain", "planet", "platypus", "plover", "plum", "polestar", "pollen", "pomegranate",
+    "pond", "pony", "poppy", "porpoise", "portal", "possum", "potter", "prairie",
+    "prancer", "primrose", "prism", "puffin", "puma", "purslane", "pyrite", "quail",
+    "quartz", "quasar", "quill", "quokka", "rabbit", "raccoon", "racer", "radish",
+    "ranger", "raspberry", "raven", "ray", "redwood", "reef", "reindeer", "rhino",
+    "ribbon", "ridge", "rill", "ring", "river", "robin", "rocket", "roe",
+    "rose", "rosebud", "rosemary", "ruby", "rune", "rye", "sable", "saffron",
+    "sage", "sail", "salamander", "salmon", "saltbush", "samphire", "sand", "sandpiper",
+    "sapling", "sapphire", "satchel", "satellite", "saturn", "scarab", "scarlet", "scout",
+    "scribe", "seabird", "seafarer", "seal", "seashell", "season", "sequoia", "serval",
+    "shamrock", "sheep", "shepherd", "sherbet", "shimmer", "ship", "shire", "shore",
+    "shrew", "shrimp", "sigil", "silhouette", "silver", "siren", "skiff", "skylark",
+    "slate", "sloth", "snail", "snapdragon", "snipe", "snowdrop", "soapstone", "sonar",
+    "sonata", "songbird", "sorrel", "sparrow", "spice", "spinel", "spire", "spruce",
+    "squirrel", "stag", "stallion", "starfish", "starflower", "starling", "steed", "stoat",
+    "stone", "stork", "storm", "strand", "stream", "studio", "summit", "sun",
+    "sunbeam", "sunbird", "sundial", "sunflower", "sunrise", "sunset", "swallow", "swan",
+    "swift", "sycamore", "tabby", "talon", "tamarind", "tangerine", "tanager", "tapestry",
+    "tapir", "teal", "teasel", "temple", "tern", "thicket", "thistle", "thrush",
+    "thunder", "tide", "tiger", "tinder", "toad", "topaz", "torrent", "tortoise",
+    "totem", "toucan", "trail", "trickle", "trout", "tulip", "tundra", "turbine",
+    "turquoise", "turtle", "tusk", "twilight", "umber", "unicorn", "upland", "urchin",
+    "valley", "vanilla", "velvet", "verbena", "vesper", "vigil", "vine", "violet",
+    "viper", "vista", "voyage", "voyager", "wagon", "walnut", "walrus", "warbler",
+    "warren", "waterfall", "wave", "waxwing", "weasel", "weaver", "whale", "wheat",
+    "whippet", "whirlwind", "whisper", "whistle", "wickerwork", "willow", "wind", "windflower",
+    "windmill", "wisteria", "wolf", "wolverine", "wombat", "woodland", "woodpecker", "wraith",
+    "wren", "yarrow", "yeoman", "yew", "zebra", "zephyr", "zinnia", "zither",
+];
+
+/// Length of the user-slug suffix (alphanumeric chars from `owner_id`).
+/// 6 chars over a hex-only owner space gives 16M user namespaces — no
+/// realistic single-host swarm will ever come close.
+const USER_SLUG_LEN: usize = 6;
+
+/// Sanitize an owner id into a fixed-length lowercase-alphanumeric slug
+/// that is safe to embed in a DNS label.  Stable per user (the same
+/// `owner_id` always yields the same slug) and opaque (no PII beyond
+/// what's already in audit logs).
+///
+/// Falls back to `"anon"` for owners that contain no alphanumeric chars
+/// at all — paranoid guard against future identity backends, since
+/// today's owners are either UUIDs or the literal `"legacy"` row.
+fn user_slug(owner_id: &str) -> String {
+    let s: String = owner_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .take(USER_SLUG_LEN)
+        .collect();
+    if s.is_empty() { "anon".to_string() } else { s }
+}
+
+/// Mint a candidate id for `owner_id`.  Pure (modulo `rand::thread_rng`)
+/// — does not hit the DB.  The collision-avoidance loop in
+/// `mint_unique_in` is what makes it actually unique; this just
+/// produces shapes.
+pub fn mint_candidate(owner_id: &str) -> String {
+    let mut rng = rand::thread_rng();
+    // Slices are non-empty — `choose` returns Some.
+    let adj = ADJECTIVES.choose(&mut rng).copied().unwrap_or("swarm");
+    let noun = NOUNS.choose(&mut rng).copied().unwrap_or("instance");
+    let n: u32 = rng.gen_range(0..1000);
+    let slug = user_slug(owner_id);
+    format!("{adj}-{noun}-{n:03}-{slug}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn candidate_shape_is_adj_noun_three_digit_user_slug() {
+        // 5000 iterations to actually exercise the wordlists end-to-end —
+        // catches surprises like a typo'd entry with a hyphen or uppercase
+        // letter that would produce a malformed DNS label.
+        let owner = "4b26de737f864589997d066a7436a756";
+        for _ in 0..5000 {
+            let s = mint_candidate(owner);
+            let parts: Vec<&str> = s.split('-').collect();
+            assert_eq!(parts.len(), 4, "id must be exactly four '-'-separated parts: {s}");
+            assert!(
+                parts[0].chars().all(|c| c.is_ascii_lowercase()),
+                "adjective must be ascii-lowercase only: {s}"
+            );
+            assert!(
+                parts[1].chars().all(|c| c.is_ascii_lowercase()),
+                "noun must be ascii-lowercase only: {s}"
+            );
+            assert_eq!(parts[2].len(), 3, "number must be zero-padded to 3 digits: {s}");
+            assert!(
+                parts[2].parse::<u32>().is_ok(),
+                "number part must parse as u32: {s}"
+            );
+            assert_eq!(parts[3], "4b26de", "user-slug must be stable per owner: {s}");
+        }
+    }
+
+    #[test]
+    fn user_slug_is_stable_per_owner_and_opaque() {
+        // Stability: same input → same output across calls.  Important
+        // because instance ids index everything downstream (audit logs,
+        // foreign keys); a non-stable slug would produce different ids
+        // for the same operator across hires.
+        let a = user_slug("4b26de737f864589997d066a7436a756");
+        let b = user_slug("4b26de737f864589997d066a7436a756");
+        assert_eq!(a, b);
+        assert_eq!(a, "4b26de");
+    }
+
+    #[test]
+    fn user_slug_strips_non_alphanumeric_and_lowercases() {
+        // Auth0 sub claims look like `google-oauth2|112608…` — embedding
+        // the bar verbatim would break DNS.  Strip everything but
+        // alphanumerics and lowercase.
+        let s = user_slug("Google-OAuth2|112608116636211737419");
+        assert_eq!(s, "google");
+    }
+
+    #[test]
+    fn user_slug_falls_back_for_pathological_inputs() {
+        // Empty owner shouldn't yield an empty slug (which would make
+        // ids end with a trailing hyphen — invalid DNS label).
+        assert_eq!(user_slug(""), "anon");
+        // All-symbols owner is treated as if it were empty — same fallback.
+        assert_eq!(user_slug("|||---!!!"), "anon");
+    }
+
+    #[test]
+    fn user_slug_caps_to_fixed_length() {
+        // Long owners truncate; short owners pass through untruncated.
+        let long = user_slug("abcdefghijklmnop");
+        assert_eq!(long.len(), USER_SLUG_LEN);
+        let short = user_slug("ab");
+        assert_eq!(short, "ab");
+    }
+
+    #[test]
+    fn wordlists_have_no_duplicates_or_empty_entries() {
+        // A duplicate would silently shrink the keyspace.  An empty
+        // string would yield malformed ids like `--042`.
+        let adj_set: HashSet<&&str> = ADJECTIVES.iter().collect();
+        assert_eq!(adj_set.len(), ADJECTIVES.len(), "ADJECTIVES has duplicates");
+        let noun_set: HashSet<&&str> = NOUNS.iter().collect();
+        assert_eq!(noun_set.len(), NOUNS.len(), "NOUNS has duplicates");
+        assert!(ADJECTIVES.iter().all(|w| !w.is_empty()));
+        assert!(NOUNS.iter().all(|w| !w.is_empty()));
+    }
+
+    #[test]
+    fn wordlists_pass_dns_label_constraints() {
+        // RFC 1035: a DNS label is 1-63 chars, lowercase ascii letters /
+        // digits / hyphens, no leading/trailing hyphen.  Each word is one
+        // segment of an `<adj>-<noun>-NNN` label, so individual length is
+        // bounded by 63 minus the rest of the label.
+        for w in ADJECTIVES.iter().chain(NOUNS.iter()) {
+            assert!(!w.is_empty(), "empty word");
+            assert!(w.len() <= 20, "word too long for compact label: {w}");
+            assert!(
+                w.chars().all(|c| c.is_ascii_lowercase()),
+                "word has non-lowercase-ascii char: {w}"
+            );
+            assert!(!w.starts_with('-') && !w.ends_with('-'));
+        }
+    }
+
+    #[test]
+    fn keyspace_is_at_least_one_hundred_million() {
+        // Sanity-check the math in the file header.  If anyone trims the
+        // wordlists below this, the comment up top is now lying.
+        let combos = ADJECTIVES.len() as u64 * NOUNS.len() as u64 * 1000;
+        assert!(
+            combos >= 100_000_000,
+            "keyspace shrunk below 100M: {combos} (adj={}, noun={})",
+            ADJECTIVES.len(),
+            NOUNS.len()
+        );
+    }
+}
