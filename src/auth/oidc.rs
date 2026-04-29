@@ -35,8 +35,11 @@ pub struct OidcConfig {
     /// `<issuer>/.well-known/openid-configuration`.
     pub jwks_url: Option<String>,
     /// How long to cache the JWKS before re-fetching even without a kid
-    /// miss. 24h is fine — IdPs generally announce key rotations via the
-    /// `kid` mechanism and our miss-triggered refresh handles those.
+    /// miss.  Default 1h — keeps revoked / rotated keys from being
+    /// honoured for long after an IdP silently drops them from the JWKS
+    /// (some IdPs don't bump `kid` for in-place rotations).  Operators
+    /// can dial this up via `oidc.jwks_ttl_seconds` if their IdP is
+    /// well-behaved and they want fewer JWKS round-trips.
     pub jwks_ttl: Duration,
 }
 
@@ -46,7 +49,7 @@ impl Default for OidcConfig {
             issuer: String::new(),
             audience: String::new(),
             jwks_url: None,
-            jwks_ttl: Duration::from_secs(24 * 60 * 60),
+            jwks_ttl: Duration::from_secs(60 * 60),
         }
     }
 }
@@ -176,6 +179,12 @@ impl OidcAuthenticator {
         let mut v = Validation::new(Algorithm::RS256);
         v.set_issuer(&[&self.cfg.issuer]);
         v.set_audience(&[&self.cfg.audience]);
+        // jsonwebtoken treats `nbf` as optional and silently skips it
+        // unless we opt in.  Tokens minted with a future `nbf` (clock
+        // skew, deliberate hold-to-release flows) should be rejected
+        // until that wall-clock arrives — we already check `exp` for
+        // free; the symmetric `nbf` check belongs here.
+        v.validate_nbf = true;
         v
     }
 }

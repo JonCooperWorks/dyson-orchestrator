@@ -49,7 +49,13 @@ pub struct DysonReconfigurerHttp {
     /// one's request body had already been signed with the now-orphaned
     /// secret.  Dyson TOFU-pins whichever plaintext arrived first and
     /// rejects the other forever.  The mutex closes that race.
-    mint_locks: Arc<std::sync::Mutex<
+    ///
+    /// Wrapped in `parking_lot::Mutex` rather than `std::sync::Mutex` so
+    /// a panic anywhere inside the (short) critical section doesn't
+    /// poison the map and turn every future `ensure_secret` into an
+    /// `expect`-failure.  The map is GC'd as instances finalise their
+    /// first mint and as instances are destroyed (`forget_secret`).
+    mint_locks: Arc<parking_lot::Mutex<
         std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     >>,
 }
@@ -82,7 +88,7 @@ impl DysonReconfigurerHttp {
             http: b.build()?,
             sandbox_domain: sandbox_domain.into(),
             system_secrets,
-            mint_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            mint_locks: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -98,8 +104,10 @@ impl DysonReconfigurerHttp {
         }
         // Slow path: serialise on the per-instance mint lock so two
         // concurrent first-pushes don't mint two distinct UUIDs.
+        // parking_lot::Mutex doesn't poison, so no `.expect` here even
+        // if a caller previously panicked while holding the map.
         let lock = {
-            let mut map = self.mint_locks.lock().expect("mint_locks poisoned");
+            let mut map = self.mint_locks.lock();
             map.entry(instance_id.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -117,6 +125,24 @@ impl DysonReconfigurerHttp {
             .await
             .map_err(|e| e.to_string())?;
         Ok(s)
+    }
+
+    /// Cleanup hook for the destroy path — wipes both the sealed
+    /// per-instance configure secret and any leftover mint-lock map
+    /// entry.  Idempotent.  Best-effort on the secret delete (logs on
+    /// error so a stuck row surfaces in operations); the lock entry
+    /// is always removed.
+    pub async fn forget_secret(&self, instance_id: &str) {
+        // Lock-map GC first — purely in-memory, infallible.
+        self.mint_locks.lock().remove(instance_id);
+        let name = configure_secret_name(instance_id);
+        if let Err(err) = self.system_secrets.delete(&name).await {
+            tracing::warn!(
+                error = %err,
+                instance = %instance_id,
+                "reconfigure: forget_secret failed; sealed plaintext lingers"
+            );
+        }
     }
 
     /// Build `https://<port>-<sandbox_id>.<sandbox_domain>/api/admin/configure`.
@@ -258,5 +284,48 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(String::from_utf8(sealed).unwrap(), first);
+    }
+
+    /// GC: after an instance is destroyed, its mint-lock map entry
+    /// must be dropped so long-running swarm processes don't grow the
+    /// map without bound.  Sister property to the sealed-plaintext
+    /// wipe — both pieces of per-instance state should leave with the
+    /// instance.
+    #[tokio::test]
+    async fn forget_secret_drops_mint_lock_entry() {
+        let pool = open_in_memory().await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let store: Arc<dyn SystemSecretStore> =
+            Arc::new(SqlxSystemSecretStore::new(pool));
+        let system_secrets = Arc::new(SystemSecretsService::new(store, cipher_dir));
+
+        let r = DysonReconfigurerHttp::new("cube.test:8443", system_secrets.clone()).unwrap();
+        let instance_id = "i-gc";
+
+        // Exercise ensure_secret so the lock map entry is created (the
+        // first-mint slow path inserts it) and the secret is sealed.
+        let _ = r.ensure_secret(instance_id).await.unwrap();
+        assert!(
+            r.mint_locks.lock().contains_key(instance_id),
+            "ensure_secret must seed the per-instance lock entry"
+        );
+
+        // forget_secret wipes both halves: the sealed plaintext in
+        // system_secrets and the in-memory lock entry.
+        r.forget_secret(instance_id).await;
+        assert!(
+            !r.mint_locks.lock().contains_key(instance_id),
+            "forget_secret must remove the per-instance lock entry"
+        );
+        assert!(
+            system_secrets
+                .get(&configure_secret_name(instance_id))
+                .await
+                .unwrap()
+                .is_none(),
+            "forget_secret must wipe the sealed plaintext"
+        );
     }
 }

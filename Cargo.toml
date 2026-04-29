@@ -44,10 +44,29 @@ age = { version = "0.10.1", default-features = false, features = ["armor"] }
 # disk on first call (TOFU) and verifies on subsequent calls.  Same
 # crate dyson already uses for its bearer-auth hashing path.
 argon2 = "0.5.3"
+# Snapshot integrity (security review A3): SHA-256 over the bundle
+# directory, computed at snapshot-time and verified at restore-time.
+# Already a transitive dep via age/argon2 — promoting to direct so
+# we don't lean on indirect-version drift.
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
 # CSPRNG for fresh api-key tokens (Stage 4).  Dev-deps already pulled
 # this in; promoting to a runtime dep so mint_api_key can use it
 # directly without hand-rolling a getrandom wrapper.
 rand = "0.8.6"
+# Non-poisoning sync primitives.  We use `parking_lot::Mutex` to wrap
+# the mint-lock map in `dyson_reconfig` — std's Mutex poisons on panic
+# and turns every subsequent lock into a Result.expect, which is both
+# noisy and a self-DoS risk if any panicked codepath ever held the
+# mint-locks map open.  parking_lot drops the poison machinery (panics
+# leave the mutex unlocked) and keeps the API blocking-only, which is
+# the right shape for the short critical sections we hold here.
+parking_lot = "0.12"
+# Process-wide umask hardening.  Set 0o077 at startup so newly created
+# files (sqlite db, age key files) default to owner-only even if a
+# call site forgets to chmod after create — closes the TOCTOU window
+# between `create` and `set_permissions`.  Unix-only; cfg-guarded.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = []

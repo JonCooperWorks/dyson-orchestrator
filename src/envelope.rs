@@ -201,6 +201,15 @@ impl AgeCipher {
     /// there.  Returns `Ok(true)` when a new key was written,
     /// `Ok(false)` when the file already existed (left alone — keeps
     /// re-runs idempotent).  File mode is 0400 on success.
+    ///
+    /// Atomicity: on unix the file is created with `O_CREAT | O_EXCL`
+    /// and `mode(0o400)` in a single open call so the mode is set at
+    /// inode creation, not patched afterwards.  The previous
+    /// `write` + `set_permissions` pattern leaked a race window where
+    /// the file existed at the umask default (typically 0644) until
+    /// chmod ran.  On non-unix platforms we fall back to the plain
+    /// `write` path; we don't ship those builds, but keeping them
+    /// compiling avoids a hard cfg-fence around the type.
     pub fn generate_if_missing(path: &Path) -> Result<bool, EnvelopeError> {
         if path.exists() {
             return Ok(false);
@@ -210,13 +219,25 @@ impl AgeCipher {
         }
         let identity = age::x25519::Identity::generate();
         let pem = identity.to_string();
-        std::fs::write(path, expose(&pem)).map_err(EnvelopeError::Io)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(path).map_err(EnvelopeError::Io)?.permissions();
-            perms.set_mode(0o400);
-            std::fs::set_permissions(path, perms).map_err(EnvelopeError::Io)?;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            // create_new(true) → O_EXCL; mode(0o400) → permissions at
+            // inode creation.  No window where the file exists with
+            // a more permissive mode.
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o400)
+                .open(path)
+                .map_err(EnvelopeError::Io)?;
+            f.write_all(expose(&pem).as_bytes()).map_err(EnvelopeError::Io)?;
+            f.sync_all().map_err(EnvelopeError::Io)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, expose(&pem)).map_err(EnvelopeError::Io)?;
         }
         Ok(true)
     }
@@ -300,16 +321,39 @@ impl AgeCipherDirectory {
     /// Bind the directory to `keys_dir`.  The directory is created
     /// (mode 0700 on unix) if it doesn't exist; existing directories
     /// are left alone.
+    ///
+    /// Mode semantics: when this call is the one that creates the
+    /// directory (didn't exist before `create_dir_all`), we propagate
+    /// any `set_permissions` failure as `EnvelopeError::Io` — leaving
+    /// a fresh keys_dir at the umask default (potentially 0755) is a
+    /// posture regression we shouldn't swallow.  When the directory
+    /// already existed, we keep the best-effort behaviour: an
+    /// operator may have deliberately set 0750 / 0770 for a shared
+    /// admin group, and we don't want to fight them.
     pub fn new(keys_dir: impl Into<PathBuf>) -> Result<Self, EnvelopeError> {
         let keys_dir = keys_dir.into();
+        // try_exists predates create_dir_all so we know whether THIS
+        // call is the creator.  Errors here (e.g. EACCES on the
+        // parent) bubble — a missing-or-error result still goes
+        // through create_dir_all below and surfaces a clearer error.
+        let pre_existed = keys_dir.try_exists().unwrap_or(false);
         std::fs::create_dir_all(&keys_dir).map_err(EnvelopeError::Io)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o700);
-            // Best-effort: if the directory already had different
-            // perms (operator override), don't fight it.
-            let _ = std::fs::set_permissions(&keys_dir, perms);
+            if pre_existed {
+                // Best-effort: if the directory already had different
+                // perms (operator override), don't fight it.
+                let _ = std::fs::set_permissions(&keys_dir, perms);
+            } else {
+                // We just created it — the strict mode is required.
+                std::fs::set_permissions(&keys_dir, perms).map_err(EnvelopeError::Io)?;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pre_existed; // silence unused on non-unix builds
         }
         Ok(Self {
             keys_dir,

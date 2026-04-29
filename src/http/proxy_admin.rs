@@ -23,18 +23,30 @@ async fn revoke(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> StatusCode {
+    // Resolve first so we can 404 cleanly on unknown / already-revoked
+    // tokens.  `resolve` returns None for both "never existed" and
+    // "revoked", which is what we want: an admin retrying a revoke on
+    // a token that's already gone gets 404, not a confusing 204.
     let resolved = match state.tokens.resolve(&token).await {
         Ok(r) => r,
         Err(e) => return store_err_to_status(e),
     };
-    let Some(rec) = resolved else {
-        // Either the token never existed or it's already revoked. Both are
-        // observably the same to the admin: the token cannot be used. 404
-        // distinguishes "no such token row" from a successful revoke.
+    if resolved.is_none() {
         return StatusCode::NOT_FOUND;
-    };
-    match state.tokens.revoke_for_instance(&rec.instance_id).await {
-        Ok(()) => StatusCode::NO_CONTENT,
+    }
+    // Surgical revoke: only this token row, not every token tied to
+    // the instance.  The previous `revoke_for_instance` shape blew
+    // away unrelated active tokens (e.g. a freshly-minted one issued
+    // moments before the admin reacted to a leak alert); the per-
+    // token revoke avoids that collateral damage.
+    match state.tokens.revoke_token(&token).await {
+        Ok(true) => StatusCode::NO_CONTENT,
+        // The token was unrevoked when we resolved it but a concurrent
+        // revoke beat us to it.  Treat as success-equivalent: the
+        // post-condition (token unusable) holds either way, but 404
+        // matches the "revoke called on absent token" path so admin
+        // tooling can use a single response check.
+        Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => store_err_to_status(e),
     }
 }
