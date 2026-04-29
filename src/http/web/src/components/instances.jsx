@@ -1378,8 +1378,19 @@ export function EditInstancePage({ instanceId }) {
       </header>
       {err ? <div className="error">{err}</div> : null}
       {row ? (
-        <>
-          <EditInstanceForm instance={row} backHref={backHref}/>
+        <div className="edit-stack">
+          {/* Identity / models live in a real <form>.  Network policy
+              and MCP servers sit outside it as siblings — each panel
+              owns its own POST/PUT lifecycle; bundling them all under
+              one submit would conflate independent state machines.
+              Form id ties the bottom save button (which lives below
+              the sibling panels for readability) back to this form
+              via the `form="edit-instance-form"` attribute. */}
+          <EditInstanceForm
+            instance={row}
+            backHref={backHref}
+            formId="edit-instance-form"
+          />
           {/* Network isolation lives on the same page so operators
               get one stop for editing.  Shown for live rows only —
               destroyed rows can't be re-policied (the cube is gone)
@@ -1392,7 +1403,11 @@ export function EditInstancePage({ instanceId }) {
               the agent picks up tool-set changes on the next turn
               without a re-hire. */}
           <McpServersPanel instanceId={row.id} disabled={row.status === 'destroyed'}/>
-        </>
+          <EditInstanceActionBar
+            formId="edit-instance-form"
+            backHref={backHref}
+          />
+        </div>
       ) : (
         <div className="muted">loading…</div>
       )}
@@ -1400,7 +1415,42 @@ export function EditInstancePage({ instanceId }) {
   );
 }
 
-function EditInstanceForm({ instance, backHref }) {
+/// Bottom action bar for the edit page.  Lives at the END of the
+/// page so the user sees every editable surface first; the submit
+/// button is wired to the identity form via `form="<id>"` so a click
+/// here triggers the same handler as a hypothetical button-inside-
+/// form submit.  Only the identity form has a server-side save flow
+/// — network policy and MCP changes save through their own panel
+/// buttons, so this bar is exclusively for name/task/models.
+function EditInstanceActionBar({ formId, backHref }) {
+  // The submit-state lives inside EditInstanceForm; we mirror busy
+  // state via a custom event so the bottom button can disable while
+  // the underlying form is in-flight.  Tiny, dependency-free, and
+  // keeps the form local to its own state tree.
+  const [submitting, setSubmitting] = React.useState(false);
+  React.useEffect(() => {
+    const onState = (e) => {
+      if (e.detail?.formId === formId) setSubmitting(Boolean(e.detail.submitting));
+    };
+    window.addEventListener('edit-form-state', onState);
+    return () => window.removeEventListener('edit-form-state', onState);
+  }, [formId]);
+  return (
+    <div className="edit-action-bar">
+      <button
+        type="submit"
+        form={formId}
+        className="btn btn-primary btn-lg"
+        disabled={submitting}
+      >
+        {submitting ? 'saving…' : 'save'}
+      </button>
+      <a className="btn btn-ghost" href={backHref}>cancel</a>
+    </div>
+  );
+}
+
+function EditInstanceForm({ instance, backHref, formId }) {
   const { client, auth } = useApi();
   const [name, setName] = React.useState(instance.name || '');
   const [task, setTask] = React.useState(instance.task || '');
@@ -1416,6 +1466,16 @@ function EditInstanceForm({ instance, backHref }) {
   const defaultModels = auth?.config?.default_models || [];
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
+
+  // Mirror submitting state to the bottom action bar via a small
+  // custom event.  Beats lifting the state up purely to wire one
+  // button — the form stays self-contained and the page-level
+  // composition (sibling panels) stays flat.
+  React.useEffect(() => {
+    window.dispatchEvent(new CustomEvent('edit-form-state', {
+      detail: { formId, submitting },
+    }));
+  }, [formId, submitting]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -1436,7 +1496,7 @@ function EditInstanceForm({ instance, backHref }) {
   };
 
   return (
-    <form onSubmit={submit} className="form">
+    <form id={formId} onSubmit={submit} className="form edit-form">
       <label className="field">
         <span>name</span>
         <input
@@ -1461,12 +1521,6 @@ function EditInstanceForm({ instance, backHref }) {
         onChange={setModels}
       />
       {error ? <div className="error">{error}</div> : null}
-      <div className="form-actions">
-        <button type="submit" className="btn btn-primary" disabled={submitting}>
-          {submitting ? 'saving…' : 'save'}
-        </button>
-        <a className="btn btn-ghost" href={backHref}>cancel</a>
-      </div>
     </form>
   );
 }

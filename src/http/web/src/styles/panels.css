@@ -1179,3 +1179,62 @@
   justify-content: space-between;
   gap: 8px;
 }
+
+/* ── Edit page (full-width, save pinned at bottom) ───────────── */
+
+/* Wider canvas than the hire flow's centred 720px column — the edit
+ * page stacks an identity form, a network-policy panel, and an MCP
+ * panel, each of which wants room to breathe.  Falls back to the
+ * 720px max via the .page rule when the viewport is narrower.  */
+.page-edit { max-width: 1100px; }
+
+.edit-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Action bar at the very bottom of the edit page.  Sticky on viewports
+ * tall enough to scroll the page content — keeps "save" within thumb
+ * reach as the user scrolls between identity, network, and MCP. */
+.edit-action-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-top: 4px;
+  background: color-mix(in srgb, var(--bg-1) 90%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius);
+  z-index: 5;
+}
+
+.btn-lg { padding: 8px 18px; font-size: 14px; }
+
+@media (max-width: 640px) {
+  /* Stack the action bar buttons vertically on narrow viewports —
+   * primary at the top so it stays in the obvious tap target. */
+  .edit-action-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .edit-action-bar .btn { text-align: center; }
+  /* Trim the page-edit's wider cap so phone viewports get the same
+   * 12px gutters as the hire flow.  .page already maxes at 100%,
+   * but the explicit re-set documents intent. */
+  .page-edit { max-width: 100%; padding: 16px 12px 80px; }
+}
