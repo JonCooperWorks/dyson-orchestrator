@@ -1,10 +1,22 @@
 /* swarm — app shell, list rail, detail panels, modal. */
 
 .app {
-  display: grid;
-  grid-template-rows: auto auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100vh;
+  min-height: 0;
 }
+/* The active view (instances-pane / admin-pane / page) is always the
+ * last child of .app and must fill the remaining height — otherwise
+ * empty states like "pick a dyson" and "no providers configured"
+ * collapse to their content size and leave a tall band of dead
+ * background below them.  topbar + optional banner stay auto-sized
+ * above. */
+.app > .topbar,
+.app > .banner { flex: 0 0 auto; }
+.app > .instances-pane,
+.app > .admin-pane,
+.app > .page { flex: 1 1 0; min-height: 0; }
 
 /* ── Top bar ────────────────────────────────────────────────────── */
 
@@ -588,6 +600,11 @@
   max-width: 720px;
   margin: 0 auto;
   padding: 24px 20px 64px;
+  /* When the page is the active view it lives inside `.app` and is
+   * given `flex: 1 1 0` (see top of file) — long pages need to scroll
+   * within the pane so the topbar stays pinned. */
+  overflow-y: auto;
+  width: 100%;
 }
 .page-header {
   display: flex;
