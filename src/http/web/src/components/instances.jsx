@@ -858,16 +858,15 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
   // the user's first "open ↗" click races the ACME flow and shows
   // about:blank.
   //
-  // Two complementary mechanisms:
-  //   1. `<link rel="preconnect">` injected into <head> — a strong
-  //      hint that tells modern browsers to do TCP + TLS handshake
-  //      against the origin in the background, before any nav.
-  //   2. A no-cors fetch — actually consummates the request even on
-  //      browsers that ignore the preconnect hint.  no-cors means we
-  //      don't read the body; the TLS handshake is the whole point.
-  //
-  // Both fire-and-forget; failures are expected (cold cert, network
-  // blip) and never surfaced to the user.
+  // `<link rel="preconnect">` opens the TCP + TLS connection in the
+  // background.  The TLS handshake's SNI is what triggers Caddy's
+  // on_demand_tls flow, so the preconnect alone is enough — no extra
+  // HTTP request needed.  We deliberately do NOT also fire a no-cors
+  // fetch through the dyson_proxy: that would have been a credentialed
+  // cross-origin roundtrip kicking off via requestIdleCallback right
+  // around the time the user makes their first click on the action
+  // buttons, and the response-stream chatter on the main thread was
+  // intermittently eating those clicks.
   const openUrl = row?.open_url;
   React.useEffect(() => {
     if (!openUrl) return;
@@ -877,30 +876,9 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
     const link = document.createElement('link');
     link.rel = 'preconnect';
     link.href = origin;
-    link.crossOrigin = 'use-credentials';
     document.head.appendChild(link);
 
-    // Defer the no-cors round-trip off the critical path.  On mobile
-    // the TLS handshake against a cold subdomain can fight the actual
-    // page render for the radio; we want first paint first, warm-up
-    // second.  requestIdleCallback when available, otherwise a small
-    // timeout so we still warm before the user's likely first tap.
-    const ctrl = new AbortController();
-    let t;
-    const schedule = window.requestIdleCallback
-      || ((cb) => setTimeout(cb, 600));
-    const cancel = window.cancelIdleCallback || clearTimeout;
-    const handle = schedule(() => {
-      t = setTimeout(() => ctrl.abort(), 20_000);
-      fetch(openUrl, { mode: 'no-cors', credentials: 'include', signal: ctrl.signal })
-        .catch(() => { /* expected for cold cert / network blips */ })
-        .finally(() => clearTimeout(t));
-    }, { timeout: 4000 });
-
     return () => {
-      cancel(handle);
-      if (t) clearTimeout(t);
-      ctrl.abort();
       link.remove();
     };
   }, [openUrl]);
