@@ -22,17 +22,19 @@ import { useApi } from '../hooks/useApi.jsx';
 
 /// Cosmetic metadata: a single-line subtitle shown under each
 /// provider name.  Keeps the page from looking like a bare list of
-/// strings.  Order in `PROVIDER_ORDER` controls how cards render.
+/// strings.  Order in `PROVIDER_ORDER` is the *fallback* ordering;
+/// `sortProviders` floats configured providers to the top so the
+/// user's active credentials are always glanceable.
 const PROVIDER_META = {
-  anthropic:  { label: 'Anthropic',     blurb: 'Claude — claude.ai/api'           },
-  openai:     { label: 'OpenAI',        blurb: 'GPT-4o, o1 — api.openai.com'      },
-  openrouter: { label: 'OpenRouter',    blurb: 'Aggregator — openrouter.ai'       },
-  gemini:     { label: 'Gemini',        blurb: 'Google — generativelanguage api'  },
-  groq:       { label: 'Groq',          blurb: 'Fast inference — api.groq.com'    },
-  deepseek:   { label: 'DeepSeek',      blurb: 'DeepSeek — api.deepseek.com'      },
-  xai:        { label: 'xAI',           blurb: 'Grok — api.x.ai'                  },
-  ollama:     { label: 'Ollama',        blurb: 'Local — no key required'          },
-  byo:        { label: 'Custom (BYO)',  blurb: 'Any OpenAI-compatible endpoint'   },
+  anthropic:  { label: 'Anthropic',    blurb: 'Claude — api.anthropic.com'             },
+  openai:     { label: 'OpenAI',       blurb: 'GPT-4o, o1 — api.openai.com'            },
+  openrouter: { label: 'OpenRouter',   blurb: 'Aggregator — openrouter.ai'             },
+  gemini:     { label: 'Gemini',       blurb: 'Google — generativelanguage api'        },
+  groq:       { label: 'Groq',         blurb: 'Fast inference — api.groq.com'          },
+  deepseek:   { label: 'DeepSeek',     blurb: 'DeepSeek — api.deepseek.com'            },
+  xai:        { label: 'xAI',          blurb: 'Grok — api.x.ai'                        },
+  ollama:     { label: 'Ollama Cloud', blurb: 'Hosted Ollama — ollama.com'             },
+  byo:        { label: 'Custom (BYO)', blurb: 'Any OpenAI-compatible endpoint or local Ollama' },
 };
 
 const PROVIDER_ORDER = [
@@ -40,19 +42,31 @@ const PROVIDER_ORDER = [
   'groq', 'deepseek', 'xai', 'ollama', 'byo',
 ];
 
+/// Treats a provider as "configured" when the user has either
+/// pasted a BYOK key or the operator has wired a platform key.
+function isConfigured(p) {
+  return p.has_byok || p.has_platform;
+}
+
+/// Sort: configured providers first (BYOK before platform-only so
+/// the user's own keys lead), then everything else in declaration
+/// order.  Stable within each bucket.
 function sortProviders(rows) {
-  const idx = (n) => {
+  const baseIdx = (n) => {
     const i = PROVIDER_ORDER.indexOf(n);
     return i === -1 ? PROVIDER_ORDER.length : i;
   };
-  return [...rows].sort((a, b) => idx(a.name) - idx(b.name));
-}
-
-/// Treats a provider as "configured" when the user has either
-/// pasted a BYOK key or the operator has wired a platform key.
-/// `ollama` is local + auth-less so we count it as configured too.
-function isConfigured(p) {
-  return p.has_byok || p.has_platform || p.name === 'ollama';
+  const bucket = (p) => {
+    if (p.has_byok) return 0;
+    if (p.has_platform) return 1;
+    return 2;
+  };
+  return [...rows].sort((a, b) => {
+    const ba = bucket(a);
+    const bb = bucket(b);
+    if (ba !== bb) return ba - bb;
+    return baseIdx(a.name) - baseIdx(b.name);
+  });
 }
 
 export function ByokView() {
@@ -148,7 +162,6 @@ export function ByokView() {
 function ProviderRow({ provider, open, busy, onToggle, onEdit, onDelete }) {
   const { name, has_byok, has_platform, supports_byo } = provider;
   const meta = PROVIDER_META[name] || { label: name, blurb: '' };
-  const isOllama = name === 'ollama';
 
   let badge;
   if (has_byok) {
@@ -157,8 +170,6 @@ function ProviderRow({ provider, open, busy, onToggle, onEdit, onDelete }) {
     badge = <span className="badge badge-info">platform key</span>;
   } else if (supports_byo) {
     badge = <span className="badge badge-faint">no endpoint</span>;
-  } else if (isOllama) {
-    badge = <span className="badge badge-faint">local · no auth</span>;
   } else {
     badge = <span className="badge badge-faint">not configured</span>;
   }
@@ -185,31 +196,22 @@ function ProviderRow({ provider, open, busy, onToggle, onEdit, onDelete }) {
             {explainStatus(provider)}
           </p>
           <div className="byok-row-actions">
-            {isOllama ? (
-              <span className="muted small">
-                Ollama runs locally and needs no API key. Calls flow
-                through <code>/llm/ollama/…</code>.
-              </span>
-            ) : (
-              <>
-                <button
-                  className="btn btn-primary btn-sm"
-                  onClick={onEdit}
-                  disabled={busy}
-                >
-                  {has_byok ? 'rotate key' : (supports_byo ? 'configure endpoint' : 'add your key')}
-                </button>
-                {has_byok ? (
-                  <button
-                    className="btn btn-ghost btn-sm btn-danger"
-                    onClick={onDelete}
-                    disabled={busy}
-                  >
-                    remove
-                  </button>
-                ) : null}
-              </>
-            )}
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={onEdit}
+              disabled={busy}
+            >
+              {has_byok ? 'rotate key' : (supports_byo ? 'configure endpoint' : 'add your key')}
+            </button>
+            {has_byok ? (
+              <button
+                className="btn btn-ghost btn-sm btn-danger"
+                onClick={onDelete}
+                disabled={busy}
+              >
+                remove
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -229,10 +231,7 @@ function explainStatus(p) {
     return 'Calls fall through to the operator\'s platform key. Add your own to take over billing for this provider.';
   }
   if (p.name === 'byo') {
-    return 'Set an upstream URL + key to point swarm at any OpenAI-compatible endpoint.';
-  }
-  if (p.name === 'ollama') {
-    return 'Ollama is auth-less and pointed at a local daemon by the operator.';
+    return 'Set an upstream URL + key to point swarm at any OpenAI-compatible endpoint — including a local Ollama daemon.';
   }
   return 'Not available on this deployment until you add a key — there\'s no platform fallback.';
 }

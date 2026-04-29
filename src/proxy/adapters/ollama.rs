@@ -1,9 +1,16 @@
-//! Ollama — local-first, no auth swap needed. The adapter exists so the
-//! proxy router doesn't need a special-case branch; `rewrite_auth` simply
-//! drops any `Authorization` header so the proxy bearer never leaks
-//! upstream.
+//! Ollama Cloud — OpenAI-compatible Bearer auth at `https://ollama.com`.
+//!
+//! This slot is for **Ollama Cloud** (the hosted offering), not a local
+//! `ollama serve` daemon.  Local Ollama is auth-less; the right way to
+//! point swarm at one is the `byo` slot with the daemon's URL —
+//! handles work for any operator-private endpoint without forcing the
+//! global registry to carry a "no-auth" special case.
+//!
+//! Cloud Ollama exposes an OpenAI-compatible API under `/v1/...` with
+//! Bearer auth, so the adapter shape collapses to the same one
+//! `openai`, `groq`, `deepseek`, and `xai` use.
 
-use axum::http::{HeaderMap, Uri};
+use axum::http::{HeaderMap, HeaderValue, Uri};
 
 use crate::config::ProviderConfig;
 use crate::traits::ProviderAdapter;
@@ -19,8 +26,10 @@ impl ProviderAdapter for OllamaAdapter {
         &config.upstream
     }
 
-    fn rewrite_auth(&self, headers: &mut HeaderMap, _url: &mut Uri, _real_key: &str) {
-        headers.remove(axum::http::header::AUTHORIZATION);
+    fn rewrite_auth(&self, headers: &mut HeaderMap, _url: &mut Uri, real_key: &str) {
+        let value =
+            HeaderValue::from_str(&format!("Bearer {real_key}")).expect("bearer header");
+        headers.insert(axum::http::header::AUTHORIZATION, value);
     }
 }
 
@@ -29,18 +38,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drops_authorization_header_no_other_changes() {
+    fn replaces_bearer_with_real_key() {
         let a = OllamaAdapter;
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
-            axum::http::HeaderValue::from_static("Bearer client"),
+            HeaderValue::from_static("Bearer client-token"),
         );
-        headers.insert("x-other", axum::http::HeaderValue::from_static("kept"));
-        let mut url: Uri = "/api/generate".parse().unwrap();
-        a.rewrite_auth(&mut headers, &mut url, "");
-        assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
-        assert_eq!(headers.get("x-other").unwrap(), "kept");
-        assert_eq!(url.path(), "/api/generate");
+        let mut url: Uri = "/v1/chat/completions".parse().unwrap();
+        a.rewrite_auth(&mut headers, &mut url, "ollama-real");
+        assert_eq!(
+            headers.get(axum::http::header::AUTHORIZATION).unwrap(),
+            "Bearer ollama-real"
+        );
     }
 }

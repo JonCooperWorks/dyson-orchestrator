@@ -9,16 +9,20 @@
 //! - openrouter            → `GET /v1/models` (already returns prefixed
 //!                            ids like `anthropic/claude-sonnet-4-5`,
 //!                            so no extra prefixing on our side).
-//! - openai/groq/deepseek/xai → `GET /v1/models` Bearer auth; bare ids,
-//!                            we prefix with `<provider>/` so the
-//!                            picker can disambiguate.
+//! - openai/groq/deepseek/xai/ollama → `GET /v1/models` Bearer auth;
+//!                            bare ids, we prefix with `<provider>/`
+//!                            so the picker can disambiguate.  Ollama
+//!                            here means Ollama Cloud — local
+//!                            `ollama serve` daemons live in the
+//!                            per-user `byo` slot.
 //! - anthropic             → `GET /v1/models` x-api-key + version;
 //!                            ids prefixed.
 //! - gemini                → `GET /v1beta/models?key=…`; names like
 //!                            `models/gemini-1.5-pro`, we strip the
 //!                            `models/` prefix and re-prefix with
 //!                            `gemini/`.
-//! - ollama / byo          → skipped (local; user-private).
+//! - byo                   → skipped (per-user; we don't have user
+//!                            context at this endpoint).
 //!
 //! Results are merged in declaration order, deduped, and cached for 5
 //! minutes per process.  A failure on one provider doesn't fail the
@@ -83,14 +87,13 @@ async fn handler(State(state): State<AppState>) -> Result<Json<ModelsResponse>, 
         }
     }
 
-    // Iterate every configured provider with a platform key.  ollama
-    // and byo are skipped — the former is local with no public
-    // catalogue, the latter is per-user and we don't have user
-    // context here.  A provider with no api_key is also skipped.
+    // Iterate every configured provider with a platform key.  byo is
+    // skipped — it's per-user and we don't have user context at this
+    // endpoint.  A provider with no api_key is also skipped.
     let mut all = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for name in state.providers.names() {
-        if name == "ollama" || name == "byo" {
+        if name == "byo" {
             continue;
         }
         let Some(cfg) = state.providers.get(name) else { continue };
@@ -144,7 +147,7 @@ async fn fetch_provider_models(
 ) -> Result<Vec<String>, FetchError> {
     let base = cfg.upstream.trim_end_matches('/');
     let req = match provider {
-        "openrouter" | "openai" | "groq" | "deepseek" | "xai" => http
+        "openrouter" | "openai" | "groq" | "deepseek" | "xai" | "ollama" => http
             .get(format!("{base}/v1/models"))
             .bearer_auth(api_key),
         "anthropic" => http

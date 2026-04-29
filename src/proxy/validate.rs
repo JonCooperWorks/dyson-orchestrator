@@ -4,13 +4,14 @@
 //! auth-checking endpoint with an 8s timeout.  This catches typos and
 //! revoked keys at paste time so the first real chat call doesn't 401.
 //!
-//! - openai / openrouter / groq / deepseek / xai → `GET <upstream>/v1/models`
-//!   with `Authorization: Bearer <key>`.
+//! - openai / openrouter / groq / deepseek / xai / ollama →
+//!   `GET <upstream>/v1/models` with `Authorization: Bearer <key>`.
+//!   Ollama here means Ollama Cloud (OpenAI-compatible); local
+//!   `ollama serve` daemons go through the `byo` slot instead.
 //! - gemini → `GET <upstream>/v1beta/models?key=<key>`.
 //! - anthropic → `POST <upstream>/v1/messages` with `x-api-key`,
 //!   `max_tokens=1`, `model=claude-3-5-haiku-latest` (no public list-
 //!   models endpoint).
-//! - ollama → skipped (local, no auth).
 //! - byo → `GET <user_upstream>/v1/models` with Bearer (assume OpenAI-
 //!   compatible).
 
@@ -50,10 +51,6 @@ pub async fn validate_key(
     upstream: &str,
     version: Option<&str>,
 ) -> Result<ValidateResult, ValidateError> {
-    if provider == "ollama" {
-        return Ok(ValidateResult::Ok);
-    }
-
     let http = reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
         .build()
@@ -61,7 +58,7 @@ pub async fn validate_key(
     let base = upstream.trim_end_matches('/');
 
     let resp = match provider {
-        "openai" | "openrouter" | "groq" | "deepseek" | "xai" | "byo" => http
+        "openai" | "openrouter" | "groq" | "deepseek" | "xai" | "ollama" | "byo" => http
             .get(format!("{base}/v1/models"))
             .bearer_auth(key)
             .send()
@@ -129,13 +126,6 @@ pub async fn validate_known_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn ollama_short_circuits_to_ok() {
-        // No HTTP call required — local, no auth.
-        let out = validate_key("ollama", "ignored", "http://nowhere", None).await.unwrap();
-        assert_eq!(out, ValidateResult::Ok);
-    }
 
     #[tokio::test]
     async fn unknown_provider_errors() {
