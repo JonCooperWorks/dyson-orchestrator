@@ -64,9 +64,15 @@ function writeTokens(tokens) {
 // `Domain=<host>` scopes the cookie to the apex AND every subdomain
 // underneath it (the per-Dyson reverse-proxy origins).  We deliberately
 // DO NOT walk up to the parent domain — `swarm.example.com` cookies must
-// not leak to `wiki.example.com`.  SameSite=Lax keeps it off cross-site
-// POSTs; the proxy has no state-changing cookie-only verbs anyway.
-// Secure gates it to HTTPS (the deployment is HTTPS-only via Caddy).
+// not leak to `wiki.example.com`.  SameSite=Strict keeps the cookie off
+// every cross-site request — including top-level navigations from
+// untrusted origins, which Lax would still allow for GETs.  Strict is
+// safe here because the per-Dyson reverse proxy is on the same logical
+// app as the SPA (top-level navigation between `<id>.<host>` and the
+// apex IS same-site under Strict's "registrable domain" rule), and we
+// pair it with explicit Origin/Referer enforcement in dyson_proxy on
+// non-GET verbs as defence-in-depth.  Secure gates it to HTTPS (the
+// deployment is HTTPS-only via Caddy).
 const COOKIE_NAME = 'dyson_swarm_session';
 
 // Pure helper — exported for tests.  `host` is `window.location.hostname`.
@@ -86,7 +92,7 @@ export function computeCookieDomain(host) {
 // Pure helper — exported for tests.  Builds the attribute list (without
 // the `name=value` segment) for the session cookie.
 export function computeCookieAttributes({ host, protocol, expiresAtMs } = {}) {
-  const parts = ['Path=/', 'SameSite=Lax'];
+  const parts = ['Path=/', 'SameSite=Strict'];
   if (protocol === 'https:') parts.push('Secure');
   const dom = computeCookieDomain(host);
   if (dom) parts.push(`Domain=${dom}`);
@@ -129,7 +135,7 @@ function clearSessionCookie() {
   const secure = window.location.protocol === 'https:' ? '; Secure' : '';
   for (const dom of cookieDomainsToClear(window.location.hostname)) {
     const domAttr = dom ? `; Domain=${dom}` : '';
-    document.cookie = `${COOKIE_NAME}=; Path=/; SameSite=Lax; ${expired}${secure}${domAttr}`;
+    document.cookie = `${COOKIE_NAME}=; Path=/; SameSite=Strict; ${expired}${secure}${domAttr}`;
   }
 }
 

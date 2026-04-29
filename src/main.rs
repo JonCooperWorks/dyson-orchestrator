@@ -4,7 +4,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
 use reqwest::Method;
 
 use dyson_swarm::{
@@ -37,6 +36,23 @@ fn collect_env() -> BTreeMap<String, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Tighten the process umask before any FS I/O.  Files we create
+    // afterwards (sqlite db, age key files via OpenOptions, future
+    // secret-bearing writes that forget to chmod) end up at owner-only
+    // by default instead of inheriting the (potentially 022) shell
+    // umask.  Closes the create-then-chmod race window on path-based
+    // secret material.  Unix-only — Windows has no umask concept and
+    // libc isn't a runtime dep there (cfg-guarded in Cargo.toml).
+    #[cfg(unix)]
+    {
+        // SAFETY: umask(2) is a process-wide setter that only flips
+        // a kernel-side bitmask; it has no other observable side
+        // effect and is safe to call from any thread, including
+        // before tokio's runtime spins up worker threads.
+        unsafe {
+            libc::umask(0o077);
+        }
+    }
     let args = cli::Cli::parse();
     if args.dangerous_no_auth {
         cli::print_dangerous_banner();
@@ -344,20 +360,26 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     let auth = if dangerous_no_auth {
         AuthState::dangerous_no_auth()
-    } else if let Some(roles) = cfg.oidc.as_ref().and_then(|o| o.roles.clone()) { AuthState::enforced(roles) } else {
+    } else if let Some(roles) = cfg.oidc.as_ref().and_then(|o| o.roles.clone()) {
+        AuthState::enforced(roles)
+    } else {
         tracing::warn!(
-            "no [oidc.roles] in config — admin endpoints will return 403 \
+            "no [oidc.roles] in config — admin endpoints will return 404 \
              for everyone.  Set oidc.roles.{{claim,admin}} or pass \
              --dangerous-no-auth for local dev."
         );
-        AuthState::enforced(crate::config::OidcRoles {
-            // Sentinel that no real JWT carries → all admin
-            // requests denied.  Using a placeholder rather
-            // than a different code path keeps the layer
-            // ordering uniform.
-            claim: String::new(),
-            admin: String::new(),
-        })
+        // No `[oidc.roles]` configured: build an enforced AuthState with
+        // `roles: None`.  `require_admin_role` 404s every caller in that
+        // shape, which is the same denial response a real role-miss
+        // produces — admin's 404-not-403 contract holds without a
+        // sentinel role-pair.  An earlier version of this branch stamped
+        // `OidcRoles { claim: "".into(), admin: "".into() }` to keep the
+        // layer ordering uniform; that placeholder is unnecessary and
+        // muddied the "is admin enabled" check, so it's gone.
+        AuthState {
+            roles: None,
+            dangerous_no_auth: false,
+        }
     };
 
     let prober: Arc<dyn HealthProber> = match HttpHealthProber::new(
@@ -570,9 +592,10 @@ async fn overlay_provider_keys(
 /// swarm uses to mint per-user OR bearers via /api/v1/keys.
 ///
 /// Lookup name: `openrouter.provisioning_key`.  Operators set it via
-/// `swarm secrets system-set openrouter.provisioning_key <value>`.
+/// `swarm secrets system-set --stdin openrouter.provisioning_key`.
 /// Returns the resolved plaintext (or None if neither system_secrets
-/// nor the legacy [openrouter] block carry one).
+/// nor a hand-edited `[openrouter] provisioning_key = "..."` block
+/// carries one).
 async fn resolve_or_provisioning_secret(
     cfg: &config::Config,
     secrets: &dyson_swarm::secrets::SystemSecretsService,
@@ -587,17 +610,8 @@ async fn resolve_or_provisioning_secret(
         return Ok(Some(value.trim().to_owned()));
     }
     let Some(or_cfg) = &cfg.openrouter else { return Ok(None); };
-    match (or_cfg.provisioning_key.as_deref(), or_cfg.provisioning_key_path.as_deref()) {
-        (Some(k), _) if !k.trim().is_empty() => Ok(Some(k.trim().to_owned())),
-        (_, Some(p)) => {
-            let raw = std::fs::read_to_string(p)
-                .map_err(|e| format!("read {}: {e}", p.display()))?;
-            let trimmed = raw.trim().to_string();
-            if trimmed.is_empty() {
-                return Err(format!("openrouter provisioning key file {} is empty", p.display()));
-            }
-            Ok(Some(trimmed))
-        }
+    match or_cfg.provisioning_key.as_deref() {
+        Some(k) if !k.trim().is_empty() => Ok(Some(k.trim().to_owned())),
         _ => Ok(None),
     }
 }
@@ -668,6 +682,7 @@ async fn run_secrets(
             instance,
             name,
             value,
+            stdin: _,
         } => {
             let path = format!("/v1/instances/{instance}/secrets/{name}");
             client
@@ -717,7 +732,11 @@ async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitC
     let svc = dyson_swarm::secrets::SystemSecretsService::new(store, cipher_dir);
 
     match action {
-        SecretsAction::SystemSet { name, value } => match svc.put(&name, value.as_bytes()).await {
+        SecretsAction::SystemSet {
+            name,
+            value,
+            stdin: _,
+        } => match svc.put(&name, value.as_bytes()).await {
             Ok(()) => {
                 eprintln!("ok: system secret {name} stored");
                 ExitCode::SUCCESS

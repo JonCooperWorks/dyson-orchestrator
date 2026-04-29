@@ -41,6 +41,7 @@ pub struct PutByokBody {
 
 /// `GET /v1/providers` row.
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ProviderView {
     pub name: String,
     pub has_byok: bool,
@@ -221,7 +222,7 @@ async fn put_byok(
             )
                 .into_response();
         }
-        Err(ValidateError::Network(msg)) | Err(ValidateError::Client(msg)) => {
+        Err(ValidateError::Network(msg) | ValidateError::Client(msg)) => {
             tracing::warn!(provider = %provider, error = %msg, "byok validation network error");
             return (
                 StatusCode::BAD_GATEWAY,
@@ -237,11 +238,8 @@ async fn put_byok(
             upstream: byo_url,
             api_key: body.key,
         };
-        let bytes = match serde_json::to_vec(&blob) {
-            Ok(b) => b,
-            Err(_) => {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
+        let Ok(bytes) = serde_json::to_vec(&blob) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
         state
             .user_secrets
@@ -336,17 +334,18 @@ mod tests {
     /// configured status (default 200) so we can flip a single
     /// AtomicU16 between success/reject mid-test.  Used to exercise
     /// the probe-on-paste path without hitting real OpenAI/Groq/etc.
+    async fn handler(
+        axum::extract::State(s): axum::extract::State<Arc<AtomicU16>>,
+        AxPath(_rest): AxPath<String>,
+    ) -> impl axum::response::IntoResponse {
+        let code = AxStatus::from_u16(s.load(Ordering::SeqCst))
+            .unwrap_or(AxStatus::OK);
+        (code, AxJson(serde_json::json!({"ok": true})))
+    }
+
     async fn spawn_mock_provider(initial_status: u16) -> (String, Arc<AtomicU16>) {
         let status = Arc::new(AtomicU16::new(initial_status));
         let s = status.clone();
-        async fn handler(
-            axum::extract::State(s): axum::extract::State<Arc<AtomicU16>>,
-            AxPath(_rest): AxPath<String>,
-        ) -> impl axum::response::IntoResponse {
-            let code = AxStatus::from_u16(s.load(Ordering::SeqCst))
-                .unwrap_or(AxStatus::OK);
-            (code, AxJson(serde_json::json!({"ok": true})))
-        }
         let app = AxRouter::new()
             .route("/*rest", get(handler).post(handler))
             .with_state(s);

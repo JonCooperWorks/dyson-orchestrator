@@ -36,6 +36,64 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Standalone router for endpoints that intentionally bypass auth.  At
+/// the moment that's just `GET /v1/internal/tls-allowlist`, the host
+/// allowlist Caddy queries from `on_demand_tls.ask` at TLS-issuance
+/// time.  Caddy can't carry a bearer (it's a server-to-server probe,
+/// not a user request) so this endpoint MUST stay unauthenticated;
+/// it leaks at most one bit ("is `<host>` a known instance?"), which
+/// the wildcard cert and the public Caddy site list already expose.
+///
+/// Returns 200 with empty body when `host=` matches the swarm apex or
+/// a single-label `<instance_id>.<apex>` subdomain that resolves to a
+/// non-destroyed instance row.  404 otherwise.  Anything that 404s
+/// means Caddy will refuse to issue a cert — preventing certificate
+/// stockpiling under arbitrary attacker-chosen subdomains.
+pub fn internal_router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/internal/tls-allowlist", get(tls_allowlist))
+        .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct TlsAllowlistQuery {
+    host: Option<String>,
+}
+
+async fn tls_allowlist(State(state): State<AppState>, uri: Uri) -> StatusCode {
+    let q = parse_query(uri.query().unwrap_or(""));
+    let TlsAllowlistQuery { host } = TlsAllowlistQuery {
+        host: q.get("host").cloned(),
+    };
+    let Some(host) = host.as_deref().filter(|h| !h.is_empty()) else {
+        return StatusCode::NOT_FOUND;
+    };
+    // Strip an optional port so callers don't have to.  Caddy passes
+    // `host=<sni>` without a port in normal operation.
+    let host_no_port = host.split(':').next().unwrap_or("");
+    let Some(base) = state.hostname.as_deref().filter(|b| !b.is_empty()) else {
+        // No swarm hostname configured = on_demand_tls allowlist disabled.
+        return StatusCode::NOT_FOUND;
+    };
+    if host_no_port == base {
+        // The swarm's own apex — Caddy needs a cert for the SPA itself.
+        return StatusCode::OK;
+    }
+    let Some(instance_id) = crate::http::dyson_proxy::extract_instance_subdomain(host_no_port, base)
+    else {
+        return StatusCode::NOT_FOUND;
+    };
+    // Look the instance up unscoped — Caddy has no user identity to
+    // scope by, and the only signal we want is "does this id exist as
+    // a non-destroyed row".  `get_unscoped` returns NotFound for
+    // already-destroyed rows, which is exactly what we want (don't
+    // re-issue certs after destroy).
+    match state.instances.get_unscoped(instance_id).await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::NOT_FOUND,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChangeNetworkBody {
     network_policy: NetworkPolicy,
@@ -333,11 +391,19 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
         SwarmError::NotFound => StatusCode::NOT_FOUND,
         SwarmError::PolicyDenied(_) => StatusCode::FORBIDDEN,
         SwarmError::BadRequest(_) => StatusCode::BAD_REQUEST,
-        // Internal: surfaced when create-time configure-push to dyson
-        // exhausts its retry budget; the SPA will see 502 and the user
-        // can retry the create.
-        SwarmError::Cube(_) | SwarmError::Internal(_) => StatusCode::BAD_GATEWAY,
+        // 502 — Cube/Internal: configure-push retry budget exhausted;
+        // SnapshotCorrupt: content-hash mismatch on restore points at
+        // the backup sink, not user input.  Both surface as bad-gateway
+        // because retry/operator-action will resolve them.
+        SwarmError::Cube(_)
+        | SwarmError::Internal(_)
+        | SwarmError::SnapshotCorrupt(_) => StatusCode::BAD_GATEWAY,
         SwarmError::Store(s) => store_err_to_status(s),
         SwarmError::Backup(_) | SwarmError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        // SnapshotQuotaExceeded: 507 Insufficient Storage — semantically
+        // closer than 429/403 because the user CAN proceed by deleting
+        // existing snapshots, the operation isn't being rate-limited or
+        // policy-denied.
+        SwarmError::SnapshotQuotaExceeded { .. } => StatusCode::INSUFFICIENT_STORAGE,
     }
 }

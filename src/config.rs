@@ -139,22 +139,19 @@ pub struct CubeProfile {
 
 /// OpenRouter Provisioning configuration.  The provisioning key is a
 /// separate credential from a regular OpenRouter API key — only it
-/// can mint/list/update/delete per-user keys.  Two ways to supply it:
+/// can mint/list/update/delete per-user keys.
 ///
-/// - `provisioning_key_path` — absolute path to a file holding the
-///   plaintext key (`~/openrouter_management_key` is the default
-///   bring-up convention).  Read once at startup.
-/// - `provisioning_key` — the plaintext inline (TOML literal).  Only
-///   useful for local dev; in production prefer the path so the key
-///   isn't in the rendered config.
+/// **Canonical path:** stored encrypted-at-rest via
+/// `swarm secrets system-set --stdin openrouter.provisioning_key` and
+/// resolved at startup from `system_secrets`.  The legacy inline
+/// `provisioning_key` TOML field remains here as a hand-edit fallback
+/// for local dev only; the deploy templates no longer render it.
 ///
 /// The `upstream` field defaults to `[providers.openrouter].upstream`
 /// when unset, so a deployment using a self-hosted OpenRouter mirror
 /// can override both at once.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenRouterConfig {
-    #[serde(default)]
-    pub provisioning_key_path: Option<PathBuf>,
     #[serde(default)]
     pub provisioning_key: Option<String>,
     #[serde(default)]
@@ -175,7 +172,9 @@ pub struct OidcConfigToml {
     pub audience: String,
     #[serde(default)]
     pub jwks_url: Option<String>,
-    /// Default 24h.
+    /// Default 1h. Tightened from 24h post-B3: a shorter TTL bounds
+    /// the window in which a key rotated out of the IdP's JWKS doc
+    /// can still validate cached-key signatures.
     #[serde(default = "default_jwks_ttl")]
     pub jwks_ttl_seconds: u64,
     /// Public OAuth client_id for the web UI's PKCE flow. When unset, the
@@ -222,7 +221,7 @@ pub struct OidcRoles {
 }
 
 fn default_jwks_ttl() -> u64 {
-    24 * 60 * 60
+    60 * 60
 }
 
 fn default_probe_interval() -> u64 {

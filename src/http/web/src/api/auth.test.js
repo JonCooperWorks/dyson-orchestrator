@@ -75,13 +75,13 @@ describe('cookieDomainsToClear', () => {
 });
 
 describe('computeCookieAttributes', () => {
-  test('sets Path=/, SameSite=Lax, Domain=<host>', () => {
+  test('sets Path=/, SameSite=Strict, Domain=<host>', () => {
     const out = computeCookieAttributes({
       host: 'swarm.example.com',
       protocol: 'https:',
     });
     expect(out).toContain('Path=/');
-    expect(out).toContain('SameSite=Lax');
+    expect(out).toContain('SameSite=Strict');
     expect(out).toContain('Domain=swarm.example.com');
   });
 

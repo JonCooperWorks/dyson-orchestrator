@@ -150,9 +150,17 @@ pub fn router(
     // Static assets (SPA bundle) are merged last so the API routes win
     // every match.  The static router owns the fallback, which serves
     // `/`, `/assets/*`, and 404s anything else — no auth, no logging.
+    //
+    // `instances::internal_router` mounts `/v1/internal/tls-allowlist`
+    // unauthenticated for Caddy's `on_demand_tls.ask` probe.  Caddy
+    // calls this endpoint at TLS-issuance time and can't carry a
+    // bearer; the only information the endpoint reveals is whether
+    // a given hostname maps to a known instance, which the public
+    // wildcard DNS + cert SAN list already implicitly expose.
     let normal = Router::new()
         .merge(healthz::router())
         .merge(auth_config::router(state.clone()))
+        .merge(instances::internal_router(state.clone()))
         .merge(admin)
         .merge(tenant)
         .merge(extra)
@@ -444,6 +452,64 @@ mod tests {
             .send()
             .await
             .unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn host_dispatcher_403s_post_without_origin() {
+        // Stage: F2 — Origin/Referer enforcement on dyson_proxy.
+        // POST hits a sandbox subdomain with no Origin or Referer.  The
+        // dispatcher must short-circuit before authentication and return
+        // 403 with the canonical JSON shape.  This is what blocks the
+        // classic CSRF vector even when SameSite enforcement is missing
+        // or buggy.
+        let (mut state, _) = build_state().await;
+        state.hostname = Some("swarm.test".into());
+        let users = state.users.clone();
+        let (alice_auth, _alice_id) =
+            crate::auth::user::fixed_user_auth(users, "alice").await;
+        let base = spawn(state, AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }), alice_auth).await;
+        let r = reqwest::Client::new()
+            .post(format!("{base}/anything"))
+            .header("host", "abc.swarm.test")
+            .body("payload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        let body = r.text().await.unwrap();
+        assert!(
+            body.contains("cross-origin request rejected"),
+            "expected canonical error body, got {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_dispatcher_passes_post_with_matching_origin() {
+        // Same shape as above but with a matching Origin header.  The
+        // CSRF gate lets it through — we then hit the auth path, which
+        // 401s because no Authorization header is present.  The point of
+        // the test is that the request reached auth (i.e. was NOT
+        // rejected as cross-origin).
+        let (mut state, users) = build_state().await;
+        state.hostname = Some("swarm.test".into());
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles { claim: "https://test/roles".into(), admin: "rol_admin".into() }),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .post(format!("{base}/anything"))
+            .header("host", "abc.swarm.test")
+            .header("origin", "https://abc.swarm.test")
+            .body("payload")
+            .send()
+            .await
+            .unwrap();
+        // Not 403 (cross-origin).  401 from the auth layer is the
+        // expected next-step rejection.
+        assert_ne!(r.status(), 403, "request was incorrectly cross-origin-rejected");
         assert_eq!(r.status(), 401);
     }
 

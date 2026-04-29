@@ -28,9 +28,10 @@
 //!   otherwise the `dyson_swarm_session` cookie (the SPA mirrors the
 //!   OIDC access token there with `Domain=<hostname>` so plain URL-bar
 //!   navigation to a Dyson subdomain — open-in-new-tab, image src,
-//!   anchor click — carries credentials. No CSRF surface: there are
-//!   no state-changing cookie-only verbs on the proxy target, and the
-//!   cookie is `SameSite=Lax`).
+//!   anchor click — carries credentials. The cookie is `SameSite=Strict`
+//!   and the dispatcher additionally enforces `Origin`/`Referer` on
+//!   non-GET methods (post-F2 hardening); requests without a matching
+//!   origin are rejected before reaching the cube.
 //! - outbound: `Authorization: Bearer <instance.bearer_token>`;
 //!   cookies and inbound auth headers are stripped (different security
 //!   boundary).
@@ -117,6 +118,31 @@ pub fn extract_instance_subdomain<'a>(host: &'a str, base: &str) -> Option<&'a s
 }
 
 async fn forward(state: DispatchState, instance_id: String, req: Request) -> Response<Body> {
+    // 0. CSRF defence-in-depth: reject non-GET requests whose Origin (or
+    //    Referer fallback) doesn't match a swarm-controlled origin.
+    //    The session cookie is `SameSite=Strict`, which already blocks
+    //    cross-site state-changing requests in modern browsers — but
+    //    older browsers, header-stripping middleboxes, and bugs in
+    //    SameSite enforcement have all been observed in the wild.  An
+    //    explicit server-side check on POST/PUT/PATCH/DELETE keeps the
+    //    proxy honest regardless of browser behaviour.  GET / HEAD /
+    //    OPTIONS skip the check (they're either non-state-changing or
+    //    pre-flight).
+    if !matches!(
+        req.method().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    ) && !origin_is_allowed(req.headers(), state.hostname.as_deref())
+    {
+        tracing::warn!(
+            method = %req.method(),
+            instance = %instance_id,
+            origin = ?req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+            referer = ?req.headers().get(header::REFERER).and_then(|v| v.to_str().ok()),
+            "dyson_proxy: cross-origin non-GET rejected"
+        );
+        return cross_origin_rejected();
+    }
+
     // 1. Authenticate inline.  We can't use `user_middleware` here
     //    because that variant stamps an Extension and calls next; this
     //    handler IS the terminal handler.  resolve_active_user shares
@@ -273,6 +299,89 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+/// 403 Forbidden with the canonical JSON shape the SPA's fetch layer
+/// surfaces to the user — kept distinct from the plaintext bodies on
+/// other proxy errors so a client can branch on `error == "cross-origin
+/// request rejected"` without parsing free-form text.
+fn cross_origin_rejected() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"error":"cross-origin request rejected"}"#))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+/// Returns true when the request's `Origin` header (preferred) or
+/// `Referer` fallback parses to an HTTPS origin whose host is either
+/// the swarm apex (`<base>`) or a single-label subdomain of it
+/// (`<id>.<base>`).  Anything else — missing headers, non-HTTPS,
+/// foreign host, multi-label prefix — is rejected.
+///
+/// `base` is the configured `hostname` (e.g. `swarm.example.com`).  When
+/// `None`, the dispatcher is a pass-through and we never enter
+/// `forward`; this function is unreachable in that case but defaults
+/// to deny for safety.
+fn origin_is_allowed(headers: &HeaderMap, base: Option<&str>) -> bool {
+    let Some(base) = base else {
+        return false;
+    };
+    // Origin first.  Per Fetch spec, `Origin` is sent on cross-origin
+    // requests AND on same-origin non-GET, so it's reliable for our
+    // purposes.  Referer is the fallback for older browsers / privacy
+    // extensions that strip Origin but keep Referer; we accept it
+    // because absence of both is unambiguous (= no browser provenance,
+    // not a same-site request).
+    let raw = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get(header::REFERER).and_then(|v| v.to_str().ok()));
+    let Some(raw) = raw else {
+        return false;
+    };
+    origin_host_matches(raw, base)
+}
+
+/// Pure parser — exposed for tests.  Accepts an `Origin` or `Referer`
+/// value and returns true if its scheme is `https` and its host is
+/// `<base>` or `<one-label>.<base>` (matching the swarm apex or a
+/// per-instance subdomain).  Port is permitted; userinfo / paths / queries
+/// are tolerated on Referer values.
+pub fn origin_host_matches(raw: &str, base: &str) -> bool {
+    // Strip scheme.  Only HTTPS is allowed — Caddy redirects HTTP to
+    // HTTPS so a legitimate browser never sends an http:// Origin to
+    // swarm in production.
+    let Some(rest) = raw.strip_prefix("https://") else {
+        return false;
+    };
+    // Trim path/query/fragment if present (Referer carries them).
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip userinfo if present (`user:pw@host`).  Browsers don't emit
+    // this on Origin, but Referer can carry whatever the page URL had.
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host_port.split(':').next().unwrap_or("");
+    if host.is_empty() {
+        return false;
+    }
+    if host == base {
+        return true;
+    }
+    // Same shape rule as `extract_instance_subdomain`: exactly one
+    // label in front of `<base>`.
+    let suffix_len = base.len() + 1;
+    if host.len() <= suffix_len {
+        return false;
+    }
+    if !host.ends_with(base) {
+        return false;
+    }
+    let dot_idx = host.len() - suffix_len;
+    if host.as_bytes().get(dot_idx).is_none_or(|&b| b != b'.') {
+        return false;
+    }
+    let prefix = &host[..dot_idx];
+    !prefix.is_empty() && !prefix.contains('.')
+}
+
 /// If the inbound headers already carry `Authorization`, return them
 /// as-is (cheaply — the caller borrows the result).  Otherwise, look
 /// for a `dyson_swarm_session=<jwt>` cookie and, if found, return a
@@ -407,5 +516,114 @@ mod tests {
         // would otherwise return Some("") and we'd happily try to look
         // up an empty instance id.
         assert!(extract_instance_subdomain(".swarm.example.com", "swarm.example.com").is_none());
+    }
+
+    // ── Origin / Referer allowlist (CSRF defence-in-depth) ────────────
+
+    #[test]
+    fn origin_apex_matches() {
+        assert!(origin_host_matches(
+            "https://swarm.example.com",
+            "swarm.example.com"
+        ));
+        assert!(origin_host_matches(
+            "https://swarm.example.com:8443",
+            "swarm.example.com"
+        ));
+    }
+
+    #[test]
+    fn origin_subdomain_matches() {
+        assert!(origin_host_matches(
+            "https://abc123.swarm.example.com",
+            "swarm.example.com"
+        ));
+        assert!(origin_host_matches(
+            "https://abc123.swarm.example.com:8443",
+            "swarm.example.com"
+        ));
+    }
+
+    #[test]
+    fn origin_referer_with_path_matches() {
+        // Referer carries a full URL; the path/query must not fool us.
+        assert!(origin_host_matches(
+            "https://abc123.swarm.example.com/some/path?x=1",
+            "swarm.example.com"
+        ));
+    }
+
+    #[test]
+    fn origin_http_scheme_rejected() {
+        assert!(!origin_host_matches(
+            "http://swarm.example.com",
+            "swarm.example.com"
+        ));
+    }
+
+    #[test]
+    fn origin_foreign_host_rejected() {
+        assert!(!origin_host_matches(
+            "https://evil.com",
+            "swarm.example.com"
+        ));
+        // Substring-but-not-suffix attack.
+        assert!(!origin_host_matches(
+            "https://swarm.example.com.evil.com",
+            "swarm.example.com"
+        ));
+    }
+
+    #[test]
+    fn origin_multi_label_prefix_rejected() {
+        assert!(!origin_host_matches(
+            "https://a.b.swarm.example.com",
+            "swarm.example.com"
+        ));
+    }
+
+    #[test]
+    fn origin_missing_headers_denied() {
+        let h = HeaderMap::new();
+        assert!(!origin_is_allowed(&h, Some("swarm.example.com")));
+    }
+
+    #[test]
+    fn origin_falls_back_to_referer() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://abc.swarm.example.com/foo"),
+        );
+        assert!(origin_is_allowed(&h, Some("swarm.example.com")));
+    }
+
+    #[test]
+    fn origin_is_allowed_prefers_origin_header() {
+        // Origin is foreign, Referer is local.  We must use Origin and
+        // reject — a browser only emits Origin when it's authoritative
+        // for the request's source.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.com"),
+        );
+        h.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://swarm.example.com/whatever"),
+        );
+        assert!(!origin_is_allowed(&h, Some("swarm.example.com")));
+    }
+
+    #[test]
+    fn origin_no_base_configured_denied() {
+        // Defence-in-depth: if forward() is somehow reached with no
+        // configured hostname, deny rather than fail-open.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://swarm.example.com"),
+        );
+        assert!(!origin_is_allowed(&h, None));
     }
 }
