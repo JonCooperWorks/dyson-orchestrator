@@ -74,6 +74,12 @@ pub struct AuthConfig {
     /// Empty array when the operator hasn't configured any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub default_models: Vec<String>,
+    /// Cube cell tiering profiles — the SPA renders a dropdown from
+    /// this list and fills the create request's `template_id` from the
+    /// selected profile.  Empty array hides the dropdown and the hire
+    /// form falls back to the legacy single-template input.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cube_profiles: Vec<crate::config::CubeProfile>,
 }
 
 impl AuthConfig {
@@ -83,6 +89,7 @@ impl AuthConfig {
         oidc: Option<&crate::config::OidcConfigToml>,
         default_template_id: Option<String>,
         default_models: Vec<String>,
+        cube_profiles: Vec<crate::config::CubeProfile>,
     ) -> Self {
         let mode = match oidc {
             Some(o) => match &o.spa_client_id {
@@ -98,13 +105,18 @@ impl AuthConfig {
             },
             None => AuthMode::None,
         };
-        Self { mode, default_template_id, default_models }
+        Self { mode, default_template_id, default_models, cube_profiles }
     }
 
     /// Convenience for tests / fallback paths that just need a "no auth"
     /// descriptor with no SPA defaults.
     pub fn none() -> Self {
-        Self { mode: AuthMode::None, default_template_id: None, default_models: vec![] }
+        Self {
+            mode: AuthMode::None,
+            default_template_id: None,
+            default_models: vec![],
+            cube_profiles: vec![],
+        }
     }
 }
 
@@ -123,7 +135,7 @@ mod tests {
 
     #[test]
     fn no_oidc_block_yields_none() {
-        let cfg = AuthConfig::from_toml(None, None, vec![]);
+        let cfg = AuthConfig::from_toml(None, None, vec![], vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -138,7 +150,7 @@ mod tests {
             spa_scopes: vec![],
             roles: None,
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -153,7 +165,7 @@ mod tests {
             spa_scopes: vec!["profile".into(), "email".into()],
             roles: None,
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
         match cfg.mode {
             AuthMode::Oidc { issuer, audience, client_id, required_scopes, admin_claim, admin_role } => {
                 assert_eq!(issuer, "https://idp.example");
@@ -181,7 +193,7 @@ mod tests {
                 admin: "admin".into(),
             }),
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
         match cfg.mode {
             AuthMode::Oidc { admin_claim, admin_role, .. } => {
                 assert_eq!(admin_claim.as_deref(), Some("permissions"));
@@ -202,7 +214,7 @@ mod tests {
             spa_scopes: vec![],
             roles: None,
         };
-        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![]);
+        let cfg = AuthConfig::from_toml(Some(&oidc), None, vec![], vec![]);
         assert!(matches!(cfg.mode, AuthMode::None));
     }
 
@@ -226,6 +238,7 @@ mod tests {
             },
             default_template_id: Some("tpl-abc".into()),
             default_models: vec!["anthropic/claude-sonnet-4-5".into()],
+            cube_profiles: vec![],
         };
         let json = serde_json::to_value(cfg).unwrap();
         assert_eq!(json["mode"], "oidc");
@@ -237,5 +250,51 @@ mod tests {
         assert_eq!(json["client_id"], "swarm-spa");
         assert_eq!(json["required_scopes"], serde_json::json!(["profile"]));
         assert_eq!(json["default_template_id"], "tpl-abc");
+        // Empty cube_profiles list is omitted entirely (skip_serializing_if).
+        assert!(
+            json.get("cube_profiles").is_none(),
+            "empty cube_profiles must be omitted to keep the SPA's old fallback path"
+        );
+    }
+
+    #[test]
+    fn cube_profiles_surface_with_full_shape() {
+        // A populated profile array round-trips through serde with all
+        // five fields the SPA dropdown needs (name, template_id,
+        // disk_gb, cpu_millicores, memory_mb).  Regression guard for
+        // the SPA dropdown going dark if a future refactor drops a
+        // field on either side of the wire.
+        use crate::config::CubeProfile;
+        let cfg = AuthConfig::from_toml(
+            None,
+            Some("tpl-default".into()),
+            vec![],
+            vec![
+                CubeProfile {
+                    name: "default".into(),
+                    template_id: "tpl-default".into(),
+                    disk_gb: 5,
+                    cpu_millicores: 2000,
+                    memory_mb: 2000,
+                },
+                CubeProfile {
+                    name: "large".into(),
+                    template_id: "tpl-large".into(),
+                    disk_gb: 50,
+                    cpu_millicores: 4000,
+                    memory_mb: 8000,
+                },
+            ],
+        );
+        let json = serde_json::to_value(cfg).unwrap();
+        let arr = json["cube_profiles"].as_array().expect("cube_profiles must be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "default");
+        assert_eq!(arr[0]["template_id"], "tpl-default");
+        assert_eq!(arr[0]["disk_gb"], 5);
+        assert_eq!(arr[0]["cpu_millicores"], 2000);
+        assert_eq!(arr[0]["memory_mb"], 2000);
+        assert_eq!(arr[1]["name"], "large");
+        assert_eq!(arr[1]["disk_gb"], 50);
     }
 }

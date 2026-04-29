@@ -185,6 +185,26 @@ const TaskProse = React.memo(function TaskProse({ markdown }) {
   );
 });
 
+// Format a `cube_profiles` entry for the dropdown — `name — Xg disk
+// · Y vCPU · Zg RAM`.  Pure (no React, no DOM) so the unit test
+// stays a one-liner.  Exported for that test only.
+//
+// `cpu_millicores` is rendered as vCPU (1000 mc = 1 vCPU); fractional
+// vCPUs (e.g. 1500 mc = 1.5 vCPU) show with one decimal.  Memory is
+// MB on the wire (cubemastercli's `--memory` is decimal MB, not
+// binary MiB), so 2000 MB = 2 GB exactly — render in GB when the
+// value is a whole multiple of 1000, otherwise raw MB.
+export function profileLabel(p) {
+  if (!p) return '';
+  const vcpu = (p.cpu_millicores % 1000 === 0)
+    ? `${p.cpu_millicores / 1000} vCPU`
+    : `${(p.cpu_millicores / 1000).toFixed(1)} vCPU`;
+  const ram = (p.memory_mb % 1000 === 0)
+    ? `${p.memory_mb / 1000} GB RAM`
+    : `${p.memory_mb} MB RAM`;
+  return `${p.name} — ${p.disk_gb} GB disk · ${vcpu} · ${ram}`;
+}
+
 // ─── New instance — dedicated page ─────────────────────────────────
 //
 // Each Dyson is an employee.  The form reads top-down like an offer
@@ -234,11 +254,20 @@ function NewInstanceForm() {
   const [models, setModels] = React.useState(
     defaultModels.length ? [defaultModels[0]] : []
   );
+  // Tiering profiles surfaced via /auth/config.  Empty array means the
+  // operator hasn't configured profiles yet — the form falls back to
+  // the legacy free-text template id input below.  Otherwise we render
+  // a dropdown and the selected profile's template_id flows into the
+  // create request.
+  const cubeProfiles = auth?.config?.cube_profiles || [];
   // Operator-configured default from `default_template_id` in
-  // /etc/dyson-swarm/config.toml, surfaced via /auth/config.  Fall
-  // back to a placeholder string only when the deployment hasn't
-  // configured one — submit is gated on `templateId.trim()` so the
-  // user sees the field empty and is forced to fill it in.
+  // /etc/dyson-swarm/config.toml, surfaced via /auth/config.  When
+  // profiles are configured the first profile's template_id matches
+  // (bring-up.sh keeps them in sync), so this seeds the dropdown to
+  // the right initial selection.  Fall back to a placeholder string
+  // only when the deployment hasn't configured one — submit is gated
+  // on `templateId.trim()` so the user sees the field empty and is
+  // forced to fill it in.
   const [templateId, setTemplateId] = React.useState(
     auth?.config?.default_template_id || ''
   );
@@ -363,20 +392,42 @@ function NewInstanceForm() {
 
       <section className="page-section">
         <h2 className="section-title">infrastructure</h2>
-        <label className="field">
-          <span>template id</span>
-          <input
-            value={templateId}
-            onChange={e => setTemplateId(e.target.value)}
-            placeholder="dyson-default"
-            required
-          />
-          <span className="hint muted small">
-            The cube template the sandbox boots from.  Operators
-            curate <code>default_template_id</code>; override here for
-            staged rollouts.
-          </span>
-        </label>
+        {cubeProfiles.length > 0 ? (
+          <label className="field">
+            <span>cube profile</span>
+            <select
+              value={templateId}
+              onChange={e => setTemplateId(e.target.value)}
+              required
+            >
+              {cubeProfiles.map(p => (
+                <option key={p.template_id} value={p.template_id}>
+                  {profileLabel(p)}
+                </option>
+              ))}
+            </select>
+            <span className="hint muted small">
+              Cells in different profiles get different disk / CPU /
+              RAM at boot — pick the size that fits the workload.
+              Profiles are operator-curated in <code>config.env</code>.
+            </span>
+          </label>
+        ) : (
+          <label className="field">
+            <span>template id</span>
+            <input
+              value={templateId}
+              onChange={e => setTemplateId(e.target.value)}
+              placeholder="dyson-default"
+              required
+            />
+            <span className="hint muted small">
+              The cube template the sandbox boots from.  Operators
+              curate <code>default_template_id</code>; override here for
+              staged rollouts.
+            </span>
+          </label>
+        )}
         <label className="field">
           <span>ttl (seconds, optional)</span>
           <input
