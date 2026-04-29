@@ -1004,7 +1004,15 @@ export function EditInstancePage({ instanceId }) {
       </header>
       {err ? <div className="error">{err}</div> : null}
       {row ? (
-        <EditInstanceForm instance={row} backHref={backHref}/>
+        <>
+          <EditInstanceForm instance={row} backHref={backHref}/>
+          {/* Network isolation lives on the same page so operators
+              get one stop for editing.  Shown for live rows only —
+              destroyed rows can't be re-policied (the cube is gone)
+              and the panel's "change" button gates on the same
+              `disabled` prop. */}
+          <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
+        </>
       ) : (
         <div className="muted">loading…</div>
       )}
