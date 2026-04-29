@@ -8,14 +8,22 @@
 //! order on every outbound packet.  No DNS-aware filtering — the cube
 //! maps are pure IPv4 LPM tries.
 //!
-//! Four user-facing profiles, mapping to that surface:
+//! Five user-facing profiles, mapping to that surface:
 //!
-//! | Profile     | allow_internet_access | allowOut                            | denyOut                                |
-//! |-------------|-----------------------|-------------------------------------|----------------------------------------|
-//! | `open`      | true                  | `["0.0.0.0/0", "<llm-cidr>"]`       | DEFAULT_DENY_OUT                       |
-//! | `airgap`    | false                 | `["<llm-cidr>"]`                    | DEFAULT_DENY_OUT                       |
-//! | `allowlist` | false                 | `["<llm-cidr>", ...resolved-user]`  | DEFAULT_DENY_OUT                       |
-//! | `denylist`  | true                  | `["0.0.0.0/0", "<llm-cidr>"]`       | `[...DEFAULT_DENY_OUT, ...user]`       |
+//! | Profile       | allow_internet_access | allowOut                            | denyOut                          |
+//! |---------------|-----------------------|-------------------------------------|----------------------------------|
+//! | `nolocalnet`  | true                  | `[]` (empty — relies on default-allow) | `DEFAULT_DENY_OUT`            |
+//! | `open`        | true                  | `["0.0.0.0/0", "<llm-cidr>"]`       | `DEFAULT_DENY_OUT`               |
+//! | `airgap`      | false                 | `["<llm-cidr>"]`                    | `DEFAULT_DENY_OUT`               |
+//! | `allowlist`   | false                 | `["<llm-cidr>", ...resolved-user]`  | `DEFAULT_DENY_OUT`               |
+//! | `denylist`    | true                  | `["0.0.0.0/0", "<llm-cidr>"]`       | `[...DEFAULT_DENY_OUT, ...user]` |
+//!
+//! `nolocalnet` is the default for new instances.  It leaves `allowOut`
+//! empty, so the BPF default-allow path lets non-private destinations
+//! through, while `denyOut` blocks RFC1918, link-local (incl. cloud
+//! metadata 169.254.169.254), loopback, multicast, and reserved space.
+//! `open` is opt-in for the legacy LAN-permissive behaviour and should
+//! be avoided on cloud VMs.
 //!
 //! `<llm-cidr>` is derived from `cfg.cube_facing_addr` (the swarm proxy
 //! the dyson talks to for `/llm` traffic).  Hostnames in user-supplied
@@ -25,10 +33,6 @@
 //! user-typed entries are preserved separately on the row so the SPA
 //! can show "you typed github.com" alongside "the cube enforces these
 //! /32s".
-//!
-//! `Open`'s wire shape is byte-identical to the pre-feature hardcoded
-//! body (see `cube_client.rs::DEFAULT_ALLOW_OUT`/`DEFAULT_DENY_OUT`)
-//! so existing instances and SPA flows aren't perturbed.
 
 use std::net::IpAddr;
 
@@ -44,15 +48,29 @@ use thiserror::Error;
 /// The eBPF rule is "allow > deny > default-allow", so the /32 wins.
 pub const DEFAULT_OPEN_ALLOW_OUT: &[&str] = &["0.0.0.0/0", "192.168.0.1/32"];
 
-/// Default outbound deny — same as CubeNet's hardcoded
-/// `alwaysDeniedSandboxCIDRs`.  Mirrored here so the swarm's HTTP
-/// payload makes the policy explicit at the CubeAPI boundary.
+/// Default outbound deny — a curated set covering RFC1918, link-local,
+/// loopback, multicast, and reserved ranges.  Mirrors CubeNet's
+/// hardcoded `alwaysDeniedSandboxCIDRs` plus extra hardening for
+/// cloud-metadata egress paths (169.254.169.254 sits inside
+/// 169.254.0.0/16; CGNAT 100.64/10 covers operator-local services on
+/// some host configs; multicast/reserved keep weird egress targets
+/// from getting a free pass).
+///
+/// This list is shared by *every* profile (`NoLocalNet`, `Open`,
+/// `Allowlist`, `Airgap`) — defense-in-depth, since the BPF-side
+/// allow-precedence bug (security review A1) means a `/0` allow
+/// would otherwise let cubes reach link-local before our deny ever
+/// fired.
 pub const DEFAULT_DENY_OUT: &[&str] = &[
+    "0.0.0.0/8",
     "10.0.0.0/8",
+    "100.64.0.0/10",
     "127.0.0.0/8",
     "169.254.0.0/16",
     "172.16.0.0/12",
     "192.168.0.0/16",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
 ];
 
 /// Profile chosen by the operator at hire time.  Persisted on the
@@ -61,10 +79,22 @@ pub const DEFAULT_DENY_OUT: &[&str] = &[
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum NetworkPolicy {
-    /// Full internet, default deny only on RFC1918+linklocal.  Same as
-    /// the pre-feature hardcoded behaviour.  Default for any row that
-    /// doesn't explicitly opt in.
+    /// Full internet minus a hardened default-deny set (RFC1918,
+    /// link-local, loopback, CGNAT, multicast, reserved).  The new
+    /// safe default — every fresh row lands here, and migration 0014
+    /// rewrites every legacy `open` row to this profile.  Defends
+    /// against the BPF Open-precedence bug (security review A1):
+    /// until cube-side BPF flips deny-wins, swarm guarantees these
+    /// denies are present by leaving `allow_out` empty so the BPF
+    /// default-allow only governs *non-private* destinations.
     #[default]
+    NoLocalNet,
+    /// Full internet, the same hardened default-deny set as
+    /// `NoLocalNet`, **plus** an explicit `0.0.0.0/0` allow that
+    /// punches through the deny trie on the BPF allow-precedence
+    /// path.  Permits cube → host LAN; do NOT use on cloud VMs
+    /// (cloud-metadata service exfil risk).  Prefer `NoLocalNet`
+    /// unless you specifically need LAN access.
     Open,
     /// No egress except to the swarm /llm proxy.  Cube can't reach
     /// anything else — no DNS, no upstream APIs, nothing.  Useful for
@@ -89,6 +119,7 @@ pub enum NetworkPolicy {
 impl NetworkPolicy {
     pub fn kind_str(&self) -> &'static str {
         match self {
+            Self::NoLocalNet => "nolocalnet",
             Self::Open => "open",
             Self::Airgap => "airgap",
             Self::Allowlist { .. } => "allowlist",
@@ -98,7 +129,7 @@ impl NetworkPolicy {
 
     pub fn entries(&self) -> &[String] {
         match self {
-            Self::Open | Self::Airgap => &[],
+            Self::NoLocalNet | Self::Open | Self::Airgap => &[],
             Self::Allowlist { entries } | Self::Denylist { entries } => entries,
         }
     }
@@ -120,15 +151,15 @@ pub struct ResolvedPolicy {
 }
 
 impl Default for ResolvedPolicy {
-    /// Default = the legacy `Open` wire shape.  Used by tests that
-    /// don't care about the policy and by code paths that haven't
-    /// been migrated yet.
+    /// Default = the `NoLocalNet` wire shape — empty `allowOut` plus
+    /// the curated `DEFAULT_DENY_OUT`.  Used by tests that don't care
+    /// about the policy.  Matches `NetworkPolicy::default()`.
     fn default() -> Self {
         Self {
             allow_internet_access: true,
-            allow_out: DEFAULT_OPEN_ALLOW_OUT.iter().map(|s| (*s).to_owned()).collect(),
+            allow_out: Vec::new(),
             deny_out: DEFAULT_DENY_OUT.iter().map(|s| (*s).to_owned()).collect(),
-            llm_cidr_used: Some("192.168.0.1/32".to_owned()),
+            llm_cidr_used: None,
         }
     }
 }
@@ -320,6 +351,21 @@ pub async fn resolve(
     let llm_or_default = llm_owned.clone().unwrap_or_else(|| "192.168.0.1/32".to_owned());
     let default_deny: Vec<String> = DEFAULT_DENY_OUT.iter().map(|s| (*s).to_owned()).collect();
     match policy {
+        NetworkPolicy::NoLocalNet => Ok(ResolvedPolicy {
+            // `allow_internet_access` stays true so the cube's
+            // userspace tunnel comes up; the BPF default-allow lets
+            // non-private destinations through, while the deny trie
+            // (DEFAULT_DENY_OUT) blocks every private/link-local/
+            // multicast range.  We deliberately leave `allow_out`
+            // empty so the BPF Open-precedence bug (security review
+            // A1) can't override the denies — until cube-side BPF
+            // flips deny-wins, swarm guarantees these denies are
+            // present by leaving allow_out empty.
+            allow_internet_access: true,
+            allow_out: Vec::new(),
+            deny_out: default_deny,
+            llm_cidr_used: llm_owned.clone(),
+        }),
         NetworkPolicy::Open => Ok(ResolvedPolicy {
             allow_internet_access: true,
             allow_out: vec!["0.0.0.0/0".to_owned(), llm_or_default.clone()],
@@ -407,10 +453,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_open_matches_legacy_default_allow_out() {
-        // Wire-shape regression guard.  Pre-feature `cube_client.rs`
-        // hardcoded these bytes; a refactor must keep them byte-
-        // identical for `Open` (the default for every existing row).
+    async fn resolve_open_emits_full_allow_and_curated_deny() {
+        // Wire-shape guard for `Open`: the allow_out shape stays
+        // identical (`0.0.0.0/0` + the LLM hop), while the deny_out
+        // is the full curated DEFAULT_DENY_OUT (post-A1 hardening:
+        // adds 0.0.0.0/8 reserved, 100.64/10 CGNAT, multicast,
+        // class-E reserved on top of the original RFC1918+link-local
+        // set).
         let r = MockResolver::default();
         let resolved = resolve(&NetworkPolicy::Open, Some("192.168.0.1/32"), &r)
             .await
@@ -419,14 +468,70 @@ mod tests {
         assert_eq!(resolved.allow_out, vec!["0.0.0.0/0", "192.168.0.1/32"]);
         assert_eq!(
             resolved.deny_out,
-            vec![
-                "10.0.0.0/8",
-                "127.0.0.0/8",
-                "169.254.0.0/16",
-                "172.16.0.0/12",
-                "192.168.0.0/16",
-            ],
+            DEFAULT_DENY_OUT.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_nolocalnet_has_curated_deny_and_empty_allow() {
+        // NoLocalNet is the new safe default.  `allow_out` is empty
+        // (the BPF default-allow on cube side governs the public
+        // internet), while `deny_out` covers the full curated set —
+        // including every range that hosts the cloud-metadata
+        // services (169.254.0.0/16) and CGNAT-deployed sidecars
+        // (100.64.0.0/10).
+        let r = MockResolver::default();
+        let resolved = resolve(&NetworkPolicy::NoLocalNet, Some("192.168.0.1/32"), &r)
+            .await
+            .unwrap();
+        assert!(resolved.allow_internet_access);
+        assert!(resolved.allow_out.is_empty());
+        // Every critical range is denied — pin the most security-
+        // sensitive ones individually so a future "tidy up" commit
+        // can't quietly drop them.
+        for c in [
+            "127.0.0.0/8",     // loopback
+            "169.254.0.0/16",  // link-local + cloud metadata
+            "10.0.0.0/8",      // RFC1918
+            "172.16.0.0/12",   // RFC1918
+            "192.168.0.0/16",  // RFC1918
+            "100.64.0.0/10",   // CGNAT
+        ] {
+            assert!(
+                resolved.deny_out.iter().any(|d| d == c),
+                "deny_out missing {c}: {:?}",
+                resolved.deny_out,
+            );
+        }
+    }
+
+    #[test]
+    fn nolocalnet_is_default_policy() {
+        // Defense against accidental regressions: every fresh row
+        // must land on NoLocalNet (Open is now opt-in for LAN users).
+        let p = NetworkPolicy::default();
+        assert!(matches!(p, NetworkPolicy::NoLocalNet), "default = {p:?}");
+        assert_eq!(p.kind_str(), "nolocalnet");
+    }
+
+    #[test]
+    fn default_deny_out_covers_metadata_and_loopback_and_rfc1918() {
+        // Pin the curated set's coverage at constant level so a
+        // future shrink can't slip past the resolve-level guard.
+        let s: std::collections::HashSet<&&str> = DEFAULT_DENY_OUT.iter().collect();
+        for c in [
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "100.64.0.0/10",
+            "224.0.0.0/4",
+            "240.0.0.0/4",
+            "0.0.0.0/8",
+        ] {
+            assert!(s.contains(&c), "DEFAULT_DENY_OUT missing {c}");
+        }
     }
 
     #[tokio::test]

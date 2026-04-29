@@ -35,10 +35,19 @@ pub fn provider_allowed(allowed: &[String], provider: &str) -> bool {
     allowed.iter().any(|p| p == "*" || p == provider)
 }
 
-/// `"*"` is the wildcard. Wildcard alone allows any model. Exact match
-/// otherwise.
+/// `"*"` is the universal wildcard.  Each entry is exact-match unless
+/// it ends with `*`, in which case the prefix matches.  So `"gpt-4o*"`
+/// matches `gpt-4o`, `gpt-4o-2024-08-06`, etc.
 pub fn model_allowed(allowed: &[String], model: &str) -> bool {
-    allowed.iter().any(|m| m == "*" || m == model)
+    allowed.iter().any(|m| {
+        if m == "*" {
+            return true;
+        }
+        if let Some(prefix) = m.strip_suffix('*') {
+            return model.starts_with(prefix);
+        }
+        m == model
+    })
 }
 
 /// `recent_rps` is the count of requests in the last whole second.
@@ -59,6 +68,14 @@ pub fn within_daily_token_budget(budget: Option<u64>, used_tokens: u64) -> bool 
 }
 
 /// `used_usd` is the running total for the calendar month.
+///
+/// **Pricing is intentionally not implemented in this build (demo
+/// deployment).**  The proxy passes `used_usd = 0.0` on every call, so
+/// any operator-configured `monthly_usd_budget` is effectively a no-op
+/// — the comparison `0.0 < budget` is always true.  The well-typed
+/// entry point is kept so a future pricing layer can land without
+/// re-plumbing every call site.  Daily token budgets ARE enforced via
+/// `within_daily_token_budget` and `audit::daily_tokens`.
 pub fn within_monthly_usd_budget(budget: Option<f64>, used_usd: f64) -> bool {
     match budget {
         Some(b) => used_usd < b,
@@ -104,6 +121,30 @@ mod tests {
         let allowed = s(&["gpt-4o", "claude-3-5-sonnet"]);
         assert!(model_allowed(&allowed, "gpt-4o"));
         assert!(!model_allowed(&allowed, "gpt-3.5-turbo"));
+    }
+
+    #[test]
+    fn model_trailing_star_is_prefix_match() {
+        let allowed = s(&["gpt-4o*", "claude-3-5-sonnet"]);
+        assert!(model_allowed(&allowed, "gpt-4o"));
+        assert!(model_allowed(&allowed, "gpt-4o-2024-08-06"));
+        assert!(model_allowed(&allowed, "gpt-4o-mini"));
+        assert!(!model_allowed(&allowed, "gpt-3.5-turbo"));
+        // Star only matches at the end — a literal `*` mid-string
+        // would have to be exact.
+        let weird = s(&["foo*bar"]);
+        assert!(!model_allowed(&weird, "foobar"));
+        assert!(!model_allowed(&weird, "foozbar"));
+    }
+
+    #[test]
+    fn model_bare_star_still_universal() {
+        // `"*"` alone is the universal wildcard (back-compat with the
+        // pre-glob behaviour).  `strip_suffix('*')` would leave an
+        // empty prefix that matches anything via `starts_with("")` —
+        // same outcome, but the explicit branch keeps the intent
+        // legible.
+        assert!(model_allowed(&s(&["*"]), "anything"));
     }
 
     #[test]

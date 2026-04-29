@@ -105,6 +105,7 @@ async fn promote_pull_delete_round_trip_against_minio() {
         size_bytes: None,
         created_at: 0,
         deleted_at: None,
+        content_hash: None,
     };
 
     // promote → uri returned

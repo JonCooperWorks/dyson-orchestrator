@@ -114,9 +114,26 @@ impl BackupSink for S3BackupSink {
                 .map_err(|os| BackupError::Sink(format!("non-utf8 filename: {os:?}")))?;
             let key = self.key(&snap.id, &name);
             let mut file = tokio::fs::File::open(entry.path()).await.map_err(map_io)?;
+            // A4: server-side encryption.  Always set
+            // `x-amz-server-side-encryption: AES256` so even
+            // misconfigured buckets (no default-encryption policy)
+            // store the bytes encrypted at rest.  AES256 is the
+            // SSE-S3 mode — keys managed by S3, no extra KMS round-
+            // trip; the operator can swap to `aws:kms` via bucket
+            // policy if they want managed keys.  rust-s3 0.37
+            // exposes `put_object_stream_builder().with_header(...)`
+            // for header injection; the request flows through the
+            // same multipart code path as `put_object_stream`.
             let resp = self
                 .bucket
-                .put_object_stream(&mut file, &key)
+                .put_object_stream_builder(&key)
+                .with_content_type("application/octet-stream")
+                .with_header(
+                    axum::http::HeaderName::from_static("x-amz-server-side-encryption"),
+                    "AES256",
+                )
+                .map_err(map_s3)?
+                .execute_stream(&mut file)
                 .await
                 .map_err(map_s3)?;
             if !(200..300).contains(&resp.status_code()) {

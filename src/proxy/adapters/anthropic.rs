@@ -42,6 +42,30 @@ impl ProviderAdapter for AnthropicAdapter {
         headers
             .entry(HeaderName::from_static("anthropic-version"))
             .or_insert(HeaderValue::from_static(DEFAULT_ANTHROPIC_VERSION));
+        // Belt-and-braces: the proxy handler's `sanitize_request_
+        // headers` (allowlist post D6) already strips
+        // `anthropic-beta`, but if a future code path forgets, also
+        // drop `prompt-caching` here on every call.  The platform-
+        // key path strips it unconditionally; for BYOK we leave
+        // other beta flags intact (each user has their own
+        // Anthropic cache namespace under their own key).  See D5.
+        if let Some(v) = headers.get("anthropic-beta") {
+            if let Ok(s) = v.to_str() {
+                if s.to_ascii_lowercase().contains("prompt-caching") {
+                    let kept: String = s
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|tok| !tok.eq_ignore_ascii_case("prompt-caching"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if kept.is_empty() {
+                        headers.remove("anthropic-beta");
+                    } else if let Ok(hv) = HeaderValue::from_str(&kept) {
+                        headers.insert(HeaderName::from_static("anthropic-beta"), hv);
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -5,6 +5,7 @@
 //! Cube owns the snapshot id; swarm uses Cube's `snapshotID` verbatim as
 //! the row PK so there is no second namespace to translate between.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -36,6 +37,7 @@ pub struct SnapshotView {
     pub remote_uri: Option<String>,
     pub size_bytes: Option<i64>,
     pub created_at: i64,
+    pub content_hash: Option<String>,
 }
 
 impl From<SnapshotRow> for SnapshotView {
@@ -50,6 +52,7 @@ impl From<SnapshotRow> for SnapshotView {
             remote_uri: r.remote_uri,
             size_bytes: r.size_bytes,
             created_at: r.created_at,
+            content_hash: r.content_hash,
         }
     }
 }
@@ -69,6 +72,17 @@ impl SnapshotService {
             backup,
             instance_svc,
         }
+    }
+
+    /// Count of live (non-deleted) snapshots owned by `owner_id` for
+    /// `instance_id`.  Used by the per-instance snapshot quota check
+    /// in http/snapshots.rs (A6).
+    pub async fn count_for_instance(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<u64, SwarmError> {
+        Ok(self.snapshots.count_for_instance(owner_id, instance_id).await?)
     }
 
     /// Take a snapshot of the given instance. `kind=manual`.
@@ -178,6 +192,45 @@ impl SnapshotService {
             row.path = new_path_str;
         }
 
+        // A3: verify the on-disk bundle hashes to what we recorded at
+        // snapshot-time.  Skip with a warn for legacy rows (NULL
+        // content_hash, written before migration 0013) — those still
+        // restore so existing backups don't bork mid-fleet.
+        if let Some(expected) = row.content_hash.as_ref() {
+            match hash_bundle(Path::new(&row.path)).await {
+                Ok(actual) if &actual == expected => {
+                    // Match — proceed.
+                }
+                Ok(actual) => {
+                    tracing::error!(
+                        snapshot_id = %row.id,
+                        path = %row.path,
+                        expected = %expected,
+                        actual = %actual,
+                        "snapshot content hash mismatch — refusing restore",
+                    );
+                    return Err(SwarmError::SnapshotCorrupt(row.id));
+                }
+                Err(e) => {
+                    // Hashing failed (path moved, IO error etc.).
+                    // Conservative: refuse restore — better a clear
+                    // error than restoring un-verified bytes.
+                    tracing::error!(
+                        snapshot_id = %row.id,
+                        path = %row.path,
+                        error = %e,
+                        "snapshot hash compute failed at restore — refusing",
+                    );
+                    return Err(SwarmError::SnapshotCorrupt(row.id));
+                }
+            }
+        } else {
+            tracing::warn!(
+                snapshot_id = %row.id,
+                "legacy snapshot, no integrity check",
+            );
+        }
+
         let source = self
             .instances
             .get(&row.source_instance_id)
@@ -224,7 +277,27 @@ impl SnapshotService {
         let snap_name = format!("ckpt-{}", uuid::Uuid::new_v4().simple());
         let info = self.cube.snapshot_sandbox(sandbox, &snap_name).await?;
 
-        let row = SnapshotRow {
+        // A3: compute a SHA-256 over the bundle directory (deterministic
+        // walk + path-binding framing) for tamper detection at restore.
+        // Best-effort: if the path doesn't exist on this host yet (some
+        // CubeAPI deployments stage bytes elsewhere) we leave the hash
+        // None and the restore-side check skips with a warn.  This keeps
+        // legacy / non-local-cube setups working while still hardening
+        // the common case.
+        let content_hash = match hash_bundle(Path::new(&info.path)).await {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::warn!(
+                    snapshot_id = %info.snapshot_id,
+                    path = %info.path,
+                    error = %e,
+                    "snapshot hash computation failed; row will carry content_hash=None",
+                );
+                None
+            }
+        };
+
+        let mut row = SnapshotRow {
             id: info.snapshot_id,
             owner_id: inst.owner_id.clone(),
             source_instance_id: instance_id.into(),
@@ -236,10 +309,88 @@ impl SnapshotService {
             size_bytes: None,
             created_at: now_secs(),
             deleted_at: None,
+            content_hash: content_hash.clone(),
         };
         self.snapshots.insert(&row).await?;
+        // Keep the row's `content_hash` consistent with what we just
+        // persisted — callers occasionally re-read the row after this
+        // returns.
+        row.content_hash = content_hash;
         Ok(row)
     }
+}
+
+/// Hash a snapshot bundle at `dir`.  Walks every regular file under
+/// `dir` in sorted-by-path order and feeds:
+///
+///   `len(path) || path || len(bytes) || bytes`
+///
+/// (each length as a 64-bit little-endian) into a SHA-256 hasher so
+/// the digest binds the directory layout, not just the bytes.  Returns
+/// the hex-encoded digest.
+///
+/// Errors out if `dir` doesn't exist or if any file read fails — the
+/// caller catches the error and stores `content_hash=None`, matching
+/// the legacy-row semantics.
+async fn hash_bundle(dir: &Path) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+
+    if !tokio::fs::metadata(dir).await?.is_dir() {
+        return Err(std::io::Error::other("snapshot path is not a directory"));
+    }
+    // Walk recursively, collecting every regular file's path relative
+    // to `dir`.  No external dep — std-only iter.
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_files(dir, dir, &mut files).await?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for rel in &files {
+        let abs = dir.join(rel);
+        let path_str = rel.to_string_lossy();
+        let path_bytes = path_str.as_bytes();
+        hasher.update((path_bytes.len() as u64).to_le_bytes());
+        hasher.update(path_bytes);
+        let bytes = tokio::fs::read(&abs).await?;
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    let digest = hasher.finalize();
+    Ok(hex_lower(&digest))
+}
+
+/// Recursive directory walk into `out` (relative-to-`base` paths).
+/// Skips symlinks (they're not part of the snapshot's "real" content
+/// surface) and any non-regular files.
+fn collect_files<'a>(
+    base: &'a Path,
+    cur: &'a Path,
+    out: &'a mut Vec<std::path::PathBuf>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut entries = tokio::fs::read_dir(cur).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let ft = entry.file_type().await?;
+            let path = entry.path();
+            if ft.is_dir() {
+                collect_files(base, &path, out).await?;
+            } else if ft.is_file() {
+                let rel = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+                out.push(rel);
+            }
+            // Symlinks and special files are deliberately skipped.
+        }
+        Ok(())
+    })
+}
+
+fn hex_lower(b: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(b.len() * 2);
+    for &c in b {
+        s.push(HEX[(c >> 4) as usize] as char);
+        s.push(HEX[(c & 0x0f) as usize] as char);
+    }
+    s
 }
 
 fn require_owner(row_owner: &str, caller_owner: &str) -> Result<(), SwarmError> {
@@ -474,6 +625,73 @@ mod tests {
         let visible = svc.list_for_instance("alice", &alice_inst.id).await.unwrap();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].owner_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn count_for_instance_reflects_live_snapshots() {
+        // A6 quota: the http handler relies on this method returning
+        // a monotonically-increasing count as snapshots are taken.
+        // Pin the round-trip from a service-level test so a future
+        // refactor that drops the SnapshotStore::count_for_instance
+        // call doesn't silently re-open the runaway-snapshot DoS.
+        let (svc, isvc, _cube, _secrets, _instances, _snaps) = build().await;
+        let created = isvc
+            .create("legacy", CreateRequest {
+                template_id: "t".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(svc.count_for_instance("legacy", &created.id).await.unwrap(), 0);
+        for expected in 1u64..=3 {
+            svc.snapshot("legacy", &created.id).await.unwrap();
+            assert_eq!(
+                svc.count_for_instance("legacy", &created.id).await.unwrap(),
+                expected,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hash_bundle_is_deterministic_and_path_binding() {
+        // Sanity-pin the hash function: same dir → same digest;
+        // touching a single file's content (or its name) flips the
+        // digest.  This is the property `restore` relies on to
+        // detect tampering — A3 in the security review.
+        let dir1 = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir1.path().join("a.txt"), b"hello").await.unwrap();
+        tokio::fs::write(dir1.path().join("b.bin"), b"world").await.unwrap();
+        let h1 = super::hash_bundle(dir1.path()).await.unwrap();
+
+        // Re-hash same dir → same digest.
+        let h1b = super::hash_bundle(dir1.path()).await.unwrap();
+        assert_eq!(h1, h1b);
+
+        // Different dir, same content, same paths → same digest.
+        let dir2 = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir2.path().join("a.txt"), b"hello").await.unwrap();
+        tokio::fs::write(dir2.path().join("b.bin"), b"world").await.unwrap();
+        let h2 = super::hash_bundle(dir2.path()).await.unwrap();
+        assert_eq!(h1, h2);
+
+        // Same content, different path → different digest (path-
+        // binding framing).
+        let dir3 = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir3.path().join("a.txt"), b"hello").await.unwrap();
+        tokio::fs::write(dir3.path().join("c.bin"), b"world").await.unwrap();
+        let h3 = super::hash_bundle(dir3.path()).await.unwrap();
+        assert_ne!(h1, h3);
+
+        // Mutated bytes → different digest.
+        let dir4 = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir4.path().join("a.txt"), b"hello").await.unwrap();
+        tokio::fs::write(dir4.path().join("b.bin"), b"WORLD").await.unwrap();
+        let h4 = super::hash_bundle(dir4.path()).await.unwrap();
+        assert_ne!(h1, h4);
     }
 
     #[tokio::test]

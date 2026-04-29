@@ -58,20 +58,47 @@ impl KeySource {
 
 /// Outcome of `resolve`.  `upstream_override` is `Some` only for `byo`,
 /// where the user owns the URL too.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually to redact `key` — derived `Debug`
+/// would dump the plaintext upstream key into anything that formats
+/// this struct (`{:?}` in tracing macros, panic messages, etc.).
+#[derive(Clone)]
 pub struct ResolvedKey {
     pub key: String,
     pub upstream_override: Option<String>,
     pub source: KeySource,
 }
 
+impl std::fmt::Debug for ResolvedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedKey")
+            .field("source", &self.source)
+            .field("upstream_override", &self.upstream_override)
+            .field("key_len", &self.key.len())
+            .field("key", &"[redacted]")
+            .finish()
+    }
+}
+
 /// JSON shape of the `byok_byo` blob.  The user's chosen upstream is
 /// stored alongside the key so the proxy can route there without a TOML
 /// edit per user.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+///
+/// `Debug` is manual — see `ResolvedKey` rationale.
+#[derive(Clone, Deserialize, Serialize)]
 pub struct ByoBlob {
     pub upstream: String,
     pub api_key: String,
+}
+
+impl std::fmt::Debug for ByoBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ByoBlob")
+            .field("upstream", &self.upstream)
+            .field("api_key_len", &self.api_key.len())
+            .field("api_key", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

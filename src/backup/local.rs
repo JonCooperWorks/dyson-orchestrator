@@ -106,6 +106,7 @@ mod tests {
             size_bytes: None,
             created_at: 0,
             deleted_at: None,
+            content_hash: None,
         }
     }
 

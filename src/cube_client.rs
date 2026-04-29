@@ -352,13 +352,14 @@ mod tests {
         }
         // Egress policy is always sent so CubeVSContext is non-None on
         // the API side — see `network_denylist.py` in CubeSandbox/examples.
-        // `allowOut: ["0.0.0.0/0"]` keeps the eBPF policy in
-        // blacklist mode; without it, the cube template's default
-        // `119.29.29.29/32` flips it into whitelist mode and blocks
-        // all real upstreams.
+        // The default is `NoLocalNet`: empty allowOut (so the BPF
+        // default-allow path lets non-private destinations through) and
+        // a populated denyOut covering RFC1918 / link-local / metadata.
         assert_eq!(body["allow_internet_access"], true);
-        assert_eq!(body["network"]["allowOut"][0], "0.0.0.0/0");
+        assert!(body["network"]["allowOut"].is_array());
+        assert_eq!(body["network"]["allowOut"].as_array().unwrap().len(), 0);
         assert!(body["network"]["denyOut"].is_array());
+        assert!(!body["network"]["denyOut"].as_array().unwrap().is_empty());
         Ok(Json(serde_json::json!({
             "sandboxID": "sb-1",
             "hostIP": "10.0.0.5",
@@ -483,17 +484,12 @@ mod tests {
             .iter()
             .map(|x| x.as_str().unwrap())
             .collect();
-        // Mirrors `alwaysDeniedSandboxCIDRs` in CubeNet/cubevs/netpolicy.go.
-        assert_eq!(
-            deny,
-            vec![
-                "10.0.0.0/8",
-                "127.0.0.0/8",
-                "169.254.0.0/16",
-                "172.16.0.0/12",
-                "192.168.0.0/16",
-            ],
-        );
+        // Single source of truth — the constant in network_policy.rs.
+        // Post-A1 the curated set is wider than `alwaysDeniedSandbox
+        // CIDRs` (adds 0.0.0.0/8, 100.64/10, multicast, class-E reserved
+        // on top of RFC1918+linklocal+loopback).
+        let expected: Vec<&str> = crate::network_policy::DEFAULT_DENY_OUT.to_vec();
+        assert_eq!(deny, expected);
     }
 
     #[tokio::test]

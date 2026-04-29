@@ -1322,8 +1322,8 @@ pub struct RestoreRequest {
     /// Per-instance egress profile, carried from the source row by
     /// `SnapshotService::restore` and the binary-rotation sweep.  A
     /// raw HTTP `POST /v1/instances/:id/restore` from a CLI with no
-    /// policy specified gets `Open` (the safe default for legacy
-    /// flows that don't know about network profiles).
+    /// policy specified gets `NoLocalNet` (the post-A1 default that
+    /// blocks RFC1918 / link-local / cloud-metadata egress).
     #[serde(default)]
     pub network_policy: NetworkPolicy,
 }
@@ -2506,15 +2506,16 @@ mod tests {
             captured.resolved_policy.allow_out,
             vec!["0.0.0.0/0", "192.168.0.1/32"]
         );
+        // deny_out is the full curated DEFAULT_DENY_OUT (post-A1
+        // hardening adds 0.0.0.0/8, 100.64/10, multicast, and class-E
+        // on top of the original RFC1918+link-local set).  Single
+        // source of truth — the constant in network_policy.rs.
         assert_eq!(
             captured.resolved_policy.deny_out,
-            vec![
-                "10.0.0.0/8",
-                "127.0.0.0/8",
-                "169.254.0.0/16",
-                "172.16.0.0/12",
-                "192.168.0.0/16",
-            ],
+            crate::network_policy::DEFAULT_DENY_OUT
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect::<Vec<_>>(),
         );
     }
 

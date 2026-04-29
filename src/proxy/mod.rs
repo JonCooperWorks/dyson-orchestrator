@@ -12,6 +12,7 @@ pub mod adapters;
 pub mod byok;
 pub mod http;
 pub mod policy_check;
+pub mod recording_body;
 pub mod validate;
 
 use std::collections::{HashMap, VecDeque};
@@ -108,10 +109,17 @@ impl ProxyService {
     }
 
     /// Build a [`UsageSnapshot`] for `subject` (instance_id today,
-    /// owner_id after phase 6). RPS comes from an in-memory rolling window;
-    /// daily tokens come from the audit store. Monthly USD is currently
-    /// zero — the audit table doesn't carry per-call USD and the brief
-    /// defines the policy primitive without prescribing the computation.
+    /// owner_id after phase 6).  RPS comes from an in-memory rolling
+    /// window; daily tokens come from the audit store.
+    ///
+    /// Pricing tables are intentionally not implemented (single-user
+    /// demo deployment); `monthly_usd_budget` enforcement is a no-op.
+    /// Daily token budgets ARE enforced via `daily_tokens` (which now
+    /// correctly sums `prompt_tokens + output_tokens` after Agent 1's
+    /// audit-completion plumbing — `update_completion` stamps the
+    /// final `output_tokens` count once the upstream body finishes
+    /// streaming, so the daily budget reflects real usage rather than
+    /// just the prompt-side estimate).
     pub async fn snapshot(&self, subject: &str) -> UsageSnapshot {
         let recent_rps = self.rate.observe(subject);
         let daily_tokens = self
@@ -122,6 +130,9 @@ impl ProxyService {
         UsageSnapshot {
             recent_rps,
             daily_tokens,
+            // See doc comment above: pricing intentionally absent.
+            // `enforce` keeps `within_monthly_usd_budget` returning
+            // Ok unconditionally.
             monthly_usd: 0.0,
         }
     }

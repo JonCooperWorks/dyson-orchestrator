@@ -30,6 +30,7 @@ use crate::policy::PolicyDenial;
 use crate::proxy::adapters::anthropic as anthropic_adapter;
 use crate::proxy::byok::{self, KeySource};
 use crate::proxy::policy_check::{enforce, EnforceContext};
+use crate::proxy::recording_body::RecordingBody;
 use crate::proxy::ProxyService;
 use crate::traits::{AuditEntry, TokenRecord};
 
@@ -95,6 +96,16 @@ async fn handle(
 
     // 3. Policy + usage are keyed on owner_id, not instance_id, so a user
     // with N instances shares one budget envelope.
+    //
+    // Race: between reading `daily_tokens` here and the audit insert at
+    // step 6, two concurrent requests can both pass the budget check
+    // before either inserts a row.  The atomic version wants:
+    //   `tx = pool.begin_immediate()` → `daily_tokens(...)` (inside tx)
+    //   → enforce → `tx.insert(audit_entry)` → `tx.commit()`.
+    // This is D2 in the security review and requires a new
+    // `AuditStore::insert_with_tx` method (trait surgery owned by
+    // Agent 1).  Until that's plumbed, the window stays — typical
+    // exposure is a single extra request slipping past the cap.
     let policy = match state.policies.get(&owner_id).await {
         Ok(Some(p)) => p,
         Ok(None) => state.default_policy.clone(),
@@ -127,6 +138,8 @@ async fn handle(
                 // record `platform` as a placeholder.  The call never
                 // hit upstream; the value is informational.
                 key_source: KeySource::Platform.as_str().to_owned(),
+                // Denials never stream; row is final at insert time.
+                completed: true,
             },
         )
         .await;
@@ -194,20 +207,50 @@ async fn handle(
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "bad upstream url"),
     };
 
-    // Hop-by-hop and proxy-internal headers are stripped before the adapter
-    // gets to set its own.
-    sanitize_request_headers(&mut parts.headers);
+    // Allowlist request headers (D6).  Switch from blocklist to
+    // allowlist: only the headers we explicitly forward survive.  The
+    // adapter then gets to set its own auth header on top.  Strips
+    // every hop-by-hop, every cookie, every X-* header, every
+    // platform-key-bearing `OpenAI-Organization`/`X-Api-Key`/etc.
+    sanitize_request_headers(&mut parts.headers, &provider);
     adapter.rewrite_auth(&mut parts.headers, &mut upstream_uri, &real_key);
     if provider == "anthropic" {
         anthropic_adapter::apply_version(&mut parts.headers, &provider_cfg);
+        // D5: on the platform-key path we also have to strip
+        // prompt-cache hints from both headers and body so a user
+        // can't ride another tenant's cache namespace (Anthropic
+        // namespaces caches by api-key, so cache_control under our
+        // platform key would be a cross-tenant info leak).
+        if matches!(resolved.source, KeySource::Platform) {
+            strip_anthropic_cache_hints(&mut parts.headers);
+        }
     }
 
-    // 5. Forward.
+    // 5. Forward.  For the Anthropic platform-key path we also strip
+    // any `cache_control` keys from the request body — see D5: on the
+    // platform key, every user shares one Anthropic cache namespace,
+    // so a `cache_control` block could let user A read parts of user
+    // B's prompt by hashing collision.  BYOK doesn't have this issue
+    // (each user authenticates with their own Anthropic api-key →
+    // their own namespace).
     let prompt_tokens_in = estimate_prompt_tokens(&body_json);
+    let outbound_body = if provider == "anthropic"
+        && matches!(resolved.source, KeySource::Platform)
+        && !body_bytes.is_empty()
+    {
+        let mut v = body_json.clone();
+        strip_cache_control_in_body(&mut v);
+        match serde_json::to_vec(&v) {
+            Ok(b) => bytes_from_vec(b),
+            Err(_) => body_bytes.clone(),
+        }
+    } else {
+        body_bytes.clone()
+    };
     let mut req_builder = state
         .http
         .request(method, upstream_uri.to_string())
-        .body(body_bytes.clone());
+        .body(outbound_body);
     for (k, v) in &parts.headers {
         if !is_hop_by_hop(k) {
             req_builder = req_builder.header(k.as_str(), v);
@@ -229,17 +272,26 @@ async fn handle(
                     duration_ms: elapsed_ms(started),
                     occurred_at: now_secs(),
                     key_source: key_source_str.clone(),
+                    // Connect/timeout failure has no body to stream;
+                    // the row is final at insert time.
+                    completed: true,
                 },
             )
             .await;
-            // Don't surface `e` to the client.  reqwest's Display includes
-            // the upstream URL, which for Gemini carries `?key=<real_key>`
-            // (see proxy::adapters::gemini) — echoing the error would leak
-            // the platform-wide provider key to the agent on any timeout
-            // or TLS hiccup.  Log server-side, return a fixed string.
+            // Don't surface `e` to the client OR the log.  reqwest's
+            // Display includes the upstream URL, which for Gemini
+            // carries `?key=<real_key>` (see proxy::adapters::gemini)
+            // — echoing the error would leak the platform-wide
+            // provider key on any timeout or TLS hiccup.  Use the
+            // structured-fields shape: it captures the failure mode
+            // without ever stringifying the URL.  C2 in the security
+            // review.
             tracing::warn!(
                 provider = %provider,
-                error = %e,
+                is_timeout = e.is_timeout(),
+                is_connect = e.is_connect(),
+                is_request = e.is_request(),
+                status = ?e.status(),
                 "upstream request failed",
             );
             return error_response(StatusCode::BAD_GATEWAY, "upstream request failed");
@@ -248,9 +300,53 @@ async fn handle(
     let upstream_status = upstream_resp.status().as_u16();
     let upstream_headers = upstream_resp.headers().clone();
 
-    // 6. Stream response back.
-    let body_stream = upstream_resp.bytes_stream().map_err(std::io::Error::other);
-    let resp_body = Body::from_stream(body_stream);
+    // 6. Insert the audit row up-front with `completed = false` so a
+    // mid-stream crash still leaves a forensic trail.  RecordingBody
+    // will stamp `completed = true` + the final `output_tokens` count
+    // via `update_completion` once the body finishes.
+    let audit_id = match state
+        .audit
+        .insert(&AuditEntry {
+            owner_id: owner_id.clone(),
+            instance_id: record.instance_id.clone(),
+            provider: provider.clone(),
+            model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
+            prompt_tokens: prompt_tokens_in,
+            output_tokens: None,
+            status_code: i64::from(upstream_status),
+            duration_ms: elapsed_ms(started),
+            occurred_at: now_secs(),
+            key_source: key_source_str,
+            completed: false,
+        })
+        .await
+    {
+        Ok(id) => Some(id),
+        Err(e) => {
+            // We've already started the upstream call.  An audit
+            // insert failure is a swarm-side bookkeeping issue, not
+            // a request failure — we still pass the response back
+            // (we just lose the budget-accounting row).  Log loud.
+            tracing::warn!(error = %e, "llm_audit insert failed; proceeding without audit row");
+            None
+        }
+    };
+
+    // 7. Stream response back through `RecordingBody` so the audit
+    // row gets stamped with `output_tokens` + `completed=true` once
+    // the body finishes streaming.  Also caps total response bytes
+    // at MAX_RESPONSE_BYTES — past that we close the connection and
+    // mark `truncated` (D7 in the security review).
+    let raw_stream = upstream_resp.bytes_stream();
+    let resp_body = if let Some(id) = audit_id {
+        let recorded = RecordingBody::new(raw_stream, state.audit.clone(), id);
+        let mapped = futures::TryStreamExt::map_err(recorded, std::io::Error::other);
+        Body::from_stream(mapped)
+    } else {
+        // No audit row → no recording wrapper, just byte-pump.
+        let mapped = raw_stream.map_err(std::io::Error::other);
+        Body::from_stream(mapped)
+    };
 
     let mut response = Response::builder()
         .status(StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY));
@@ -262,46 +358,80 @@ async fn handle(
             }
         }
     }
-    let response = response.body(resp_body).unwrap();
-
-    // 7. Audit row. Note we don't have the response body here (it's
-    // streaming); output_tokens is therefore best-effort: only available if
-    // the upstream provided a non-streaming JSON response with usage info.
-    // A future refinement could wrap the stream in a counter that updates
-    // the row on close. For step 14 we record what we know.
-    write_audit(
-        &state,
-        AuditEntry {
-            owner_id: owner_id.clone(),
-            instance_id: record.instance_id.clone(),
-            provider: provider.clone(),
-            model: body_json.get("model").and_then(|v| v.as_str()).map(str::to_owned),
-            prompt_tokens: prompt_tokens_in,
-            output_tokens: None,
-            status_code: i64::from(upstream_status),
-            duration_ms: elapsed_ms(started),
-            occurred_at: now_secs(),
-            key_source: key_source_str,
-        },
-    )
-    .await;
-
-    response
+    response.body(resp_body).unwrap()
 }
 
-/// Strip hop-by-hop headers and the inbound proxy bearer before forwarding.
-fn sanitize_request_headers(headers: &mut HeaderMap) {
+/// Allowlist incoming headers — the curated set listed in
+/// [`is_allowlisted_header`] survives, everything else is dropped.
+/// The adapter will then re-insert its own auth header.  Closing this
+/// off (D6 in the security review) prevents the agent from passing
+/// upstream-bearing headers like `OpenAI-Organization`, `X-Api-Key`,
+/// `Cookie`, `X-Forwarded-For`, `Anthropic-Beta`, etc — any of which
+/// could either bypass our rate limits / billing routing, leak
+/// internal IPs to the upstream, or activate features (`Anthropic-
+/// Beta: prompt-caching`) that our cross-tenant strategy assumes off.
+fn sanitize_request_headers(headers: &mut HeaderMap, provider: &str) {
     let to_remove: Vec<HeaderName> = headers
         .keys()
-        .filter(|k| is_hop_by_hop_str(k.as_str()))
+        .filter(|k| !is_allowlisted_header(k.as_str(), provider))
         .cloned()
         .collect();
     for k in to_remove {
         headers.remove(&k);
     }
-    headers.remove(axum::http::header::HOST);
-    // Authorization is intentionally kept here — adapters rewrite it. They
-    // see the proxy bearer and overwrite it before the request goes out.
+    // Authorization stays *only* if the allowlist let it through.
+    // We don't allowlist Authorization in the curated set above, so
+    // by this point it's gone — the adapter's `rewrite_auth` puts
+    // the upstream-correct credential back in.
+}
+
+/// Headers we forward verbatim.  Everything else gets stripped.
+/// The provider name lets us conditionally allow provider-specific
+/// headers (e.g. `anthropic-version` on the Anthropic path).
+fn is_allowlisted_header(name: &str, provider: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "content-type" | "accept" | "accept-encoding" | "user-agent"
+    ) || (provider == "anthropic" && n == "anthropic-version")
+}
+
+/// Drop any `anthropic-beta` header on the platform-key path so the
+/// agent can't smuggle `prompt-caching` (and therefore opt into a
+/// cross-tenant cache namespace).  See D5.
+fn strip_anthropic_cache_hints(headers: &mut HeaderMap) {
+    headers.remove("anthropic-beta");
+}
+
+/// Walk a JSON value and drop every `cache_control` key.  Used on
+/// the Anthropic platform-key path so a user's `cache_control` hint
+/// can't pin a cache key under our shared platform-key namespace.
+/// Recursive — Anthropic's request shape has `cache_control` nested
+/// under `messages[].content[]` and under `system[]`.
+fn strip_cache_control_in_body(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            map.remove("cache_control");
+            for (_, child) in map.iter_mut() {
+                strip_cache_control_in_body(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_cache_control_in_body(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// reqwest::Body::from(Vec<u8>) is fine but `body_bytes.clone()` is
+/// `axum::body::Bytes`.  Wrap a Vec<u8> back in Bytes so the request
+/// builder's `.body(...)` types line up.  (`axum::body::Bytes` is a
+/// re-export of the `bytes` crate's type — we don't take a direct
+/// dep on `bytes`.)
+fn bytes_from_vec(v: Vec<u8>) -> axum::body::Bytes {
+    axum::body::Bytes::from(v)
 }
 
 const HOP_BY_HOP: &[&str] = &[
@@ -552,10 +682,11 @@ mod tests {
         )
     }
 
-    /// Convenience for "happy path" success tests: seed a BYOK row
-    /// + an instance/token + build the service, all under
-    /// `TEST_OWNER`.  Returns the service, the bearer token, and a
-    /// `_keys` guard the caller must hold for the test's lifetime.
+    /// Convenience for "happy path" success tests: seed a BYOK row,
+    /// an instance/token and build the service, all under `TEST_OWNER`.
+    /// Returns the service, the bearer token, and a `_keys` guard the
+    /// caller must hold for the test's lifetime.
+    ///
     /// The non-OR resolver is now BYOK-or-503, so every test that
     /// expects a 200 from `/llm/<provider>` must seed BYOK first.
     async fn build_byok_seeded(
@@ -1172,6 +1303,113 @@ mod tests {
             .map(|r| sqlx::Row::try_get::<String, _>(r, "key_source").unwrap())
             .collect();
         assert_eq!(sources, vec!["byok".to_string()]);
+    }
+
+    /// D6: header allowlist drops every cookie / x-* / org-id /
+    /// platform-key-bearing field on the inbound side, so an agent
+    /// can't smuggle billing-relevant or cross-tenant headers
+    /// through to the upstream.  Authorization is dropped here too —
+    /// the adapter's `rewrite_auth` re-adds the upstream-correct one.
+    #[test]
+    fn sanitize_strips_non_allowlisted_headers() {
+        use axum::http::HeaderValue;
+
+        let mut h = HeaderMap::new();
+        // Allowlisted — survive.
+        h.insert("content-type", HeaderValue::from_static("application/json"));
+        h.insert("accept", HeaderValue::from_static("text/event-stream"));
+        h.insert("accept-encoding", HeaderValue::from_static("gzip"));
+        h.insert("user-agent", HeaderValue::from_static("ua/1"));
+        // Stripped — every one of these is a known leak vector.
+        h.insert(
+            "openai-organization",
+            HeaderValue::from_static("org-evil"),
+        );
+        h.insert("cookie", HeaderValue::from_static("sess=abc"));
+        h.insert("x-api-key", HeaderValue::from_static("sk-leaked"));
+        h.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("prompt-caching-2024-07-31"),
+        );
+        h.insert("x-forwarded-for", HeaderValue::from_static("10.0.0.1"));
+        h.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer client-token"),
+        );
+
+        sanitize_request_headers(&mut h, "openai");
+
+        assert!(h.get("content-type").is_some());
+        assert!(h.get("accept").is_some());
+        assert!(h.get("accept-encoding").is_some());
+        assert!(h.get("user-agent").is_some());
+
+        for stripped in [
+            "openai-organization",
+            "cookie",
+            "x-api-key",
+            "anthropic-beta",
+            "x-forwarded-for",
+            "authorization",
+        ] {
+            assert!(
+                h.get(stripped).is_none(),
+                "header {stripped} should have been stripped",
+            );
+        }
+    }
+
+    /// `anthropic-version` gets through on the Anthropic path but
+    /// not on others — pin that the conditional allow is respected.
+    #[test]
+    fn sanitize_allows_anthropic_version_only_for_anthropic() {
+        use axum::http::HeaderValue;
+        let mut h = HeaderMap::new();
+        h.insert(
+            "anthropic-version",
+            HeaderValue::from_static("2024-09-01"),
+        );
+        let mut h2 = h.clone();
+
+        sanitize_request_headers(&mut h, "anthropic");
+        assert!(h.get("anthropic-version").is_some());
+
+        sanitize_request_headers(&mut h2, "openai");
+        assert!(h2.get("anthropic-version").is_none());
+    }
+
+    /// D5: `cache_control` blocks everywhere in the request body
+    /// get stripped on the platform-key path, including nested
+    /// arrays under `messages[].content[]` and `system[]`.
+    #[test]
+    fn strip_cache_control_walks_arrays_and_objects() {
+        let mut v = serde_json::json!({
+            "model": "claude-haiku-4.5",
+            "system": [
+                {"type": "text", "text": "yo", "cache_control": {"type": "ephemeral"}},
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
+                        {"type": "image", "source": {"data": "..."}},
+                    ],
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+            "cache_control": {"type": "ephemeral"},
+        });
+        strip_cache_control_in_body(&mut v);
+        // No `cache_control` survives anywhere.
+        let serialised = serde_json::to_string(&v).unwrap();
+        assert!(
+            !serialised.contains("cache_control"),
+            "cache_control still present: {serialised}",
+        );
+        // Other content survives.
+        assert!(serialised.contains("\"role\":\"user\""));
+        assert!(serialised.contains("\"text\":\"hi\""));
     }
 
     /// Round-trip a request through one of the new providers (groq).

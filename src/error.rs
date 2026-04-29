@@ -53,6 +53,18 @@ pub enum SwarmError {
     /// exhaustion (which would otherwise leave the cube in warmup mode).
     #[error("internal: {0}")]
     Internal(String),
+    /// A3: snapshot bytes on disk don't match the SHA-256 we recorded
+    /// at snapshot-time — either disk corruption or tampering.  The
+    /// http layer maps this to 409 Conflict so the SPA surfaces an
+    /// actionable error instead of "internal".
+    #[error("snapshot corrupt: {0}")]
+    SnapshotCorrupt(String),
+    /// A6: per-instance snapshot quota exceeded.  Mapped to 429 by
+    /// the http layer with a body that exposes the limit so the SPA
+    /// can render "you have N of N snapshots, delete one to take
+    /// another".
+    #[error("snapshot quota exceeded (limit {limit})")]
+    SnapshotQuotaExceeded { limit: u64 },
 }
 
 impl From<crate::network_policy::PolicyError> for SwarmError {
