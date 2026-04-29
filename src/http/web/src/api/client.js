@@ -266,6 +266,70 @@ export class SwarmClient {
   deleteByok(provider) {
     return this._json(`/v1/byok/${encodeURIComponent(provider)}`, { method: 'DELETE' });
   }
+
+  // ─── Per-instance MCP servers ──────────────────────────────────────
+  //
+  // Records (URL + auth) live in user_secrets sealed under the user's
+  // age cipher.  The agent only ever sees a swarm proxy URL, so even
+  // an airgapped dyson can reach attached MCP servers.
+
+  /// `[{name, url, auth_kind, connected}, ...]` for one instance.
+  /// `connected` is true for bearer/none entries (always usable) and
+  /// for OAuth entries that have completed their flow at least once.
+  listMcpServers(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  /// PUT one server.  Body matches the hire-form serializer minus
+  /// `name` (carried in the URL).  Idempotent — replaces existing rows.
+  putMcpServer(instanceId, name, { url, auth }) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers/${encodeURIComponent(name)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, auth }),
+      },
+    );
+  }
+
+  /// DELETE one server.  Pushes the new (smaller) `mcp_servers` block
+  /// to the running dyson on success.
+  deleteMcpServer(instanceId, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  /// Wipe stored OAuth tokens so the next request through the proxy
+  /// 428s "oauth not authorised yet" — used by the SPA's "disconnect"
+  /// button when the user wants to force a re-auth.
+  disconnectMcpServer(instanceId, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers/${encodeURIComponent(name)}/disconnect`,
+      { method: 'POST' },
+    );
+  }
+
+  /// Kick off an OAuth 2.1 flow.  Returns `{ authorization_url }` —
+  /// the SPA navigates to it; the upstream provider redirects the
+  /// user's browser to `<swarm>/mcp/oauth/callback` which finishes the
+  /// flow and lands the user on `return_to` (or shows a small "you can
+  /// close this tab" page when none was supplied).
+  startMcpOAuth(instanceId, serverName, { return_to } = {}) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/oauth/start`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server_name: serverName, return_to: return_to || null }),
+      },
+    );
+  }
 }
 
 // Surface HTTP status on the thrown error so callers can branch on

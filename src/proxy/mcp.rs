@@ -18,14 +18,16 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{extract_bearer, CallerIdentity};
+use crate::error::SwarmError;
+use crate::instance::InstanceService;
 use crate::mcp_servers::{
-    self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpServerEntry, OAuthFlowCache,
-    PendingFlow,
+    self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpServerEntry, McpServerSpec,
+    OAuthFlowCache, PendingFlow,
 };
 use crate::secrets::UserSecretsService;
 use crate::traits::{InstanceStore, TokenStore};
@@ -43,6 +45,11 @@ pub struct McpService {
     /// sees — must be reachable from the user's browser, which is why
     /// we route through swarm rather than the agent's loopback.
     pub public_origin: Option<String>,
+    /// Instance service — owns the put/delete/sync_mcp helpers that
+    /// rewrite user_secrets and push the new `mcp_servers` block to
+    /// the running dyson.  None disables the management routes (the
+    /// proxy + OAuth callback still work — they only need user_secrets).
+    pub instance_svc: Option<Arc<InstanceService>>,
 }
 
 impl McpService {
@@ -61,7 +68,16 @@ impl McpService {
                 .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
                 .build()?,
             public_origin,
+            instance_svc: None,
         })
+    }
+
+    /// Builder-style: plug the InstanceService in so the management
+    /// routes (PUT / DELETE / disconnect) can rewrite user_secrets and
+    /// push to the running dyson.
+    pub fn with_instance_svc(mut self, svc: Arc<InstanceService>) -> Self {
+        self.instance_svc = Some(svc);
+        self
     }
 
     fn redirect_uri(&self) -> Option<String> {
@@ -85,6 +101,12 @@ pub fn router(svc: Arc<McpService>) -> Router {
 pub fn user_router(svc: Arc<McpService>) -> Router {
     Router::new()
         .route("/v1/instances/:id/mcp/servers", get(list_servers))
+        .route("/v1/instances/:id/mcp/servers/:name", put(put_server))
+        .route("/v1/instances/:id/mcp/servers/:name", delete(delete_server))
+        .route(
+            "/v1/instances/:id/mcp/servers/:name/disconnect",
+            post(disconnect_server),
+        )
         .route("/v1/instances/:id/mcp/oauth/start", post(oauth_start))
         .with_state(svc)
 }
@@ -548,6 +570,85 @@ async fn owner_owns_instance(svc: &McpService, owner_id: &str, instance_id: &str
         svc.instances.get(instance_id).await,
         Ok(Some(row)) if row.owner_id == owner_id
     )
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Management routes (put / delete / disconnect)
+// ───────────────────────────────────────────────────────────────────
+
+/// PUT body: an `McpServerSpec` minus the `name` (the URL path carries
+/// the name).  Same wire shape the hire form already uses, so the SPA
+/// can reuse its serializer.
+#[derive(Deserialize)]
+struct PutServerBody {
+    pub url: String,
+    pub auth: McpAuthSpec,
+}
+
+async fn put_server(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, name)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+    Json(body): Json<PutServerBody>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    let spec = McpServerSpec { name, url: body.url, auth: body.auth };
+    isvc.put_mcp_server(&caller.user_id, &instance_id, spec)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn delete_server(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, name)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    isvc.delete_mcp_server(&caller.user_id, &instance_id, &name)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn disconnect_server(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, name)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let isvc = svc.instance_svc.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mcp management not configured",
+        )
+    })?;
+    isvc.disconnect_mcp_oauth(&caller.user_id, &instance_id, &name)
+        .await
+        .map_err(swarm_err_to_resp)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn swarm_err_to_resp(err: SwarmError) -> Response<Body> {
+    let (status, msg) = match &err {
+        SwarmError::NotFound => (StatusCode::NOT_FOUND, "not found".to_owned()),
+        SwarmError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
+        SwarmError::PolicyDenied(m) => (StatusCode::FORBIDDEN, m.clone()),
+        SwarmError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),
+        // Anything else maps to 500 — the management surface is small
+        // and these other variants don't reach this code path.
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    error_resp(status, &msg)
 }
 
 // ───────────────────────────────────────────────────────────────────

@@ -493,7 +493,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         user_secrets_svc.clone(),
         mcp_public_origin,
     ) {
-        Ok(s) => Arc::new(s),
+        Ok(s) => Arc::new(s.with_instance_svc(instance_svc.clone())),
         Err(err) => {
             tracing::error!(error = %err, "mcp service init failed");
             return ExitCode::from(2);

@@ -1117,3 +1117,65 @@
 }
 
 .mcp-add { align-self: flex-start; }
+
+/* ── MCP servers panel (instance detail) ─────────────────────── */
+
+.mcp-row-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mcp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  transition: border-color 120ms ease;
+}
+.mcp-row:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+
+.mcp-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mcp-row-name {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg);
+}
+.mcp-row-warning {
+  color: color-mix(in srgb, var(--accent) 80%, white);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.mcp-row-url {
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.mcp-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}

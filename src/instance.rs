@@ -16,7 +16,24 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::SwarmError;
-use crate::mcp_servers::{self, McpServerSpec};
+use crate::mcp_servers::{self, McpAuthSpec, McpServerSpec};
+
+/// True when the OAuth-token-bearing fields of the auth shape
+/// (kind + endpoints + scopes) haven't moved.  When they have, the
+/// OAuth tokens we stored under the previous shape are stale —
+/// clearing them forces the user to reconnect with the new metadata.
+fn auth_shape_matches(prev: &McpAuthSpec, next: &McpAuthSpec) -> bool {
+    use McpAuthSpec::*;
+    match (prev, next) {
+        (None, None) => true,
+        (Bearer { .. }, Bearer { .. }) => true,
+        (
+            Oauth { scopes: a_s, authorization_url: a_a, token_url: a_t, .. },
+            Oauth { scopes: b_s, authorization_url: b_a, token_url: b_t, .. },
+        ) => a_s == b_s && a_a == b_a && a_t == b_t,
+        _ => false,
+    }
+}
 use crate::network_policy::{self, DnsHostResolver, HostResolver, NetworkPolicy};
 use crate::now_secs;
 use crate::secrets::{compose_env, UserSecretsService};
@@ -1156,6 +1173,225 @@ impl InstanceService {
     /// least one).  Returns `NotFound` for cross-owner ids and
     /// `PolicyDenied` when the reconfigurer isn't wired in
     /// (production has it; tests + local dev may not).
+    /// Read the current MCP server set from user_secrets, render the
+    /// proxied dyson.json blocks (using the running instance's
+    /// proxy_token), and push the whole `mcp_servers` map to the
+    /// running dyson via the configure endpoint.  Empty set
+    /// is pushed as `Some({})` so the dyson handler clears the block.
+    ///
+    /// Failure modes:
+    /// - `NotFound` for cross-owner ids and missing instances.
+    /// - `PolicyDenied` when reconfigurer / mcp_secrets isn't configured
+    ///   (test/local-dev), the instance has no live sandbox, or no
+    ///   active proxy_token (pre-Stage-8 instances).
+    pub async fn sync_mcp_to_dyson(
+        &self,
+        owner_id: &str,
+        id: &str,
+    ) -> Result<(), SwarmError> {
+        let row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let sandbox_id = row
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                SwarmError::PolicyDenied("instance has no live sandbox to reconfigure".into())
+            })?;
+        let r = self.reconfigurer.as_ref().ok_or_else(|| {
+            SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
+        })?;
+        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
+            SwarmError::PolicyDenied("mcp secrets store not configured".into())
+        })?;
+        let proxy_token = self
+            .tokens
+            .lookup_by_instance(id)
+            .await?
+            .ok_or_else(|| {
+                SwarmError::PolicyDenied(
+                    "instance has no active proxy_token (pre-Stage-8 row)".into(),
+                )
+            })?;
+
+        let names = mcp_servers::list_names(secrets, owner_id, id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
+        let mut block = serde_json::Map::with_capacity(names.len());
+        for name in names {
+            block.insert(
+                name.clone(),
+                mcp_servers::dyson_json_block(id, &name, &self.proxy_base, &proxy_token),
+            );
+        }
+
+        let body = ReconfigureBody {
+            instance_id: Some(id.to_owned()),
+            mcp_servers: Some(block),
+            ..Default::default()
+        };
+        push_with_retry(&**r, id, sandbox_id, &body)
+            .await
+            .map_err(SwarmError::PolicyDenied)
+    }
+
+    /// Add or replace one MCP server attached to an instance.  Sealed
+    /// in user_secrets, then a reconfigure push is fired so the running
+    /// dyson registers the new tool set on the next HotReloader tick.
+    /// Used by the instance-detail page's MCP management panel.
+    pub async fn put_mcp_server(
+        &self,
+        owner_id: &str,
+        id: &str,
+        spec: McpServerSpec,
+    ) -> Result<(), SwarmError> {
+        // Owner-scoped existence check first — never reveal that an id
+        // belongs to a different user.
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
+            SwarmError::PolicyDenied("mcp secrets store not configured".into())
+        })?;
+        let McpServerSpec { name, url, auth } = spec;
+        if name.trim().is_empty() {
+            return Err(SwarmError::BadRequest("server name is required".into()));
+        }
+        if url.trim().is_empty() {
+            return Err(SwarmError::BadRequest("server url is required".into()));
+        }
+        // Read-modify-write the entry under its current oauth_tokens
+        // (if any) so an OAuth-already-connected server doesn't lose
+        // its tokens just because the user edited the URL.
+        let mut entry = mcp_servers::get(secrets, owner_id, id, &name)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?
+            .unwrap_or_else(|| crate::mcp_servers::McpServerEntry {
+                url: url.clone(),
+                auth: auth.clone(),
+                oauth_tokens: None,
+            });
+        // If the auth shape changed (e.g. bearer → oauth, or scopes
+        // changed), wipe the old OAuth tokens — they'd be stale anyway.
+        if !auth_shape_matches(&entry.auth, &auth) {
+            entry.oauth_tokens = None;
+        }
+        entry.url = url;
+        entry.auth = auth;
+        mcp_servers::put(secrets, owner_id, id, &name, &entry)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp put: {e}")))?;
+
+        // Update the index so subsequent list_names finds the new entry.
+        let mut names = mcp_servers::list_names(secrets, owner_id, id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
+        if !names.iter().any(|n| n == &name) {
+            names.push(name);
+            // put_all rewrites the whole index.  Pass empty specs so we
+            // don't rewrite each server's blob (already sealed above);
+            // we just need the index touched.
+            let idx = serde_json::to_vec(&names).map_err(|e| {
+                SwarmError::Internal(format!("mcp index serialise: {e}"))
+            })?;
+            // Direct index rewrite — same shape mcp_servers::put_all uses.
+            secrets
+                .put(owner_id, &mcp_servers::index_key(id), &idx)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+        }
+
+        // Best-effort reconfigure push — if the instance is mid-restore
+        // or the reconfigurer is not wired we still want the secret to
+        // land so the next push (e.g. a rename) can pick it up.
+        if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
+            tracing::warn!(error = %err, instance = %id, "mcp put: sync_mcp_to_dyson failed (entry persisted)");
+        }
+        Ok(())
+    }
+
+    /// Remove one MCP server from an instance.  Wipes the user_secrets
+    /// row, removes it from the index, and pushes the new (smaller)
+    /// `mcp_servers` block to the running dyson.
+    pub async fn delete_mcp_server(
+        &self,
+        owner_id: &str,
+        id: &str,
+        name: &str,
+    ) -> Result<(), SwarmError> {
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
+            SwarmError::PolicyDenied("mcp secrets store not configured".into())
+        })?;
+        // Idempotent: a delete on a missing entry just returns Ok.
+        if let Err(err) = secrets.delete(owner_id, &mcp_servers::entry_key(id, name)).await {
+            tracing::warn!(error = %err, instance = %id, server = %name, "mcp delete: row delete failed");
+        }
+        let names: Vec<String> = mcp_servers::list_names(secrets, owner_id, id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?
+            .into_iter()
+            .filter(|n| n != name)
+            .collect();
+        if names.is_empty() {
+            // Drop the index row entirely — keeps the user_secrets table
+            // tidy when the user clears every MCP server.
+            let _ = secrets.delete(owner_id, &mcp_servers::index_key(id)).await;
+        } else {
+            let idx = serde_json::to_vec(&names).map_err(|e| {
+                SwarmError::Internal(format!("mcp index serialise: {e}"))
+            })?;
+            secrets
+                .put(owner_id, &mcp_servers::index_key(id), &idx)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+        }
+        if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
+            tracing::warn!(error = %err, instance = %id, "mcp delete: sync_mcp_to_dyson failed");
+        }
+        Ok(())
+    }
+
+    /// Clear OAuth tokens from one server entry.  The next request
+    /// through the proxy will 428 with "oauth not authorised yet" until
+    /// the user reconnects via /mcp/oauth/start.  Used by the SPA's
+    /// "disconnect" button.
+    pub async fn disconnect_mcp_oauth(
+        &self,
+        owner_id: &str,
+        id: &str,
+        name: &str,
+    ) -> Result<(), SwarmError> {
+        let _row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
+            SwarmError::PolicyDenied("mcp secrets store not configured".into())
+        })?;
+        let mut entry = mcp_servers::get(secrets, owner_id, id, name)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?
+            .ok_or(SwarmError::NotFound)?;
+        if entry.oauth_tokens.is_some() {
+            entry.oauth_tokens = None;
+            mcp_servers::put(secrets, owner_id, id, name, &entry)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp put: {e}")))?;
+        }
+        Ok(())
+    }
+
     pub async fn update_models(
         &self,
         owner_id: &str,
@@ -2137,6 +2373,252 @@ mod tests {
         let mut sorted = names;
         sorted.sort();
         assert_eq!(sorted, vec!["linear", "no_auth"]);
+    }
+
+    #[tokio::test]
+    async fn put_mcp_server_persists_and_pushes_proxied_block() {
+        // The instance-detail panel calls into put_mcp_server when the
+        // user adds or edits a server.  Two invariants matter:
+        //   (1) the upstream URL + token round-trip through user_secrets
+        //       under the OWNER's cipher (no plaintext at rest), and
+        //   (2) the configure push sees the FULL proxied block — not
+        //       just the new entry — so the running dyson's mcp_servers
+        //       map ends up consistent with what's persisted (otherwise
+        //       a delete-then-add via the panel would silently drop
+        //       earlier entries on the dyson side).
+        let (svc, _cube, _tokens, _instances, recorder, user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+        // Drain the create-time push so we assert on the put path's body.
+        wait_for_pushes(&recorder, 1).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
+            name: "linear".into(),
+            url: "https://api.linear.app/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Bearer { token: "lin_xxx".into() },
+        })
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = pushed.last().unwrap();
+        let block = body.mcp_servers.as_ref().expect("put must push mcp_servers");
+        assert!(block.contains_key("linear"));
+
+        // Persistence carried the real upstream + bearer.
+        let entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "linear")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.url, "https://api.linear.app/mcp");
+        match entry.auth {
+            crate::mcp_servers::McpAuthSpec::Bearer { token } => assert_eq!(token, "lin_xxx"),
+            _ => panic!("bearer auth expected"),
+        }
+
+        // Index has the new name.
+        let names = crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["linear"]);
+    }
+
+    #[tokio::test]
+    async fn put_mcp_server_preserves_oauth_tokens_when_shape_unchanged() {
+        // A user editing only the URL (or scopes irrelevant fields)
+        // shouldn't have to re-run the OAuth flow.  put_mcp_server's
+        // auth_shape_matches branch keeps existing tokens alive when
+        // the auth shape (kind + scopes + endpoints) is unchanged.
+        let (svc, _cube, _tokens, _instances, _recorder, user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+
+        // Initial OAuth server with no tokens yet.
+        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
+            name: "gh".into(),
+            url: "https://gh/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                scopes: vec!["read".into()],
+                client_id: None, client_secret: None,
+                authorization_url: None, token_url: None, registration_url: None,
+            },
+        }).await.unwrap();
+
+        // Stamp tokens directly (simulates a completed OAuth callback).
+        let mut entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "gh")
+            .await.unwrap().unwrap();
+        entry.oauth_tokens = Some(crate::mcp_servers::McpOAuthTokens {
+            access_token: "AT".into(),
+            refresh_token: Some("RT".into()),
+            expires_at: Some(crate::now_secs() + 3600),
+            token_url: "https://gh/token".into(),
+            client_id: "c".into(),
+            client_secret: None,
+        });
+        crate::mcp_servers::put(&user_secrets, &owner, &created.id, "gh", &entry).await.unwrap();
+
+        // Edit only the URL — auth shape unchanged.
+        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
+            name: "gh".into(),
+            url: "https://gh-v2/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                scopes: vec!["read".into()],
+                client_id: None, client_secret: None,
+                authorization_url: None, token_url: None, registration_url: None,
+            },
+        }).await.unwrap();
+        let after = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "gh")
+            .await.unwrap().unwrap();
+        assert_eq!(after.url, "https://gh-v2/mcp");
+        let tokens = after.oauth_tokens.expect("oauth tokens must be preserved");
+        assert_eq!(tokens.access_token, "AT");
+    }
+
+    #[tokio::test]
+    async fn put_mcp_server_clears_oauth_tokens_when_scopes_change() {
+        // Changing scopes invalidates the existing access token (its
+        // grant covers the old scope set, not the new one).  Wiping
+        // tokens forces a reconnect and is the safe move.
+        let (svc, _cube, _tokens, _instances, _recorder, user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+
+        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
+            name: "x".into(),
+            url: "https://x/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                scopes: vec!["read".into()],
+                client_id: None, client_secret: None,
+                authorization_url: None, token_url: None, registration_url: None,
+            },
+        }).await.unwrap();
+        let mut e = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "x")
+            .await.unwrap().unwrap();
+        e.oauth_tokens = Some(crate::mcp_servers::McpOAuthTokens {
+            access_token: "old".into(), refresh_token: None, expires_at: None,
+            token_url: "u".into(), client_id: "c".into(), client_secret: None,
+        });
+        crate::mcp_servers::put(&user_secrets, &owner, &created.id, "x", &e).await.unwrap();
+
+        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
+            name: "x".into(),
+            url: "https://x/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Oauth {
+                scopes: vec!["write".into()],
+                client_id: None, client_secret: None,
+                authorization_url: None, token_url: None, registration_url: None,
+            },
+        }).await.unwrap();
+        let after = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "x")
+            .await.unwrap().unwrap();
+        assert!(after.oauth_tokens.is_none(), "scope change must wipe stale tokens");
+    }
+
+    #[tokio::test]
+    async fn delete_mcp_server_drops_index_when_last_entry_removed() {
+        // After removing the last MCP server, the index row should be
+        // gone too — keeps user_secrets tidy and avoids an empty
+        // `mcp_servers` block lingering in dyson.json reload after reload.
+        let (svc, _cube, _tokens, _instances, _recorder, user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+
+        svc.put_mcp_server(&owner, &created.id, McpServerSpec {
+            name: "only".into(),
+            url: "https://only/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::None,
+        }).await.unwrap();
+        svc.delete_mcp_server(&owner, &created.id, "only").await.unwrap();
+
+        assert!(crate::mcp_servers::get(&user_secrets, &owner, &created.id, "only")
+            .await.unwrap().is_none());
+        assert!(crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
+            .await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_mcp_server_rejects_cross_owner_instance() {
+        // Owner-scoped existence: another user's id must surface as
+        // NotFound, not as a successful write the legitimate owner
+        // could later read.  We only need a user_id the cipher will
+        // accept (32-hex) — get_for_owner returns None for the
+        // mismatch before we ever touch user_secrets, so seeding the
+        // "other" user row in the DB isn't required.
+        let (svc, _cube, _tokens, _instances, _recorder, _user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+        let other = "feedface".repeat(4);
+        let err = svc.put_mcp_server(&other, &created.id, McpServerSpec {
+            name: "x".into(),
+            url: "https://x/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::None,
+        }).await.unwrap_err();
+        assert!(matches!(err, SwarmError::NotFound),
+            "cross-owner put must surface as NotFound, got {err:?}");
+    }
+
+    /// Build a service with everything wired (recorder, mcp_secrets, real
+    /// pool, real cipher dir) and a hex owner the cipher will accept.
+    /// Returns enough handles for the put/delete tests to assert on
+    /// each layer (recorder → push body, user_secrets → at-rest blob).
+    async fn build_with_mcp_secrets() -> (
+        Arc<InstanceService>,
+        Arc<MockCube>,
+        Arc<dyn TokenStore>,
+        Arc<dyn InstanceStore>,
+        Arc<RecordingReconfigurer>,
+        Arc<UserSecretsService>,
+        String,
+    ) {
+        let pool = crate::db::open_in_memory().await.unwrap();
+        let owner = "deadbeef".repeat(4);
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let dir: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(tmp.path()).unwrap());
+        let user_store: Arc<dyn crate::traits::UserSecretStore> =
+            Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+        let user_secrets = Arc::new(UserSecretsService::new(user_store, dir));
+        let svc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances.clone(),
+                secrets_store,
+                tokens.clone(),
+                "https://dyson.example.com/llm",
+            )
+            .with_reconfigurer(recorder.clone())
+            .with_mcp_secrets(user_secrets.clone()),
+        );
+        (svc, cube, tokens, instances, recorder, user_secrets, owner)
+    }
+
+    async fn hire_minimal(svc: &InstanceService, owner: &str) -> CreatedInstance {
+        svc.create(owner, CreateRequest {
+            template_id: "tpl".into(),
+            name: None,
+            task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
+            mcp_servers: Vec::new(),
+        })
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

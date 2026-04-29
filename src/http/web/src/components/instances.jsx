@@ -1323,6 +1323,7 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
       <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
       <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
       <SecretsPanel instanceId={id}/>
+      <McpServersPanel instanceId={id} disabled={row.status === 'destroyed'}/>
     </main>
   );
 }
@@ -1830,6 +1831,385 @@ function probeLabel(p) {
     return p.kind || JSON.stringify(p);
   }
   return String(p);
+}
+
+// ─── MCP servers panel (instance detail) ──────────────────────────
+//
+// Lives next to SecretsPanel.  Lists the MCP servers attached to one
+// instance, lets the user add / edit / delete / disconnect, and
+// kicks off OAuth flows in a new tab.  All persistence goes through
+// `InstanceService::{put,delete,disconnect}_mcp_server`, which seals
+// the entry in user_secrets and pushes the new `mcp_servers` block to
+// the running dyson via the configure endpoint.
+
+function McpServersPanel({ instanceId, disabled }) {
+  const { client } = useApi();
+  const [rows, setRows] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [editing, setEditing] = React.useState(null); // null | { row | "new" }
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const list = await client.listMcpServers(instanceId);
+      setRows(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'list failed');
+    }
+  }, [client, instanceId]);
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const remove = async name => {
+    if (!confirm(`remove MCP server ${name}? the agent will stop seeing this tool set.`)) return;
+    setBusy(true); setErr(null);
+    try {
+      await client.deleteMcpServer(instanceId, name);
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'delete failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async name => {
+    if (!confirm(`clear OAuth tokens for ${name}? you'll need to reconnect before the agent can use it.`)) return;
+    setBusy(true); setErr(null);
+    try {
+      await client.disconnectMcpServer(instanceId, name);
+      await refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'disconnect failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connect = async name => {
+    setBusy(true); setErr(null);
+    try {
+      const ret = `${window.location.origin}/#/i/${encodeURIComponent(instanceId)}`;
+      const { authorization_url } = await client.startMcpOAuth(instanceId, name, { return_to: ret });
+      // Open in a new tab so the user keeps their place; the callback
+      // page lands them somewhere they can close.
+      window.open(authorization_url, '_blank', 'noopener,noreferrer');
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'oauth start failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitEdit = async (spec) => {
+    setBusy(true); setErr(null);
+    try {
+      await client.putMcpServer(instanceId, spec.name, { url: spec.url, auth: spec.auth });
+      await refresh();
+      setEditing(null);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'save failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">mcp servers</div>
+        <div className="panel-actions">
+          <button
+            className="btn btn-sm"
+            onClick={() => setEditing({ mode: 'new' })}
+            disabled={disabled || busy}
+          >
+            add
+          </button>
+        </div>
+      </div>
+      {err ? <div className="error">{err}</div> : null}
+      <p className="muted small">
+        Swarm proxies every MCP request — the agent only sees a swarm URL,
+        never your upstream URL or its credentials. OAuth tokens land in
+        your encrypted user secret store and refresh transparently.
+      </p>
+      {rows === null ? (
+        <p className="muted small">loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="muted small">no MCP servers attached.</p>
+      ) : (
+        <ul className="mcp-row-list">
+          {rows.map(r => (
+            <McpServerRow
+              key={r.name}
+              row={r}
+              busy={busy || disabled}
+              onEdit={() => setEditing({ mode: 'edit', row: r })}
+              onConnect={() => connect(r.name)}
+              onDisconnect={() => disconnect(r.name)}
+              onRemove={() => remove(r.name)}
+            />
+          ))}
+        </ul>
+      )}
+      {editing ? (
+        <McpServerEditModal
+          existingNames={(rows || []).map(r => r.name)}
+          initial={editing.mode === 'edit' ? editing.row : null}
+          onCancel={() => setEditing(null)}
+          onSubmit={submitEdit}
+          busy={busy}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function McpServerRow({ row, busy, onEdit, onConnect, onDisconnect, onRemove }) {
+  const isOauth = row.auth_kind === 'oauth';
+  // OAuth-not-connected is the only state that surfaces a "connect"
+  // CTA; bearer / none / oauth-connected all just show the auth pill.
+  const needsConnect = isOauth && !row.connected;
+  return (
+    <li className="mcp-row">
+      <div className="mcp-row-head">
+        <code className="mcp-row-name">{row.name}</code>
+        <span className={`mcp-auth-pill mcp-auth-${row.auth_kind}`}>
+          {row.auth_kind}
+        </span>
+        {needsConnect ? (
+          <span className="mcp-row-warning small">not connected</span>
+        ) : null}
+      </div>
+      <div className="mcp-row-url muted small" title={row.url}>{row.url}</div>
+      <div className="mcp-row-actions">
+        {needsConnect ? (
+          <button className="btn btn-primary btn-sm" onClick={onConnect} disabled={busy}>
+            connect
+          </button>
+        ) : null}
+        {isOauth && row.connected ? (
+          <button className="btn btn-ghost btn-sm" onClick={onConnect} disabled={busy}>
+            reconnect
+          </button>
+        ) : null}
+        {isOauth && row.connected ? (
+          <button className="btn btn-ghost btn-sm" onClick={onDisconnect} disabled={busy}>
+            disconnect
+          </button>
+        ) : null}
+        <button className="btn btn-ghost btn-sm" onClick={onEdit} disabled={busy}>
+          edit
+        </button>
+        <button className="btn btn-ghost btn-sm" onClick={onRemove} disabled={busy}>
+          remove
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }) {
+  // Initial row when editing carries `name`, `url`, `auth_kind` (no
+  // tokens — those stay server-side).  We fill the form's auth fields
+  // with empty strings; if the user doesn't change them and saves,
+  // the server-side `auth_shape_matches` check keeps existing OAuth
+  // tokens alive.
+  const isNew = !initial;
+  const [name, setName] = React.useState(initial?.name || '');
+  const [url, setUrl] = React.useState(initial?.url || '');
+  const [authKind, setAuthKind] = React.useState(initial?.auth_kind || 'none');
+  const [token, setToken] = React.useState('');
+  const [scopes, setScopes] = React.useState('');
+  const [advanced, setAdvanced] = React.useState(false);
+  const [clientId, setClientId] = React.useState('');
+  const [clientSecret, setClientSecret] = React.useState('');
+  const [authorizationUrl, setAuthorizationUrl] = React.useState('');
+  const [tokenUrl, setTokenUrl] = React.useState('');
+  const [registrationUrl, setRegistrationUrl] = React.useState('');
+  const [err, setErr] = React.useState(null);
+
+  const submit = (e) => {
+    e.preventDefault();
+    setErr(null);
+    const trimmed = (name || '').trim();
+    if (!trimmed) { setErr('name is required'); return; }
+    if (isNew && existingNames.includes(trimmed)) {
+      setErr(`a server named "${trimmed}" already exists`);
+      return;
+    }
+    if (!url.trim()) { setErr('url is required'); return; }
+    let auth;
+    if (authKind === 'bearer') {
+      if (!token.trim()) { setErr('bearer token is required'); return; }
+      auth = { kind: 'bearer', token: token.trim() };
+    } else if (authKind === 'oauth') {
+      const sc = (scopes || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+      auth = { kind: 'oauth', scopes: sc };
+      if (clientId.trim()) auth.client_id = clientId.trim();
+      if (clientSecret.trim()) auth.client_secret = clientSecret.trim();
+      if (authorizationUrl.trim()) auth.authorization_url = authorizationUrl.trim();
+      if (tokenUrl.trim()) auth.token_url = tokenUrl.trim();
+      if (registrationUrl.trim()) auth.registration_url = registrationUrl.trim();
+    } else {
+      auth = { kind: 'none' };
+    }
+    onSubmit({ name: trimmed, url: url.trim(), auth });
+  };
+
+  return (
+    <div className="modal-scrim" onClick={onCancel}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header mcp-modal-header">
+          <span>{isNew ? 'add mcp server' : `edit ${initial.name}`}</span>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={onCancel}
+            disabled={busy}
+            aria-label="close"
+          >
+            ×
+          </button>
+        </div>
+        <form className="form modal-body" onSubmit={submit}>
+          <label className="field">
+            <span>name</span>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="linear"
+              disabled={!isNew /* server name is the storage key — immutable */}
+              autoFocus={isNew}
+              autoComplete="off"
+            />
+            {!isNew ? (
+              <span className="hint muted small">
+                Names are immutable — remove and re-add to rename.
+              </span>
+            ) : null}
+          </label>
+          <label className="field">
+            <span>URL</span>
+            <input
+              value={url}
+              onChange={e => setUrl(e.target.value)}
+              placeholder="https://api.linear.app/mcp"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>authentication</span>
+            <select value={authKind} onChange={e => setAuthKind(e.target.value)}>
+              <option value="none">none</option>
+              <option value="bearer">bearer token</option>
+              <option value="oauth">OAuth 2.1 (PKCE)</option>
+            </select>
+            {!isNew && initial.auth_kind !== authKind ? (
+              <span className="hint muted small">
+                Switching auth shape clears any stored OAuth tokens.
+              </span>
+            ) : null}
+          </label>
+          {authKind === 'bearer' ? (
+            <label className="field">
+              <span>token</span>
+              <input
+                type="password"
+                value={token}
+                onChange={e => setToken(e.target.value)}
+                placeholder="lin_api_…"
+                autoComplete="off"
+              />
+              <span className="hint muted small">
+                Sealed in your user secret store. Edit replaces — there's
+                no read-back.
+              </span>
+            </label>
+          ) : null}
+          {authKind === 'oauth' ? (
+            <>
+              <label className="field">
+                <span>scopes</span>
+                <input
+                  value={scopes}
+                  onChange={e => setScopes(e.target.value)}
+                  placeholder="read write"
+                  autoComplete="off"
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm mcp-advanced-toggle"
+                onClick={() => setAdvanced(a => !a)}
+              >
+                {advanced ? '− hide advanced' : '+ advanced (DCR / endpoints)'}
+              </button>
+              {advanced ? (
+                <div className="mcp-advanced">
+                  <label className="field">
+                    <span>client_id</span>
+                    <input
+                      value={clientId}
+                      onChange={e => setClientId(e.target.value)}
+                      placeholder="(empty = Dynamic Client Registration)"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>client_secret</span>
+                    <input
+                      type="password"
+                      value={clientSecret}
+                      onChange={e => setClientSecret(e.target.value)}
+                      placeholder="(only if your provider requires it)"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>authorization_url</span>
+                    <input
+                      value={authorizationUrl}
+                      onChange={e => setAuthorizationUrl(e.target.value)}
+                      placeholder="(empty = .well-known discovery)"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>token_url</span>
+                    <input
+                      value={tokenUrl}
+                      onChange={e => setTokenUrl(e.target.value)}
+                      placeholder="(empty = .well-known discovery)"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>registration_url</span>
+                    <input
+                      value={registrationUrl}
+                      onChange={e => setRegistrationUrl(e.target.value)}
+                      placeholder="(only needed if discovery doesn't expose one)"
+                      autoComplete="off"
+                    />
+                  </label>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+          {err ? <div className="error">{err}</div> : null}
+          <div className="modal-actions">
+            <button type="submit" className="btn btn-primary" disabled={busy}>
+              {busy ? 'saving…' : 'save'}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>
+              cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 // ─── Network policy badge + change-network panel ──────────────────
