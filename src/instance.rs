@@ -234,6 +234,15 @@ pub struct ReconfigureBody {
     /// every operator to re-hire.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_generation_model: Option<String>,
+    /// Reset `skills` to the loader's defaults (every builtin tool
+    /// registered).  Older swarm boots wrote
+    /// `skills.builtin.tools = []`, which the dyson loader parses as
+    /// "register zero builtin tools".  Setting this flag on a sweep
+    /// flips toolless instances back to the full toolbox without a
+    /// re-hire.  False on every body that doesn't explicitly want
+    /// the reset (rename / models-only updates leave skills alone).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reset_skills: bool,
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
@@ -386,6 +395,13 @@ impl InstanceService {
                 image_provider_block: Some(defaults.provider_block(&proxy_base, &token)),
                 image_generation_provider: Some(defaults.provider_name.clone()),
                 image_generation_model: Some(defaults.model.clone()),
+                // Flip the skills block back to defaults on every sweep
+                // — undoes the explicit-empty-array bug that shipped
+                // toolless dysons.  Idempotent on instances whose
+                // dyson.json already lacks the block (the dyson handler
+                // returns `skills_reset: false` and the JSON file
+                // doesn't get rewritten).
+                reset_skills: true,
                 ..Default::default()
             };
             match reconfigurer.push(&row.id, sandbox_id, &body).await {
@@ -573,6 +589,13 @@ impl InstanceService {
                     .image_gen_defaults
                     .as_ref()
                     .map(|d| d.model.clone()),
+                // Belt-and-braces: the new dyson swarm boot writer
+                // already omits `skills`, but creates that ride an
+                // older binary template still ship the empty-array
+                // bug.  Flipping reset_skills on create makes the
+                // outcome deterministic regardless of which template
+                // the cube launched the instance from.
+                reset_skills: true,
             };
             // Await the configure-push before returning Live.  Previously
             // this was tokio::spawn'd (fire-and-forget): the SPA could
@@ -1450,6 +1473,11 @@ mod tests {
             .as_deref()
             .expect("chat proxy_token must be set");
         assert_eq!(block["api_key"], chat_token);
+        // Skills reset must ride along on every create — closes the
+        // toolless-dyson bug for instances that booted from an older
+        // template whose dyson swarm writer wrote
+        // `skills.builtin.tools = []`.
+        assert!(body.reset_skills, "create push must flip reset_skills");
     }
 
     #[tokio::test]
@@ -1514,6 +1542,10 @@ mod tests {
             assert!(body.proxy_token.is_none(), "sweep must not push proxy_token");
             assert!(body.proxy_base.is_none(),  "sweep must not push proxy_base");
             assert!(body.models.is_empty(),     "sweep must not push models");
+            // Skills reset rides on every sweep push so toolless
+            // instances self-heal whether they were created before
+            // or after the boot-writer fix.
+            assert!(body.reset_skills,          "sweep must flip reset_skills");
         }
         // Verify the token-store reverse lookup returns each token —
         // the sweep depends on this and a regression here would make
