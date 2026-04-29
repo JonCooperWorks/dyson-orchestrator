@@ -38,7 +38,7 @@ describe('computeCookieDomain', () => {
   });
 
   test('four-label deployments still scope to their own apex', () => {
-    expect(computeCookieDomain('dyson.myprivate.network')).toBe('dyson.myprivate.network');
+    expect(computeCookieDomain('swarm.myprivate.network')).toBe('swarm.myprivate.network');
     expect(computeCookieDomain('a.b.c.example.com')).toBe('a.b.c.example.com');
   });
 });

@@ -26,7 +26,7 @@ use crate::traits::{HealthProber, InstanceRow, InstanceStatus, InstanceStore, Li
 #[derive(Clone)]
 pub struct HttpHealthProber {
     http: Client,
-    /// Public hostname swarm answers on (e.g. `dyson.myprivate.network`).
+    /// Public hostname swarm answers on (e.g. `swarm.myprivate.network`).
     /// We probe `https://<instance_id>.<hostname>/healthz` so the prober
     /// exercises the same chain the user's browser does — Caddy →
     /// dispatch → dyson_proxy → cubeproxy → dyson.  When `None` the

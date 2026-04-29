@@ -88,7 +88,7 @@ struct SandboxNetwork<'a> {
     /// `0.0.0.0/0` here keeps the policy in blacklist mode (allow
     /// all, subtract deny_out) and is unioned with whatever the
     /// template also adds.  Symptom when missing: cube TCP SYN to
-    /// `dyson.myprivate.network:443` stays in `syn_sent` until the
+    /// `swarm.myprivate.network:443` stays in `syn_sent` until the
     /// cubevs session reaper kills it.
     ///
     /// Per-instance now: derived from the row's `NetworkPolicy` via
@@ -475,7 +475,7 @@ mod tests {
         // punches a /32 hole in the always-denied 192.168.0.0/16 so the
         // cube can reach the host on the cube-dev gateway IP (path 1
         // for the NAT-hairpin: cube reaches Caddy via /etc/hosts entry
-        // pointing dyson.myprivate.network at 192.168.0.1).
+        // pointing swarm.myprivate.network at 192.168.0.1).
         assert_eq!(allow, vec!["0.0.0.0/0", "192.168.0.1/32"]);
         let deny: Vec<&str> = v["network"]["denyOut"]
             .as_array()
