@@ -514,6 +514,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_dispatcher_redirects_browser_get_to_login() {
+        // Logged-out browser opens https://abc.swarm.test/some/path.
+        // dyson_proxy can't satisfy the request, but a bare 401 on a
+        // top-level navigation is a dead end — the user has no way to
+        // recover.  Bounce them to the apex with `?return_to=<url>`
+        // so the SPA can run the OIDC flow and navigate back.
+        let (mut state, users) = build_state().await;
+        state.hostname = Some("swarm.test".into());
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let r = client
+            .get(format!("{base}/some/path?x=1"))
+            .header("host", "abc.swarm.test")
+            .header("accept", "text/html,application/xhtml+xml")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 302);
+        let loc = r.headers().get("location").unwrap().to_str().unwrap();
+        assert!(
+            loc.starts_with("https://swarm.test/?return_to="),
+            "unexpected Location: {loc}"
+        );
+        assert!(
+            loc.contains("https%3A%2F%2Fabc.swarm.test%2Fsome%2Fpath%3Fx%3D1"),
+            "Location did not preserve original URL: {loc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_dispatcher_keeps_401_for_xhr() {
+        // Same shape as above but `Accept: application/json` — the SPA's
+        // fetch wrapper handles 401 explicitly, so a 302 here would be
+        // silently followed by reqwest/fetch and confuse the caller.
+        let (mut state, users) = build_state().await;
+        state.hostname = Some("swarm.test".into());
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let r = client
+            .get(format!("{base}/api/whatever"))
+            .header("host", "abc.swarm.test")
+            .header("accept", "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    #[tokio::test]
     async fn host_dispatcher_404s_unknown_subdomain() {
         // Sandbox subdomain shape, but no row with that id exists.
         // The dispatcher authenticates the user (alice), looks up the

@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::middleware::Next;
 use futures::TryStreamExt;
 
@@ -190,7 +190,30 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         .await
         {
             Ok(id) => id,
-            Err(resp) => return resp,
+            Err(resp) => {
+                // Browser top-level navigations (Accept: text/html on a
+                // GET) get bounced to the apex login page with a
+                // `return_to=<original URL>` query — once the SPA
+                // exchanges its OIDC code, it parks the session cookie
+                // on the parent domain and navigates back to this
+                // subdomain.  Without this hop the user just sees a
+                // bare 401 with no recovery path.  XHR / API callers
+                // and non-GET verbs still get the original auth error
+                // response (their callers handle 401 their own way and
+                // following a 302 would silently swallow the
+                // failure).
+                if resp.status() == StatusCode::UNAUTHORIZED
+                    && wants_login_redirect(req.method(), req.headers())
+                    && let Some(redirect) = build_login_redirect(
+                        state.hostname.as_deref(),
+                        req.headers(),
+                        req.uri(),
+                    )
+                {
+                    return redirect;
+                }
+                return resp;
+            }
         };
         match state.app.instances.get(&caller_user_id, &instance_id).await {
             Ok(r) => r,
@@ -464,6 +487,85 @@ pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
     b.build()
 }
 
+/// True when an unauthenticated request looks like a browser top-level
+/// navigation (GET + `Accept: text/html`).  Anything else — XHR/fetch
+/// from JS, sub-resource loads (`Accept: image/*`), HEAD/OPTIONS pre-flights,
+/// state-changing verbs — keeps the bare 401 because a redirect would
+/// either be silently followed (and confuse the caller) or drop a
+/// pending payload.
+fn wants_login_redirect(method: &Method, headers: &HeaderMap) -> bool {
+    if method != Method::GET {
+        return false;
+    }
+    let Some(accept) = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    accept
+        .split(',')
+        .any(|m| m.trim().to_ascii_lowercase().starts_with("text/html"))
+}
+
+/// Build a `302 Found` to `https://<apex>/?return_to=<original URL>`.
+///
+/// `base` is the configured apex hostname; `None` disables the redirect
+/// (the caller falls back to the original 401).  The original URL is
+/// reconstructed from the `Host` header + request URI; we always emit
+/// `https://` because the deployment is HTTPS-only via Caddy and an
+/// `http://` return_to would be rejected by the SPA's validator anyway.
+fn build_login_redirect(
+    base: Option<&str>,
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+) -> Option<Response<Body>> {
+    let base = base?;
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok())?;
+    // Defence-in-depth: only ever emit a return_to that matches the
+    // configured base (the host MUST be a single-label subdomain of
+    // `base`).  We're called from `forward()`, which already gated on
+    // `extract_instance_subdomain`, so this is a tautology in
+    // production — keeping it here means a refactor that exposes this
+    // helper somewhere else can't accidentally redirect to an
+    // attacker-controlled host.
+    extract_instance_subdomain(host, base)?;
+    let path_with_query = match uri.query() {
+        Some(q) if !q.is_empty() => format!("{}?{}", uri.path(), q),
+        _ => uri.path().to_owned(),
+    };
+    let target = format!("https://{host}{path_with_query}");
+    let location = format!(
+        "https://{}/?return_to={}",
+        base,
+        encode_query_value(&target)
+    );
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, location)
+        // Don't let intermediaries cache the bounce — credentials
+        // change per request and a stale 302 in a CDN would pin every
+        // user to the same return_to.
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::empty())
+        .ok()
+}
+
+/// Minimal RFC 3986 percent-encoder for query values.  Escapes everything
+/// that isn't an unreserved character (ALPHA / DIGIT / `-` / `.` / `_` /
+/// `~`).  We keep it inline rather than pulling in `percent-encoding` —
+/// the only call site is the login redirect Location header.
+fn encode_query_value(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        let safe = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
+        if safe {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +727,152 @@ mod tests {
             HeaderValue::from_static("https://swarm.example.com"),
         );
         assert!(!origin_is_allowed(&h, None));
+    }
+
+    // ── Login-redirect on auth failure ────────────────────────────────
+
+    #[test]
+    fn wants_login_redirect_browser_get() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            HeaderValue::from_static(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            ),
+        );
+        assert!(wants_login_redirect(&Method::GET, &h));
+    }
+
+    #[test]
+    fn wants_login_redirect_xhr_does_not() {
+        // Fetch/XHR JSON callers — handled by the SPA's fetch wrapper,
+        // which surfaces 401 to the UI.  A 302 here would be silently
+        // followed and the JSON parse on the apex login HTML would
+        // confusingly fail downstream.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/json"),
+        );
+        assert!(!wants_login_redirect(&Method::GET, &h));
+    }
+
+    #[test]
+    fn wants_login_redirect_subresource_does_not() {
+        // <img src=...> sends `Accept: image/*,*/*` — never text/html.
+        // Matching this pattern would break broken-image debugging by
+        // returning HTML where an image is expected.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("image/avif,image/webp,*/*"),
+        );
+        assert!(!wants_login_redirect(&Method::GET, &h));
+    }
+
+    #[test]
+    fn wants_login_redirect_no_accept_does_not() {
+        // curl with no Accept header — keep the 401 so script callers
+        // see the auth failure rather than chasing a redirect.
+        let h = HeaderMap::new();
+        assert!(!wants_login_redirect(&Method::GET, &h));
+    }
+
+    #[test]
+    fn wants_login_redirect_post_does_not() {
+        // Top-level POSTs (e.g. form submissions) cannot survive a
+        // redirect; the body would be lost.  Always 401 a non-GET so
+        // the caller can re-submit after auth.
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+        assert!(!wants_login_redirect(&Method::POST, &h));
+        assert!(!wants_login_redirect(&Method::PUT, &h));
+        assert!(!wants_login_redirect(&Method::DELETE, &h));
+    }
+
+    #[test]
+    fn encode_query_value_escapes_reserved() {
+        // `:` and `/` and `?` are reserved in query values; the
+        // unreserved set survives untouched.
+        assert_eq!(encode_query_value("abc-._~"), "abc-._~");
+        assert_eq!(
+            encode_query_value("https://abc.swarm.example.com/foo?x=1"),
+            "https%3A%2F%2Fabc.swarm.example.com%2Ffoo%3Fx%3D1",
+        );
+        assert_eq!(encode_query_value("a b"), "a%20b");
+    }
+
+    #[test]
+    fn build_login_redirect_includes_full_target_url() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::HOST,
+            HeaderValue::from_static("abc123.swarm.example.com"),
+        );
+        let uri: axum::http::Uri = "/foo/bar?x=1&y=hello%20world".parse().unwrap();
+        let resp = build_login_redirect(Some("swarm.example.com"), &h, &uri).unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let loc = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(loc.starts_with("https://swarm.example.com/?return_to="));
+        assert!(loc.contains("https%3A%2F%2Fabc123.swarm.example.com%2Ffoo%2Fbar"));
+        // Cache-Control: no-store keeps middleboxes from pinning every
+        // user to the same return_to URL.
+        assert_eq!(
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap()),
+            Some("no-store"),
+        );
+    }
+
+    #[test]
+    fn build_login_redirect_omits_target_query_when_empty() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::HOST,
+            HeaderValue::from_static("abc.swarm.example.com"),
+        );
+        let uri: axum::http::Uri = "/".parse().unwrap();
+        let resp = build_login_redirect(Some("swarm.example.com"), &h, &uri).unwrap();
+        let loc = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // Encoded form of `https://abc.swarm.example.com/` (no `?`).
+        assert!(
+            loc.ends_with("return_to=https%3A%2F%2Fabc.swarm.example.com%2F"),
+            "unexpected Location: {loc}"
+        );
+    }
+
+    #[test]
+    fn build_login_redirect_refuses_when_host_is_not_a_subdomain() {
+        // Belt-and-braces: even though forward() only calls us after
+        // extract_instance_subdomain has already matched, this helper
+        // must independently reject a non-subdomain Host so a future
+        // refactor can't accidentally bounce the browser to an
+        // attacker-controlled return_to.
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_static("evil.com"));
+        let uri: axum::http::Uri = "/".parse().unwrap();
+        assert!(build_login_redirect(Some("swarm.example.com"), &h, &uri).is_none());
+    }
+
+    #[test]
+    fn build_login_redirect_requires_configured_hostname() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::HOST,
+            HeaderValue::from_static("abc.swarm.example.com"),
+        );
+        let uri: axum::http::Uri = "/".parse().unwrap();
+        assert!(build_login_redirect(None, &h, &uri).is_none());
     }
 }

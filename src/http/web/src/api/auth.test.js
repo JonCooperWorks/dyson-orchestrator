@@ -7,7 +7,12 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { computeCookieDomain, computeCookieAttributes, cookieDomainsToClear } from './auth.js';
+import {
+  computeCookieDomain,
+  computeCookieAttributes,
+  cookieDomainsToClear,
+  parseReturnTo,
+} from './auth.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -107,5 +112,46 @@ describe('computeCookieAttributes', () => {
       protocol: 'http:',
     });
     expect(out.find((p) => p.startsWith('Domain='))).toBeUndefined();
+  });
+});
+
+describe('parseReturnTo', () => {
+  // The proxy bounces logged-out browser GETs to
+  // `https://<apex>/?return_to=https://<id>.<apex>/<path>`; this
+  // validator is what stops a hostile param from turning the SPA
+  // into an open redirect.
+
+  const apex = 'swarm.example.com';
+
+  test('accepts the apex itself', () => {
+    expect(parseReturnTo('https://swarm.example.com/foo', apex))
+      .toBe('https://swarm.example.com/foo');
+  });
+
+  test('accepts a single-label subdomain of the apex', () => {
+    expect(parseReturnTo('https://abc123.swarm.example.com/path?x=1', apex))
+      .toBe('https://abc123.swarm.example.com/path?x=1');
+  });
+
+  test('rejects http:// (cookie is Secure; Caddy redirects HTTP→HTTPS)', () => {
+    expect(parseReturnTo('http://swarm.example.com/', apex)).toBeNull();
+  });
+
+  test('rejects multi-label prefixes (sandbox-of-a-sandbox)', () => {
+    expect(parseReturnTo('https://a.b.swarm.example.com/', apex)).toBeNull();
+  });
+
+  test('rejects foreign hosts', () => {
+    expect(parseReturnTo('https://evil.com/', apex)).toBeNull();
+    // Substring-but-not-suffix attack — apex appears in the host but
+    // the registrable domain is evil.com.
+    expect(parseReturnTo('https://swarm.example.com.evil.com/', apex)).toBeNull();
+  });
+
+  test('rejects malformed / missing input', () => {
+    expect(parseReturnTo(null, apex)).toBeNull();
+    expect(parseReturnTo('', apex)).toBeNull();
+    expect(parseReturnTo('not a url', apex)).toBeNull();
+    expect(parseReturnTo('https://swarm.example.com/', null)).toBeNull();
   });
 });

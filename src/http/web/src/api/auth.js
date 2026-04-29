@@ -139,6 +139,69 @@ function clearSessionCookie() {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────
+// `?return_to=<url>` handling.
+//
+// dyson_proxy bounces logged-out browser navigations on a Dyson
+// subdomain (`<id>.<host>`) here with `?return_to=https://<id>.<host>/<path>`.
+// After the OIDC code exchange below the SPA navigates the browser to
+// that URL, by which point the parent-domain session cookie is set, so
+// the proxy can authenticate the request and serve the Dyson UI.
+//
+// The validator below is the SPA-side counterpart of
+// `origin_host_matches` in `src/http/dyson_proxy.rs`: only HTTPS, and
+// only the configured apex or a single-label subdomain of it.  Auth0
+// won't redirect to anywhere we haven't allowlisted, but the final
+// navigation here happens client-side AFTER the IdP roundtrip — an
+// open redirect would still be possible if we just trusted the query
+// value.
+// ──────────────────────────────────────────────────────────────────
+
+// Pure helper — exported for tests.  Returns the canonical URL string
+// to navigate to post-login, or null if the candidate is missing,
+// malformed, off-protocol, or off-host.  `apex` is the swarm apex
+// hostname (e.g. `swarm.example.com`).
+export function parseReturnTo(raw, apex) {
+  if (!raw || !apex) return null;
+  let parsed;
+  try { parsed = new URL(raw); } catch { return null; }
+  // HTTPS-only.  Caddy redirects HTTP → HTTPS in production, and the
+  // session cookie is `Secure`, so an http://… return_to could never
+  // carry a usable session anyway.
+  if (parsed.protocol !== 'https:') return null;
+  const host = parsed.hostname;
+  if (host === apex) return parsed.toString();
+  // Exactly one label in front of the apex — same shape rule the
+  // server enforces, so we can't be talked into navigating to
+  // `evil.<apex>.evil.com` or `a.b.<apex>` (a sandbox-of-a-sandbox).
+  if (!host.endsWith(`.${apex}`)) return null;
+  const prefix = host.slice(0, host.length - apex.length - 1);
+  if (!prefix || prefix.includes('.')) return null;
+  return parsed.toString();
+}
+
+// Read `?return_to=<url>` from the current URL and validate it against
+// `window.location.hostname`.  Returns the canonical URL or null.
+function readReturnToFromQuery() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return parseReturnTo(params.get('return_to'), window.location.hostname);
+  } catch {
+    return null;
+  }
+}
+
+// Strip `?return_to=…` (and any other query) from the address bar so a
+// reload doesn't re-trigger the navigation.  Mirrors the cleanup
+// `handleCallback()` does after `?code=&state=`.
+function clearReturnToFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.replaceState(null, '', url.toString());
+  } catch { /* non-DOM test env */ }
+}
+
 function readPending() {
   try {
     const raw = sessionStorage.getItem(PENDING_KEY);
@@ -207,14 +270,23 @@ function redirectUri() {
   return `${window.location.origin}/`;
 }
 
-async function startAuthorizationFlow(cfg, discovery) {
+async function startAuthorizationFlow(cfg, discovery, opts = {}) {
   const verifier = randomString(32);
   const challenge = await pkceChallenge(verifier);
   const state = randomString(16);
+  // Two flavours of returnTo survive the IdP roundtrip:
+  //   - returnToUrl: a fully-qualified, validated apex/subdomain URL
+  //     (set when dyson_proxy bounced us here with `?return_to=…`).
+  //     After token exchange we do a real `window.location.assign()`
+  //     so the browser carries the parent-domain session cookie to
+  //     the Dyson subdomain.
+  //   - returnTo: the in-app hash route (the historical case).  Used
+  //     only when there's no cross-origin URL to honour.
   writePending({
     verifier,
     state,
     returnTo: window.location.hash || '#/',
+    returnToUrl: opts.returnToUrl || null,
     issuedAt: Date.now(),
   });
 
@@ -267,6 +339,21 @@ async function handleCallback(cfg, discovery) {
   }
   const tokens = await r.json();
   writeTokens(toStorageShape(tokens));
+
+  // If dyson_proxy bounced us here with a return_to URL, the cookie
+  // we just stamped (Domain=<apex>) is now valid for that origin —
+  // navigate the browser there and the Dyson subdomain will
+  // authenticate the next request.  We re-validate against the
+  // current apex on the way out as belt-and-braces in case
+  // sessionStorage was tampered with between writePending and now.
+  if (pending.returnToUrl) {
+    const safe = parseReturnTo(pending.returnToUrl, window.location.hostname);
+    if (safe) {
+      window.location.assign(safe);
+      // Yield control; the navigation aborts the rest of bootstrap.
+      return new Promise(() => {});
+    }
+  }
 
   // Strip ?code=&state= from the URL bar so a refresh doesn't re-trigger
   // exchange (and so deep-link hashes survive).
@@ -359,6 +446,12 @@ export async function bootstrapAuth() {
 
   const discovery = await discoverIssuer(cfg.issuer);
 
+  // Snapshot any `?return_to=<url>` ahead of token discovery so the
+  // value survives the storage reads/writes below.  dyson_proxy puts
+  // it there when bouncing a logged-out browser navigation off a
+  // Dyson subdomain.
+  const returnToUrl = readReturnToFromQuery();
+
   let tokens = readTokens();
   if (!tokens) {
     tokens = await handleCallback(cfg, discovery);
@@ -367,9 +460,21 @@ export async function bootstrapAuth() {
     tokens = await refreshTokens(cfg, discovery);
   }
   if (!tokens?.access_token) {
-    await startAuthorizationFlow(cfg, discovery);
+    await startAuthorizationFlow(cfg, discovery, { returnToUrl });
     // startAuthorizationFlow navigates away; nothing after this line
     // runs except in tests where the redirect is a no-op stub.
+    return new Promise(() => {});
+  }
+  // Already authed AND landed here with a return_to (e.g. user opened
+  // a Dyson subdomain in a fresh tab while another tab held a live
+  // session).  We still need to stamp the parent-domain cookie before
+  // the navigation because writeTokens only ran on the original auth
+  // tab; setSessionCookie() below covers the refresh path so we can
+  // safely navigate now.
+  if (returnToUrl) {
+    setSessionCookie(tokens.access_token, tokens.expires_at);
+    clearReturnToFromUrl();
+    window.location.assign(returnToUrl);
     return new Promise(() => {});
   }
 
