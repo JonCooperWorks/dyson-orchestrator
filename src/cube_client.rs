@@ -90,37 +90,20 @@ struct SandboxNetwork<'a> {
     /// template also adds.  Symptom when missing: cube TCP SYN to
     /// `dyson.myprivate.network:443` stays in `syn_sent` until the
     /// cubevs session reaper kills it.
+    ///
+    /// Per-instance now: derived from the row's `NetworkPolicy` via
+    /// `crate::network_policy::resolve`.  See that module for the
+    /// profile → wire-shape table.
     #[serde(rename = "allowOut")]
-    allow_out: &'a [&'static str],
+    allow_out: &'a [String],
     /// Mirrors `alwaysDeniedSandboxCIDRs` in CubeNet (`netpolicy.go`).
     /// The eBPF layer always appends these to the deny trie, but
     /// passing them here forces `build_cubevs_context` to return
     /// `Some(...)` and keeps the policy view auditable from the
     /// orchestrator side.
     #[serde(rename = "denyOut")]
-    deny_out: &'a [&'static str],
+    deny_out: &'a [String],
 }
-
-/// `0.0.0.0/0` keeps the eBPF policy in blacklist mode (see
-/// `SandboxNetwork::allow_out`).  `192.168.0.1/32` punches a hole
-/// in the always-denied `192.168.0.0/16` for the cube → host path:
-/// the cube image ships an `/etc/hosts` entry mapping
-/// `dyson.myprivate.network` to `192.168.0.1` (cube-dev gateway IP)
-/// to dodge the host's NAT-hairpin failure when reaching the host's
-/// own public IP.  The eBPF rule is "allow > deny > default-allow",
-/// so the /32 here wins over the /16 deny.
-const DEFAULT_ALLOW_OUT: &[&str] = &["0.0.0.0/0", "192.168.0.1/32"];
-
-/// Default outbound deny list — same as CubeNet's hardcoded
-/// `alwaysDeniedSandboxCIDRs`.  Duplicated here on purpose so swarm's
-/// HTTP payload makes the policy explicit at the CubeAPI boundary.
-const DEFAULT_DENY_OUT: &[&str] = &[
-    "10.0.0.0/8",
-    "127.0.0.0/8",
-    "169.254.0.0/16",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-];
 
 #[derive(Debug, Serialize)]
 struct FromSnapshot<'a> {
@@ -164,10 +147,10 @@ impl CubeClient for HttpCubeClient {
             template_id: &args.template_id,
             env: &args.env,
             from_snapshot: from_snap_path.as_deref().map(|path| FromSnapshot { path }),
-            allow_internet_access: true,
+            allow_internet_access: args.resolved_policy.allow_internet_access,
             network: SandboxNetwork {
-                allow_out: DEFAULT_ALLOW_OUT,
-                deny_out: DEFAULT_DENY_OUT,
+                allow_out: &args.resolved_policy.allow_out,
+                deny_out: &args.resolved_policy.deny_out,
             },
         };
         let url = self.url("/sandboxes");
@@ -456,14 +439,22 @@ mod tests {
         // returns `cubevs_context: None` and the per-ifindex eBPF
         // policy maps are not explicitly populated.
         let env = BTreeMap::new();
+        let allow: Vec<String> = crate::network_policy::DEFAULT_OPEN_ALLOW_OUT
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let deny: Vec<String> = crate::network_policy::DEFAULT_DENY_OUT
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
         let body = CreateBody {
             template_id: "tpl",
             env: &env,
             from_snapshot: None,
             allow_internet_access: true,
             network: SandboxNetwork {
-                allow_out: DEFAULT_ALLOW_OUT,
-                deny_out: DEFAULT_DENY_OUT,
+                allow_out: &allow,
+                deny_out: &deny,
             },
         };
         let v = serde_json::to_value(&body).unwrap();
@@ -517,6 +508,7 @@ mod tests {
                 template_id: "tpl".into(),
                 env,
                 from_snapshot_path: None,
+                resolved_policy: crate::network_policy::ResolvedPolicy::default(),
             })
             .await
             .unwrap();
@@ -537,6 +529,7 @@ mod tests {
                 template_id: "tpl".into(),
                 env: BTreeMap::new(),
                 from_snapshot_path: None,
+                resolved_policy: crate::network_policy::ResolvedPolicy::default(),
             })
             .await
             .unwrap();
@@ -555,6 +548,7 @@ mod tests {
                 template_id: "tpl".into(),
                 env: BTreeMap::new(),
                 from_snapshot_path: None,
+                resolved_policy: crate::network_policy::ResolvedPolicy::default(),
             })
             .await
             .expect_err("400 must error");

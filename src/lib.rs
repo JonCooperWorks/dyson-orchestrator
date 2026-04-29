@@ -11,6 +11,7 @@ pub mod error;
 pub mod http;
 pub mod instance;
 pub mod logging;
+pub mod network_policy;
 pub mod openrouter;
 pub mod policy;
 pub mod probe;

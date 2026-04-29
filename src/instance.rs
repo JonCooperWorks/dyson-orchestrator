@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::SwarmError;
+use crate::network_policy::{self, DnsHostResolver, HostResolver, NetworkPolicy};
 use crate::now_secs;
 use crate::secrets::compose_env;
 use crate::traits::{
@@ -136,6 +137,17 @@ pub struct InstanceService {
     /// entirely so the sweep doesn't fight an operator's manual
     /// override of dyson.json.
     image_gen_defaults: Option<ImageGenDefaults>,
+    /// CIDR of the swarm proxy the dyson agent talks to for `/llm`
+    /// traffic.  Derived from `cfg.cube_facing_addr` at startup; used
+    /// by `network_policy::resolve` for the Airgap and Allowlist
+    /// profiles.  `None` for deployments without `cube_facing_addr`
+    /// — those deployments can still hire `Open` and `Denylist`
+    /// instances; `Airgap` and `Allowlist` will return BadRequest
+    /// at hire time with a clear "set cube_facing_addr" message.
+    llm_cidr: Option<String>,
+    /// DNS resolver for hostname entries in Allowlist/Denylist.
+    /// Production uses `DnsHostResolver`; tests inject a mock.
+    resolver: Arc<dyn HostResolver>,
 }
 
 /// Anything that can push swarm-side identity/task/model state to a
@@ -313,7 +325,27 @@ impl InstanceService {
             // want to suppress it call `with_image_gen_defaults(None)`
             // to keep their `pushed` recordings tight.
             image_gen_defaults: Some(ImageGenDefaults::openrouter_gemini3_image()),
+            llm_cidr: None,
+            resolver: Arc::new(DnsHostResolver),
         }
+    }
+
+    /// Builder-style: stamp the swarm-proxy CIDR derived from
+    /// `cfg.cube_facing_addr` so the network-policy resolver can
+    /// build Airgap / Allowlist allowOut entries.  Pass `None` for
+    /// deployments without a stable cube-facing IP — Airgap and
+    /// Allowlist hires will fail with a clear error in that case.
+    pub fn with_llm_cidr(mut self, cidr: Option<String>) -> Self {
+        self.llm_cidr = cidr;
+        self
+    }
+
+    /// Builder-style: substitute a host resolver.  Production uses
+    /// the default `DnsHostResolver`; tests inject a `BTreeMap`-
+    /// backed mock so they don't depend on real DNS.
+    pub fn with_resolver(mut self, resolver: Arc<dyn HostResolver>) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     /// Builder-style: plug in the dyson reconfigurer so post-create
@@ -564,6 +596,10 @@ impl InstanceService {
                     task: Some(source.task.clone()),
                     env: BTreeMap::new(),
                     ttl_seconds: None,
+                    // Carry the source's network profile through to
+                    // the successor — a binary rotation must NOT
+                    // silently widen egress.
+                    network_policy: source.network_policy.clone(),
                 })
                 .await
                 .map_err(|e| format!("restore: {e}"))?;
@@ -596,6 +632,119 @@ impl InstanceService {
         Ok(())
     }
 
+    /// Change the egress profile on a Live instance.
+    ///
+    /// CubeAPI doesn't expose a runtime PATCH for the eBPF egress
+    /// maps (see the swarm README's "Network policies" section), so
+    /// "live policy change" is implemented as snapshot + restore-with-
+    /// new-policy + destroy(force=true).  The instance ID changes —
+    /// callers must navigate to the new id afterwards — but workspace
+    /// state survives via the snapshot.  Same trade-off the
+    /// binary-rotation sweep already accepts.
+    ///
+    /// Owner-scoped via `get_for_owner`; admin uses `SYSTEM_OWNER`/`"*"`
+    /// to override.  Validates the new policy BEFORE taking a
+    /// snapshot — a malformed CIDR or unresolvable hostname returns
+    /// `BadRequest` and leaves the existing instance untouched.
+    pub async fn change_network_policy(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        snapshot_svc: &crate::snapshot::SnapshotService,
+        new_policy: NetworkPolicy,
+    ) -> Result<CreatedInstance, SwarmError> {
+        // Validate up front.  A bad policy MUST fail before we take a
+        // snapshot — taking a snapshot, then failing the restore, then
+        // having an orphan snapshot row is a worse failure mode than
+        // returning 400 immediately.
+        let _resolved = network_policy::resolve(
+            &new_policy,
+            self.llm_cidr.as_deref(),
+            &*self.resolver,
+        )
+        .await?;
+
+        // Owner-scoped lookup of the source row.  SYSTEM_OWNER bypasses.
+        let source = self
+            .instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        // No-op: caller asked for the same policy that's already on
+        // the row.  Refuse so the SPA doesn't accidentally churn a
+        // sandbox for nothing.  Compare via JSON serialisation to
+        // catch payload-level equivalence (e.g. different CIDR order
+        // would still be the same policy semantically — but we keep
+        // the simpler structural check here and let the SPA dedupe).
+        if source.network_policy == new_policy {
+            return Err(SwarmError::BadRequest(
+                "instance already has this network policy".into(),
+            ));
+        }
+        let sandbox_id = source.cube_sandbox_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+            SwarmError::BadRequest(
+                "instance has no live cube sandbox; change-network requires a Live row".into(),
+            )
+        })?;
+
+        tracing::info!(
+            instance = %source.id,
+            from_policy = %source.network_policy.kind_str(),
+            to_policy = %new_policy.kind_str(),
+            "change-network: starting snapshot+restore+destroy pipeline"
+        );
+
+        // Phase 1: snapshot.
+        let snap = snapshot_svc
+            .snapshot(SYSTEM_OWNER, &source.id)
+            .await?;
+        tracing::info!(
+            instance = %source.id,
+            snapshot = %snap.id,
+            sandbox = %sandbox_id,
+            "change-network: snapshot taken"
+        );
+
+        // Phase 2: restore with the new policy.  Same pattern as
+        // rotate_one — owner_id, name, task, source_instance_id all
+        // carried; ttl_seconds intentionally None (don't leak the
+        // source's deadline).
+        let restored = self
+            .restore(&source.owner_id, RestoreRequest {
+                template_id: source.template_id.clone(),
+                snapshot_path: std::path::PathBuf::from(&snap.path),
+                source_instance_id: Some(source.id.clone()),
+                name: Some(source.name.clone()),
+                task: Some(source.task.clone()),
+                env: BTreeMap::new(),
+                ttl_seconds: None,
+                network_policy: new_policy.clone(),
+            })
+            .await?;
+        tracing::info!(
+            instance = %source.id,
+            successor = %restored.id,
+            "change-network: restore landed Live with new policy"
+        );
+
+        // Pin source → successor.  Re-runnability hint same as the
+        // rotation sweep: a crash between this stamp and the destroy
+        // leaves a marker so a future operator can reconcile.
+        self.instances
+            .set_rotated_to(&source.id, &restored.id)
+            .await?;
+
+        // Phase 3: destroy the source (force=true so a dead cube
+        // doesn't strand the row Live forever).
+        self.destroy(&source.owner_id, &source.id, true).await?;
+        tracing::info!(
+            instance = %source.id,
+            successor = %restored.id,
+            "change-network: source destroyed"
+        );
+        Ok(restored)
+    }
+
     pub async fn create(
         &self,
         owner_id: &str,
@@ -626,6 +775,16 @@ impl InstanceService {
         let name = req.name.clone().unwrap_or_default();
         let task = req.task.clone().unwrap_or_default();
 
+        // Resolve the network policy BEFORE inserting the row so a
+        // bad CIDR / missing LLM-CIDR / unresolvable hostname surfaces
+        // as 400 BadRequest before any persistent state lands.
+        let resolved_policy = network_policy::resolve(
+            &req.network_policy,
+            self.llm_cidr.as_deref(),
+            &*self.resolver,
+        )
+        .await?;
+
         // Insert the instance row first so the FK target exists; mint the
         // proxy token; then call Cube. If Cube fails we mark the row
         // destroyed to keep state consistent.
@@ -646,6 +805,8 @@ impl InstanceService {
             created_at: now,
             destroyed_at: None,
             rotated_to: None,
+            network_policy: req.network_policy.clone(),
+            network_policy_cidrs: resolved_policy.allow_out.clone(),
         };
         self.instances.create(row).await?;
 
@@ -668,6 +829,7 @@ impl InstanceService {
                 template_id: req.template_id,
                 env,
                 from_snapshot_path: None,
+                resolved_policy,
             })
             .await
         {
@@ -1000,6 +1162,15 @@ impl InstanceService {
             Vec::new()
         };
 
+        // Resolve policy first — same as `create`.  Bad input fails
+        // before anything else lands.
+        let resolved_policy = network_policy::resolve(
+            &req.network_policy,
+            self.llm_cidr.as_deref(),
+            &*self.resolver,
+        )
+        .await?;
+
         let restored_name = req.name.clone().unwrap_or_default();
         let restored_task = req.task.clone().unwrap_or_default();
         let row = InstanceRow {
@@ -1019,6 +1190,8 @@ impl InstanceService {
             created_at: now,
             destroyed_at: None,
             rotated_to: None,
+            network_policy: req.network_policy.clone(),
+            network_policy_cidrs: resolved_policy.allow_out.clone(),
         };
         self.instances.create(row).await?;
 
@@ -1051,6 +1224,7 @@ impl InstanceService {
                 template_id: req.template_id,
                 env,
                 from_snapshot_path: Some(req.snapshot_path),
+                resolved_policy,
             })
             .await
         {
@@ -1097,6 +1271,11 @@ pub struct CreateRequest {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub ttl_seconds: Option<i64>,
+    /// Per-instance egress profile.  Default `Open` matches the
+    /// pre-feature wire shape — existing callers don't need to change.
+    /// See [`crate::network_policy`] for the four profiles.
+    #[serde(default)]
+    pub network_policy: NetworkPolicy,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1116,6 +1295,13 @@ pub struct RestoreRequest {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub ttl_seconds: Option<i64>,
+    /// Per-instance egress profile, carried from the source row by
+    /// `SnapshotService::restore` and the binary-rotation sweep.  A
+    /// raw HTTP `POST /v1/instances/:id/restore` from a CLI with no
+    /// policy specified gets `Open` (the safe default for legacy
+    /// flows that don't know about network profiles).
+    #[serde(default)]
+    pub network_policy: NetworkPolicy,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1160,6 +1346,7 @@ mod tests {
         template_id: String,
         env: BTreeMap<String, String>,
         from_snapshot: Option<std::path::PathBuf>,
+        resolved_policy: crate::network_policy::ResolvedPolicy,
     }
 
     #[derive(Default)]
@@ -1209,11 +1396,13 @@ mod tests {
                 template_id: args.template_id.clone(),
                 env: args.env.clone(),
                 from_snapshot: args.from_snapshot_path.clone(),
+                resolved_policy: args.resolved_policy.clone(),
             };
             *self.last_create.lock().unwrap() = Some(CapturedCreate {
                 template_id: args.template_id,
                 env: args.env,
                 from_snapshot: args.from_snapshot_path,
+                resolved_policy: args.resolved_policy,
             });
             self.creates.lock().unwrap().push(captured);
             Ok(SandboxInfo {
@@ -1305,6 +1494,7 @@ mod tests {
                 task: Some("Watch foo/bar PRs and comment on style".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1332,6 +1522,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1359,6 +1550,7 @@ mod tests {
                 task: None,
                 env: caller,
                 ttl_seconds: Some(60),
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1400,6 +1592,7 @@ mod tests {
                 task: None,
             env: caller,
             ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
         })
         .await
         .unwrap();
@@ -1417,6 +1610,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1455,6 +1649,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1493,6 +1688,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1507,6 +1703,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1581,6 +1778,7 @@ mod tests {
             task: Some("review prs".into()),
             env: env_with_model(),
             ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
         })
         .await
         .unwrap();
@@ -1665,6 +1863,7 @@ mod tests {
             task: Some("review prs".into()),
             env: env_with_model(),
             ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
         })
         .await
         .unwrap();
@@ -1717,6 +1916,7 @@ mod tests {
                 name: None, task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1726,6 +1926,7 @@ mod tests {
                 name: None, task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1795,6 +1996,7 @@ mod tests {
             name: None, task: None,
             env: env_with_model(),
             ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
         })
         .await
         .unwrap();
@@ -1875,6 +2077,101 @@ mod tests {
         (isvc, ssvc, cube, instances, users, recorder)
     }
 
+    /// `BTreeMap`-backed mock resolver for the network-policy tests.
+    /// `with(&[("github.com", &["140.82.121.4"])])` builds one with
+    /// known A-records; an unmapped hostname returns
+    /// `HostUnresolvable`.  Same shape as the resolver used in
+    /// network_policy::tests, duplicated here so the two test modules
+    /// don't have to import each other's private types.
+    #[derive(Default)]
+    struct PolicyMockResolver {
+        map: std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>>,
+    }
+
+    impl PolicyMockResolver {
+        fn with(map: &[(&str, &[&str])]) -> Arc<Self> {
+            let mut m = std::collections::BTreeMap::new();
+            for (host, ips) in map {
+                m.insert(
+                    (*host).to_owned(),
+                    ips.iter().map(|ip| format!("{ip}/32")).collect(),
+                );
+            }
+            Arc::new(Self {
+                map: std::sync::Mutex::new(m),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::network_policy::HostResolver for PolicyMockResolver {
+        async fn resolve_ipv4(
+            &self,
+            host: &str,
+        ) -> Result<Vec<String>, crate::network_policy::PolicyError> {
+            self.map
+                .lock()
+                .unwrap()
+                .get(host)
+                .cloned()
+                .ok_or_else(|| {
+                    crate::network_policy::PolicyError::HostUnresolvable(host.to_owned())
+                })
+        }
+    }
+
+    /// Same as `build_with_snapshot`, but stamps an LLM CIDR and a
+    /// configurable host resolver on the InstanceService so the
+    /// network-policy resolver path is exercised.
+    async fn build_with_snapshot_and_policy(
+        llm_cidr: Option<&str>,
+        resolver: Arc<dyn crate::network_policy::HostResolver>,
+    ) -> (
+        Arc<InstanceService>,
+        Arc<SnapshotService>,
+        Arc<MockCube>,
+        Arc<dyn InstanceStore>,
+        Arc<dyn UserStore>,
+        Arc<RecordingReconfigurer>,
+    ) {
+        let pool = open_in_memory().await.unwrap();
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
+            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
+        );
+        std::mem::forget(keys_tmp);
+        let users: Arc<dyn UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+        );
+        let isvc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances.clone(),
+                secrets,
+                tokens,
+                "https://swarm.test/llm",
+            )
+            .with_reconfigurer(recorder.clone())
+            .with_llm_cidr(llm_cidr.map(str::to_owned))
+            .with_resolver(resolver),
+        );
+        let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let ssvc = Arc::new(SnapshotService::new(
+            cube.clone(),
+            instances.clone(),
+            snaps,
+            backup,
+            isvc.clone(),
+        ));
+        (isvc, ssvc, cube, instances, users, recorder)
+    }
+
     /// Seed a user row so `instance.create(owner=...)` doesn't trip
     /// the FK on `instances.owner_id`.  The default `legacy` user is
     /// auto-seeded by migration 0002, but rotation tests that pin
@@ -1908,6 +2205,7 @@ mod tests {
             name: None, task: None,
             env: env_with_model(),
             ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
         })
         .await
         .unwrap();
@@ -1944,6 +2242,7 @@ mod tests {
                 task: Some("alpha task".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -1954,6 +2253,7 @@ mod tests {
                 task: Some("beta task".into()),
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -2017,6 +2317,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -2061,6 +2362,8 @@ mod tests {
             created_at: 0,
             destroyed_at: None,
             rotated_to: None,
+                network_policy: crate::network_policy::NetworkPolicy::Open,
+                network_policy_cidrs: Vec::new(),
         };
         instances.create(row).await.unwrap();
 
@@ -2088,6 +2391,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -2124,6 +2428,7 @@ mod tests {
             name: None, task: None,
             env: env_with_model(),
             ttl_seconds: None,
+            network_policy: NetworkPolicy::default(),
         })
         .await
         .unwrap();
@@ -2143,5 +2448,448 @@ mod tests {
             snapshots_before,
             "flag-off sweep must not call cube.snapshot_sandbox"
         );
+    }
+
+    // ---- Network-policy tests --------------------------------------
+    //
+    // Cover the four create-time profile arms, the change-network
+    // pipeline (snapshot+restore+destroy), and the auth boundaries
+    // (owner-scoped + admin bypass).  The PolicyMockResolver is
+    // shared across these so hostname-allowlist scenarios don't
+    // depend on real DNS.
+
+    #[tokio::test]
+    async fn create_passes_open_policy_to_cube_byte_identical_to_legacy_shape() {
+        // The Open profile MUST emit the same wire bytes as the
+        // pre-feature hardcoded body — we don't want a "harmless
+        // refactor" to silently change the cube's egress posture for
+        // every new instance on every existing deploy.
+        let (isvc, _ssvc, cube, _instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("192.168.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        isvc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: None,
+            task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+            network_policy: NetworkPolicy::Open,
+        })
+        .await
+        .unwrap();
+        let captured = cube.last_create();
+        assert!(captured.resolved_policy.allow_internet_access);
+        assert_eq!(
+            captured.resolved_policy.allow_out,
+            vec!["0.0.0.0/0", "192.168.0.1/32"]
+        );
+        assert_eq!(
+            captured.resolved_policy.deny_out,
+            vec![
+                "10.0.0.0/8",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn create_passes_airgap_policy_to_cube() {
+        let (isvc, _ssvc, cube, _instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.20.30.40/32"), Arc::new(PolicyMockResolver::default())).await;
+        isvc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: None,
+            task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+            network_policy: NetworkPolicy::Airgap,
+        })
+        .await
+        .unwrap();
+        let captured = cube.last_create();
+        assert!(!captured.resolved_policy.allow_internet_access);
+        assert_eq!(captured.resolved_policy.allow_out, vec!["10.20.30.40/32"]);
+    }
+
+    #[tokio::test]
+    async fn create_passes_allowlist_policy_with_resolved_hostnames_to_cube() {
+        let resolver = PolicyMockResolver::with(&[("github.com", &["140.82.121.4"])]);
+        let (isvc, _ssvc, cube, _instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), resolver).await;
+        isvc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: None,
+            task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+            network_policy: NetworkPolicy::Allowlist {
+                entries: vec!["github.com".into(), "8.8.8.8/32".into()],
+            },
+        })
+        .await
+        .unwrap();
+        let captured = cube.last_create();
+        assert!(!captured.resolved_policy.allow_internet_access);
+        assert!(captured.resolved_policy.allow_out.contains(&"10.0.0.1/32".to_owned()));
+        assert!(captured.resolved_policy.allow_out.contains(&"140.82.121.4/32".to_owned()));
+        assert!(captured.resolved_policy.allow_out.contains(&"8.8.8.8/32".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn create_passes_denylist_policy_appending_to_default_deny() {
+        let resolver = PolicyMockResolver::with(&[("evil.example", &["1.2.3.4"])]);
+        let (isvc, _ssvc, cube, _instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), resolver).await;
+        isvc.create("legacy", CreateRequest {
+            template_id: "tpl".into(),
+            name: None,
+            task: None,
+            env: env_with_model(),
+            ttl_seconds: None,
+            network_policy: NetworkPolicy::Denylist {
+                entries: vec!["evil.example".into(), "5.6.7.0/24".into()],
+            },
+        })
+        .await
+        .unwrap();
+        let captured = cube.last_create();
+        assert!(captured.resolved_policy.allow_internet_access);
+        // Default deny still present.
+        assert!(captured.resolved_policy.deny_out.iter().any(|c| c == "10.0.0.0/8"));
+        // User entries (post-DNS) appended.
+        assert!(captured.resolved_policy.deny_out.iter().any(|c| c == "1.2.3.4/32"));
+        assert!(captured.resolved_policy.deny_out.iter().any(|c| c == "5.6.7.0/24"));
+    }
+
+    #[tokio::test]
+    async fn create_persists_network_policy_on_row() {
+        let (isvc, _ssvc, _cube, instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("192.168.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let created = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Airgap,
+            })
+            .await
+            .unwrap();
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(row.network_policy, NetworkPolicy::Airgap);
+        assert_eq!(row.network_policy_cidrs, vec!["192.168.0.1/32"]);
+    }
+
+    #[tokio::test]
+    async fn create_airgap_without_llm_cidr_returns_bad_request() {
+        // Operator hasn't set cube_facing_addr.  Airgap and Allowlist
+        // can't function without an LLM hop CIDR — fail loudly at hire
+        // time, not silently at first chat turn.
+        let (isvc, _ssvc, _cube, _instances, _users, _recorder) =
+            build_with_snapshot_and_policy(None, Arc::new(PolicyMockResolver::default())).await;
+        let err = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Airgap,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn create_with_invalid_cidr_returns_bad_request() {
+        let (isvc, _ssvc, _cube, _instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let err = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Allowlist {
+                    entries: vec!["1.2.3.4/99".into()],
+                },
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn restore_carries_source_network_policy_through() {
+        // Hire under Airgap, then drive a manual restore through
+        // SnapshotService.  The new row + the cube call must inherit
+        // the source's policy verbatim — silently widening egress
+        // through restore would defeat the whole feature.
+        let (isvc, ssvc, cube, instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let src = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Airgap,
+            })
+            .await
+            .unwrap();
+        let snap = ssvc.snapshot("legacy", &src.id).await.unwrap();
+        let restored = ssvc
+            .restore("legacy", &snap.id, None, BTreeMap::new())
+            .await
+            .unwrap();
+
+        let row = instances.get(&restored.id).await.unwrap().unwrap();
+        assert_eq!(row.network_policy, NetworkPolicy::Airgap);
+        let captured = cube.last_create();
+        assert!(!captured.resolved_policy.allow_internet_access);
+        assert_eq!(captured.resolved_policy.allow_out, vec!["10.0.0.1/32"]);
+    }
+
+    #[tokio::test]
+    async fn rotate_binary_preserves_network_policy() {
+        // The rotation sweep must not silently widen egress on any
+        // existing instance.  Hire on Allowlist with a hostname,
+        // rotate, assert the successor inherits Allowlist + the same
+        // resolved CIDR set.
+        let resolver = PolicyMockResolver::with(&[("example.com", &["93.184.216.34"])]);
+        let (isvc, ssvc, cube, instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), resolver).await;
+        let src = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl-old".into(),
+                name: Some("alpha".into()),
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Allowlist {
+                    entries: vec!["example.com".into()],
+                },
+            })
+            .await
+            .unwrap();
+
+        let report = isvc.rotate_binary_all(&ssvc, "tpl-new").await.unwrap();
+        assert_eq!(report.rotated, 1);
+
+        let old = instances.get(&src.id).await.unwrap().unwrap();
+        let successor_id = old.rotated_to.as_deref().unwrap();
+        let successor = instances.get(successor_id).await.unwrap().unwrap();
+        assert_eq!(
+            successor.network_policy,
+            NetworkPolicy::Allowlist {
+                entries: vec!["example.com".to_owned()],
+            }
+        );
+        // Cube saw two creates: the original and the successor.  The
+        // successor's resolved policy still carries the LLM CIDR + the
+        // hostname's resolved CIDR.
+        let captured = cube.last_create();
+        assert!(captured.resolved_policy.allow_out.contains(&"93.184.216.34/32".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn change_network_takes_snapshot_restores_with_new_policy_destroys_source() {
+        // The full change-network pipeline.  Hire on Open, change to
+        // Airgap, verify:
+        //   * cube.snapshotted records the source.
+        //   * a new row exists with the new policy.
+        //   * the old row is Destroyed and carries `rotated_to`.
+        //   * the cube saw a second create call carrying the Airgap
+        //     resolved policy (single LLM CIDR, no internet).
+        let (isvc, ssvc, cube, instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let src = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("alpha".into()),
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+            })
+            .await
+            .unwrap();
+
+        let new_inst = isvc
+            .change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Airgap)
+            .await
+            .unwrap();
+        assert_ne!(new_inst.id, src.id);
+
+        // Source destroyed + pinned to successor.
+        let old = instances.get(&src.id).await.unwrap().unwrap();
+        assert_eq!(old.status, InstanceStatus::Destroyed);
+        assert_eq!(old.rotated_to.as_deref(), Some(new_inst.id.as_str()));
+
+        // Successor has the new policy.
+        let new_row = instances.get(&new_inst.id).await.unwrap().unwrap();
+        assert_eq!(new_row.network_policy, NetworkPolicy::Airgap);
+        assert_eq!(new_row.network_policy_cidrs, vec!["10.0.0.1/32"]);
+
+        // Cube saw exactly one snapshot of the source.
+        assert_eq!(cube.snapshotted.lock().unwrap().len(), 1);
+        // Cube saw the successor's create with the Airgap shape.
+        let last = cube.last_create();
+        assert!(!last.resolved_policy.allow_internet_access);
+        assert_eq!(last.resolved_policy.allow_out, vec!["10.0.0.1/32"]);
+    }
+
+    #[tokio::test]
+    async fn change_network_preserves_owner_and_identity() {
+        // Owner_id, name, task all carried through.  A change-network
+        // that re-tenanted the dyson would be a serious bug.
+        let (isvc, ssvc, _cube, instances, users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        seed_user(&users, "alice").await;
+        let src = isvc
+            .create("alice", CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("alice's reviewer".into()),
+                task: Some("review prs".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+            })
+            .await
+            .unwrap();
+        let new_inst = isvc
+            .change_network_policy("alice", &src.id, &ssvc, NetworkPolicy::Airgap)
+            .await
+            .unwrap();
+        let new_row = instances.get(&new_inst.id).await.unwrap().unwrap();
+        assert_eq!(new_row.owner_id, "alice");
+        assert_eq!(new_row.name, "alice's reviewer");
+        assert_eq!(new_row.task, "review prs");
+    }
+
+    #[tokio::test]
+    async fn change_network_owner_scoped_returns_not_found_for_wrong_tenant() {
+        let (isvc, ssvc, _cube, _instances, users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        seed_user(&users, "alice").await;
+        seed_user(&users, "mallory").await;
+        let alice_inst = isvc
+            .create("alice", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+            })
+            .await
+            .unwrap();
+        let err = isvc
+            .change_network_policy("mallory", &alice_inst.id, &ssvc, NetworkPolicy::Airgap)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn change_network_admin_bypass_with_system_owner() {
+        // SYSTEM_OWNER ("*") is the admin bypass — same precedent as
+        // the rotation sweep and the TTL loop.  Lets an admin change
+        // a tenant's policy without impersonating them.
+        let (isvc, ssvc, _cube, instances, users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        seed_user(&users, "alice").await;
+        let alice_inst = isvc
+            .create("alice", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+            })
+            .await
+            .unwrap();
+        let new_inst = isvc
+            .change_network_policy(SYSTEM_OWNER, &alice_inst.id, &ssvc, NetworkPolicy::Airgap)
+            .await
+            .unwrap();
+        // Owner_id is preserved (NOT re-tenanted to SYSTEM_OWNER).
+        let new_row = instances.get(&new_inst.id).await.unwrap().unwrap();
+        assert_eq!(new_row.owner_id, "alice");
+        assert_eq!(new_row.network_policy, NetworkPolicy::Airgap);
+    }
+
+    #[tokio::test]
+    async fn change_network_invalid_cidr_returns_bad_request_and_does_not_destroy() {
+        // Bad input MUST fail before snapshot + restore + destroy.  A
+        // mid-pipeline failure that destroyed the source would lose
+        // workspace state.
+        let (isvc, ssvc, cube, instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let src = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+            })
+            .await
+            .unwrap();
+        let snapshots_before = cube.snapshotted.lock().unwrap().len();
+
+        let err = isvc
+            .change_network_policy(
+                "legacy",
+                &src.id,
+                &ssvc,
+                NetworkPolicy::Allowlist {
+                    entries: vec!["1.2.3.4/99".into()],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::BadRequest(_)));
+
+        // No snapshot taken; source row untouched.
+        assert_eq!(cube.snapshotted.lock().unwrap().len(), snapshots_before);
+        let row = instances.get(&src.id).await.unwrap().unwrap();
+        assert_eq!(row.status, InstanceStatus::Live);
+        assert_eq!(row.network_policy, NetworkPolicy::Open);
+    }
+
+    #[tokio::test]
+    async fn change_network_no_op_when_policy_unchanged() {
+        // Caller asked for the same policy that's already on the
+        // row.  Refuse — the SPA should never churn a sandbox for
+        // nothing.
+        let (isvc, ssvc, cube, _instances, _users, _recorder) =
+            build_with_snapshot_and_policy(Some("10.0.0.1/32"), Arc::new(PolicyMockResolver::default())).await;
+        let src = isvc
+            .create("legacy", CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+            })
+            .await
+            .unwrap();
+        let snapshots_before = cube.snapshotted.lock().unwrap().len();
+        let err = isvc
+            .change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Open)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::BadRequest(_)));
+        assert_eq!(cube.snapshotted.lock().unwrap().len(), snapshots_before);
     }
 }

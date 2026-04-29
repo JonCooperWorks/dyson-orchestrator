@@ -3,10 +3,42 @@ use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
+use crate::network_policy::NetworkPolicy;
 use crate::now_secs;
 use crate::traits::{
     InstanceRow, InstanceStatus, InstanceStore, ListFilter, ProbeResult,
 };
+
+/// Decode the three on-disk policy columns into the in-memory
+/// `NetworkPolicy` enum + the resolved CIDR vec.  Forward-compat:
+/// unknown kinds (a future migration adds a new profile) collapse to
+/// `Open` so old swarm binaries don't crash on rows newer binaries
+/// wrote.
+fn decode_policy(kind: &str, entries_csv: &str, cidrs_csv: &str) -> (NetworkPolicy, Vec<String>) {
+    let entries: Vec<String> = csv_to_vec(entries_csv);
+    let cidrs: Vec<String> = csv_to_vec(cidrs_csv);
+    // Unknown kinds collapse to `Open` — same as the explicit
+    // `"open"` arm — so an old swarm binary doesn't crash on rows
+    // a future binary wrote with a new profile.
+    let policy = match kind {
+        "airgap" => NetworkPolicy::Airgap,
+        "allowlist" => NetworkPolicy::Allowlist { entries },
+        "denylist" => NetworkPolicy::Denylist { entries },
+        _ => NetworkPolicy::Open,
+    };
+    (policy, cidrs)
+}
+
+fn csv_to_vec(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split(',').map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect()
+}
+
+fn vec_to_csv(v: &[String]) -> String {
+    v.join(",")
+}
 
 #[derive(Debug, Clone)]
 pub struct SqlxInstanceStore {
@@ -32,6 +64,10 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
         ),
         None => None,
     };
+    let kind: String = row.try_get("network_policy_kind").map_err(map_sqlx)?;
+    let entries_csv: String = row.try_get("network_policy_entries").map_err(map_sqlx)?;
+    let cidrs_csv: String = row.try_get("network_policy_cidrs").map_err(map_sqlx)?;
+    let (network_policy, network_policy_cidrs) = decode_policy(&kind, &entries_csv, &cidrs_csv);
     Ok(InstanceRow {
         id: row.try_get("id").map_err(map_sqlx)?,
         owner_id: row.try_get("owner_id").map_err(map_sqlx)?,
@@ -49,6 +85,8 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow, StoreEr
         created_at: row.try_get("created_at").map_err(map_sqlx)?,
         destroyed_at: row.try_get("destroyed_at").map_err(map_sqlx)?,
         rotated_to: row.try_get("rotated_to").map_err(map_sqlx)?,
+        network_policy,
+        network_policy_cidrs,
     })
 }
 
@@ -59,12 +97,16 @@ impl InstanceStore for SqlxInstanceStore {
             Some(p) => Some(serde_json::to_string(p).map_err(|e| StoreError::Io(e.to_string()))?),
             None => None,
         };
+        let kind = row.network_policy.kind_str().to_owned();
+        let entries_csv = vec_to_csv(row.network_policy.entries());
+        let cidrs_csv = vec_to_csv(&row.network_policy_cidrs);
         sqlx::query(
             "INSERT INTO instances \
              (id, owner_id, name, task, cube_sandbox_id, template_id, status, bearer_token, \
               pinned, expires_at, last_active_at, last_probe_at, last_probe_status, \
-              created_at, destroyed_at, rotated_to) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              created_at, destroyed_at, rotated_to, \
+              network_policy_kind, network_policy_entries, network_policy_cidrs) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.owner_id)
@@ -82,6 +124,9 @@ impl InstanceStore for SqlxInstanceStore {
         .bind(row.created_at)
         .bind(row.destroyed_at)
         .bind(&row.rotated_to)
+        .bind(kind)
+        .bind(entries_csv)
+        .bind(cidrs_csv)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -309,6 +354,8 @@ mod tests {
             created_at: 50,
             destroyed_at: None,
             rotated_to: None,
+                network_policy: crate::network_policy::NetworkPolicy::Open,
+                network_policy_cidrs: Vec::new(),
         }
     }
 

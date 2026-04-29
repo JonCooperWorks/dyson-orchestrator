@@ -69,3 +69,52 @@ double-rotation, no orphaned successors.
 A failed snapshot (cube unreachable, sandbox dead) leaves the source
 row Live and the failure surfaces in `RotateReport.failed`; the next
 sweep retries the full pipeline.
+
+### Network policies
+
+Every dyson is hired with one of four egress profiles, mapped to
+CubeAPI's `allow_internet_access` + `network.allowOut` / `denyOut`:
+
+| Profile     | UI label                          | What the cube enforces |
+|-------------|-----------------------------------|------------------------|
+| `open`      | "Open (full internet)"            | Pre-feature default — full internet, RFC1918+linklocal denied. |
+| `airgap`    | "Air-gapped (LLM only)"           | No egress except the swarm `/llm` proxy. |
+| `allowlist` | "Allowlist (only these networks)" | LLM proxy + listed CIDRs/hostnames. Hostnames resolve at hire time. |
+| `denylist`  | "Denylist (block these networks)" | Full internet minus listed CIDRs/hostnames. |
+
+The new-instance page (`#/new`) carries a profile picker.  Existing
+rows backfill to `Open` (no behaviour change for instances created
+before this feature shipped).
+
+#### Hostnames in entries
+
+Allowlist and Denylist accept hostnames (`github.com`).  Swarm DNS-
+resolves at hire time using the host's resolver (`tokio::net::lookup_host`,
+which honours systemd-resolved / `/etc/resolv.conf`).  The resolved
+IPv4 set is what the cube enforces; the row preserves both the raw
+entry and the resolved CIDRs so the SPA can show "you typed
+`github.com` — cube enforces `140.82.121.4/32`."
+
+DNS staleness is the trade-off: a hostname's IPs rotate (CDNs), but
+the cube's eBPF map is immutable for the instance's lifetime.  Re-hire
+to refresh the resolution.
+
+#### Live policy change
+
+CubeAPI doesn't expose a runtime PATCH for the eBPF egress maps.
+"Change network access" on the detail page snapshots the dyson,
+restores it onto a new sandbox with the new policy, and destroys the
+source — same model as the binary-rotation sweep.  Workspace state
+survives via the snapshot, but **the instance ID changes** and the
+old `<id>.<hostname>` URL 404s afterwards.  The SPA navigates to the
+successor automatically.
+
+Authorisation: instance owner OR admin (`SYSTEM_OWNER` / `"*"`).
+
+#### Configuration requirement
+
+`Airgap` and `Allowlist` need an LLM-proxy CIDR — set
+`cube_facing_addr` to an IPv4 (e.g. `"192.168.0.1:8080"`) in
+`swarm.toml`.  Hires using those profiles return 400 with a clear
+config-help message when it's missing.  `Open` and `Denylist` work
+without it (they include `0.0.0.0/0`).

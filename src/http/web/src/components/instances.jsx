@@ -198,6 +198,13 @@ function NewInstanceForm() {
     auth?.config?.default_template_id || ''
   );
   const [ttlSeconds, setTtlSeconds] = React.useState('');
+  // Network policy state.  Default Open matches the pre-feature
+  // behaviour and the row-side default — operators don't have to
+  // pick anything.  See src/network_policy.rs for the four profiles.
+  const [networkPolicy, setNetworkPolicy] = React.useState({
+    kind: 'open',
+    entries: [],
+  });
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
@@ -227,6 +234,11 @@ function NewInstanceForm() {
       if (task.trim()) req.task = task.trim();
       const ttl = ttlSeconds.trim() ? Number(ttlSeconds) : null;
       if (Number.isFinite(ttl) && ttl > 0) req.ttl_seconds = ttl;
+      // The wire shape mirrors the Rust serde-tagged enum:
+      //   { kind: "open" } | { kind: "airgap" }
+      //   | { kind: "allowlist", entries: [...] }
+      //   | { kind: "denylist", entries: [...] }
+      req.network_policy = serializeNetworkPolicy(networkPolicy);
 
       setPhase('provisioning');
       // Server blocks until the sandbox is Live AND Caddy's TLS cert
@@ -300,6 +312,11 @@ function NewInstanceForm() {
       </section>
 
       <section className="page-section">
+        <h2 className="section-title">network access</h2>
+        <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
+      </section>
+
+      <section className="page-section">
         <h2 className="section-title">infrastructure</h2>
         <label className="field">
           <span>template id</span>
@@ -344,6 +361,173 @@ function NewInstanceForm() {
       </div>
     </form>
   );
+}
+
+// ─── Network-policy picker ────────────────────────────────────────
+//
+// Four profiles (mirrors the Rust enum in src/network_policy.rs):
+//   open       — full internet, default deny on RFC1918+linklocal.
+//   airgap     — no egress except the swarm /llm proxy.
+//   allowlist  — LLM proxy + the listed networks (CIDR or hostname).
+//   denylist   — full internet minus the listed networks.
+//
+// Hostnames are DNS-resolved server-side at hire time; the cube
+// enforces only IPv4 CIDRs.  Auto-collapse: if the user picks
+// Allowlist and clears every chip, we flip the radio to Airgap (per
+// the brief — empty Allowlist is functionally Airgap, and the Rust
+// API rejects Allowlist with no entries anyway).
+
+const POLICY_OPTIONS = [
+  {
+    kind: 'open',
+    label: 'Open (full internet)',
+    help: 'Everything the dyson asks for is allowed, except RFC1918 + link-local. The swarm default — pick this when the agent needs to research, fetch dependencies, or call external APIs.',
+  },
+  {
+    kind: 'airgap',
+    label: 'Air-gapped (LLM only)',
+    help: 'No outbound traffic at all, except to the swarm /llm proxy. Use when the dyson should never touch the public internet.',
+  },
+  {
+    kind: 'allowlist',
+    label: 'Allowlist (only these networks)',
+    help: 'LLM proxy plus the networks you list. Add CIDRs (8.8.8.8/32) or hostnames (github.com) — hostnames resolve at hire time.',
+  },
+  {
+    kind: 'denylist',
+    label: 'Denylist (block these networks)',
+    help: 'Full internet minus the networks you list. Same accept rules as allowlist for entries.',
+  },
+];
+
+function NetworkPolicyPicker({ value, onChange }) {
+  const setKind = (kind) => {
+    if (kind === 'open' || kind === 'airgap') {
+      onChange({ kind, entries: [] });
+    } else {
+      onChange({ kind, entries: value.entries || [] });
+    }
+  };
+  const setEntries = (entries) => {
+    // Auto-collapse: empty allowlist → airgap (the brief asks for
+    // this; the API rejects allowlist with no entries anyway).
+    if (value.kind === 'allowlist' && entries.length === 0) {
+      onChange({ kind: 'airgap', entries: [] });
+      return;
+    }
+    onChange({ ...value, entries });
+  };
+  const showEntries = value.kind === 'allowlist' || value.kind === 'denylist';
+  const helpFor = POLICY_OPTIONS.find(p => p.kind === value.kind)?.help;
+  return (
+    <div className="net-policy-picker">
+      <div className="net-policy-radios">
+        {POLICY_OPTIONS.map(opt => (
+          <label key={opt.kind} className={`net-policy-radio ${value.kind === opt.kind ? 'selected' : ''}`}>
+            <input
+              type="radio"
+              name="network_policy"
+              value={opt.kind}
+              checked={value.kind === opt.kind}
+              onChange={() => setKind(opt.kind)}
+            />
+            <span className="net-policy-label">{opt.label}</span>
+          </label>
+        ))}
+      </div>
+      {helpFor ? <p className="hint muted small">{helpFor}</p> : null}
+      {showEntries ? (
+        <EntryChipInput
+          entries={value.entries}
+          onChange={setEntries}
+          placeholder={value.kind === 'allowlist' ? 'github.com or 8.8.8.8/32' : 'evil.example or 1.2.3.0/24'}
+        />
+      ) : null}
+      <p className="hint muted small">
+        Network access can be changed any time from the instance's detail page —
+        the change snapshots the dyson and re-hires it with the new policy
+        (workspace state survives, but the URL changes).
+      </p>
+    </div>
+  );
+}
+
+const ENTRY_CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/;
+const ENTRY_HOST_RE =
+  /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+function isValidEntry(s) {
+  const v = (s || '').trim();
+  if (!v) return false;
+  if (ENTRY_CIDR_RE.test(v)) return true;
+  // Match the server's "rejects all-digits-and-dots" rule.
+  if (/^[0-9.]+$/.test(v)) return false;
+  return ENTRY_HOST_RE.test(v);
+}
+
+function EntryChipInput({ entries, onChange, placeholder }) {
+  const [input, setInput] = React.useState('');
+  const [warn, setWarn] = React.useState(null);
+  const add = (raw) => {
+    const v = (raw || '').trim();
+    if (!v) return;
+    if (!isValidEntry(v)) {
+      setWarn(`"${v}" doesn't look like a CIDR or hostname`);
+      return;
+    }
+    if (entries.includes(v)) return;
+    setWarn(null);
+    onChange([...entries, v]);
+  };
+  const remove = (v) => onChange(entries.filter(e => e !== v));
+  const onKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ',' || (e.key === ' ' && input.includes('.'))) {
+      e.preventDefault();
+      add(input);
+      setInput('');
+    } else if (e.key === 'Backspace' && !input && entries.length) {
+      remove(entries[entries.length - 1]);
+    }
+  };
+  return (
+    <div className="field">
+      <span>networks</span>
+      <div className="chip-input">
+        {entries.map(e => (
+          <span key={e} className="chip">
+            <code className="mono-sm">{e}</code>
+            <button
+              type="button"
+              className="chip-x"
+              aria-label={`remove ${e}`}
+              onClick={() => remove(e)}
+            >×</button>
+          </span>
+        ))}
+        <input
+          className="chip-input-text"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={entries.length === 0 ? placeholder : 'add another…'}
+        />
+      </div>
+      {warn ? <span className="hint error small">{warn}</span> : null}
+      <span className="hint muted small">
+        CIDRs (a.b.c.d/N or a.b.c.d) pass through verbatim. Hostnames are
+        resolved at hire time; the cube enforces the IPs we resolved now —
+        DNS changes won't track.
+      </span>
+    </div>
+  );
+}
+
+function serializeNetworkPolicy(p) {
+  if (!p || p.kind === 'open') return { kind: 'open' };
+  if (p.kind === 'airgap') return { kind: 'airgap' };
+  // allowlist / denylist — include the user's raw entries; the server
+  // resolves hostnames and persists both raw + resolved.
+  return { kind: p.kind, entries: p.entries || [] };
 }
 
 // Multi-select with two labelled suggestion sources: the swarm's
@@ -651,6 +835,7 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
             <StatusBadge status={row.status}/>{' '}
             {row.pinned ? <span className="badge badge-info">pinned</span> : null}
             {' · '}template <code>{row.template_id}</code>
+            {' · '}<NetworkPolicyBadge instance={row}/>
           </div>
           <div className="employee-task">
             {row.task && row.task.trim() ? (
@@ -710,6 +895,7 @@ function InstanceDetail({ id, onOpenSidebar, onNew }) {
       {err ? <div className="error">{err}</div> : null}
 
       <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
+      <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
       <SecretsPanel instanceId={id}/>
 
       {editing ? (
@@ -1169,4 +1355,144 @@ function probeLabel(p) {
     return p.kind || JSON.stringify(p);
   }
   return String(p);
+}
+
+// ─── Network policy badge + change-network panel ──────────────────
+
+function NetworkPolicyBadge({ instance }) {
+  const p = instance?.network_policy;
+  const kind = p?.kind || 'open';
+  const label = ({
+    open: 'open',
+    airgap: 'air-gapped',
+    allowlist: 'allowlist',
+    denylist: 'denylist',
+  })[kind] || kind;
+  // Tooltip surfaces both the user's raw entries AND the cube-
+  // enforced CIDRs so the operator can see "I typed github.com →
+  // cube enforces 140.82.121.4/32".
+  const entries = (p && p.entries) || [];
+  const cidrs = instance?.network_policy_cidrs || [];
+  const lines = [];
+  if (entries.length) lines.push(`entries: ${entries.join(', ')}`);
+  if (cidrs.length) lines.push(`cidrs: ${cidrs.join(', ')}`);
+  const title = lines.length ? lines.join('\n') : `network: ${label}`;
+  const cls = kind === 'airgap' || kind === 'allowlist'
+    ? 'badge-warn' : kind === 'denylist' ? 'badge-info' : 'badge-ok';
+  return <span className={`badge ${cls}`} title={title}>net: {label}</span>;
+}
+
+function NetworkPolicyPanel({ instance, disabled }) {
+  const { client } = useApi();
+  const [editing, setEditing] = React.useState(false);
+  const [policy, setPolicy] = React.useState(() => normaliseInstancePolicy(instance.network_policy));
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState(null);
+
+  // Re-sync the working copy when the user navigates between
+  // instances (parent's `instance` prop changes).
+  React.useEffect(() => {
+    setPolicy(normaliseInstancePolicy(instance.network_policy));
+    setEditing(false);
+    setError(null);
+  }, [instance.id, instance.network_policy]);
+
+  const submit = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await client.changeInstanceNetwork(
+        instance.id,
+        serializeNetworkPolicy(policy),
+      );
+      // The successor has a NEW id — workspace state survives via the
+      // snapshot, but the URL changes.  Surface that in the UI by
+      // navigating to the new id; the user sees the old destroyed
+      // row in the rail and the new live row open.
+      if (result?.id) {
+        window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
+      }
+    } catch (err) {
+      setError(err?.detail || err?.message || 'change-network failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const currentLabel =
+    POLICY_OPTIONS.find(o => o.kind === (instance.network_policy?.kind || 'open'))?.label
+    || 'open';
+  return (
+    <section className="panel">
+      <header className="panel-header">
+        <h3>network access</h3>
+        {!editing ? (
+          <button
+            className="btn btn-ghost btn-sm"
+            disabled={disabled}
+            onClick={() => setEditing(true)}
+          >
+            change
+          </button>
+        ) : null}
+      </header>
+      {!editing ? (
+        <div className="panel-body">
+          <p>
+            <strong>{currentLabel}</strong>
+          </p>
+          {(instance.network_policy?.entries?.length || 0) > 0 ? (
+            <p className="muted small">
+              entries: {(instance.network_policy.entries || []).map(e => (
+                <code key={e} className="mono-sm" style={{ marginRight: 6 }}>{e}</code>
+              ))}
+            </p>
+          ) : null}
+          {(instance.network_policy_cidrs?.length || 0) > 0 ? (
+            <p className="muted small">
+              cube-enforced cidrs: {(instance.network_policy_cidrs || []).map(c => (
+                <code key={c} className="mono-sm" style={{ marginRight: 6 }}>{c}</code>
+              ))}
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <div className="panel-body">
+          <NetworkPolicyPicker value={policy} onChange={setPolicy}/>
+          <p className="hint muted small">
+            <strong>Heads up:</strong> the cube can't update its eBPF egress
+            map at runtime, so changing the policy snapshots this dyson and
+            re-hires it under a new id (workspace state survives via the
+            snapshot). The current URL will 404 after the change — bookmark
+            the new one from the rail.
+          </p>
+          {error ? <div className="error">{error}</div> : null}
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={submit}
+              disabled={submitting}
+            >
+              {submitting ? 'changing…' : 'snapshot, re-hire, destroy old'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => { setEditing(false); setError(null); }}
+              disabled={submitting}
+            >
+              cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function normaliseInstancePolicy(p) {
+  if (!p) return { kind: 'open', entries: [] };
+  if (p.kind === 'open' || p.kind === 'airgap') return { kind: p.kind, entries: [] };
+  return { kind: p.kind, entries: Array.isArray(p.entries) ? p.entries : [] };
 }

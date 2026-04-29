@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ProviderConfig;
 use crate::error::{BackupError, CubeError, StoreError};
+use crate::network_policy::{NetworkPolicy, ResolvedPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -206,6 +207,21 @@ pub struct InstanceRow {
     /// retries just the destroy.  `None` for every row that has
     /// never been a rotation source.
     pub rotated_to: Option<String>,
+    /// Per-instance egress policy, frozen at hire time (or at
+    /// change-network time, which is itself a snapshot+restore that
+    /// produces a fresh row).  Carries through snapshot/restore +
+    /// the binary-rotation sweep.  Default for every existing row
+    /// is `Open` (the pre-feature wire shape).  See
+    /// [`crate::network_policy`] for the full taxonomy and the cube
+    /// wire-shape translation.
+    pub network_policy: NetworkPolicy,
+    /// Post-DNS resolved IPv4 CIDR set captured at hire time.  This
+    /// is what the cube actually enforces in its
+    /// allowOut/denyOut maps; the row preserves it (alongside the
+    /// raw user entries on `network_policy`) so the SPA can show
+    /// the operator both "what you typed" and "what the cube sees".
+    /// Empty for `Open` and `Airgap` rows.
+    pub network_policy_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +244,13 @@ pub struct CreateSandboxArgs {
     pub template_id: String,
     pub env: BTreeMap<String, String>,
     pub from_snapshot_path: Option<PathBuf>,
+    /// Resolved egress policy.  Translated from the per-instance
+    /// `NetworkPolicy` once at the call site (so cube_client doesn't
+    /// need to know about hostnames or DNS resolution); the cube only
+    /// ever sees the pure IPv4 CIDR shape.  Defaults to the legacy
+    /// `Open` wire shape so test paths and pre-migration call sites
+    /// don't have to think about it.
+    pub resolved_policy: ResolvedPolicy,
 }
 
 #[derive(Debug, Clone)]

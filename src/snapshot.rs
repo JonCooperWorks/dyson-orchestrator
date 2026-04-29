@@ -197,6 +197,9 @@ impl SnapshotService {
                     task: Some(source.task),
                     env,
                     ttl_seconds,
+                    // Carry the source's network profile through too —
+                    // a snapshot+restore must not silently widen egress.
+                    network_policy: source.network_policy,
                 },
             )
             .await
@@ -370,6 +373,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -392,6 +396,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -457,6 +462,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
             })
             .await
             .unwrap();
@@ -480,6 +486,7 @@ mod tests {
                 task: None,
                 env: env_with_model(),
                 ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
             })
             .await
             .unwrap();

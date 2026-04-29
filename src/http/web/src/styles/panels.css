@@ -569,6 +569,40 @@
   margin-top: 8px;
 }
 
+/* Network-policy picker — used both in the new-instance page and
+ * the detail-pane "change network" panel.  Stack of clickable
+ * "card-style" radios so the four profiles are easy to scan. */
+.net-policy-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.net-policy-radios {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.net-policy-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1, var(--bg-2));
+  cursor: pointer;
+}
+.net-policy-radio.selected {
+  border-color: var(--accent);
+  background: var(--bg-2);
+}
+.net-policy-radio input[type="radio"] {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.net-policy-label { font-size: 13px; }
+.hint.error { color: var(--err, #c33); }
+
 .form { display: flex; flex-direction: column; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .field span { color: var(--fg-muted); }

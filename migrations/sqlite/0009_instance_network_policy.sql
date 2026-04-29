@@ -1,0 +1,38 @@
+-- Per-instance network policy.
+--
+-- Today every cube sandbox swarm hires gets the same hardcoded egress
+-- policy: full-internet allow with the RFC1918+linklocal default
+-- deny.  That's a reasonable default but the wrong one for security-
+-- sensitive tasks.  This migration lets each instance carry its own
+-- profile (open / airgap / allowlist / denylist) and remember the
+-- raw user input alongside the post-DNS resolved CIDR set.
+--
+-- Three columns:
+--   * `network_policy_kind`     — one of 'open', 'airgap', 'allowlist',
+--                                 'denylist'.  Existing rows backfill
+--                                 to 'open' (matches the pre-feature
+--                                 hardcoded behaviour at
+--                                 cube_client.rs:167).
+--   * `network_policy_entries`  — comma-separated raw user input
+--                                 (CIDR or hostname).  Empty for
+--                                 'open' / 'airgap'.  Preserved so
+--                                 the SPA can show the user "you
+--                                 typed github.com" alongside the
+--                                 actual /32s the cube enforces.
+--   * `network_policy_cidrs`    — comma-separated post-DNS resolved
+--                                 IPv4 CIDRs.  This is what the cube
+--                                 actually sees in its
+--                                 allowOut/denyOut maps.  Captured
+--                                 at hire time and frozen for the
+--                                 instance's lifetime — DNS changes
+--                                 won't track (cube map is
+--                                 immutable per instance lifetime).
+--
+-- Network policy can be changed live by chaining the existing
+-- snapshot+restore+destroy primitives (see InstanceService::
+-- change_network_policy); the new instance gets a new id and
+-- carries its own policy_cidrs.  No in-place PATCH because
+-- CubeSandbox doesn't expose a runtime egress-map update endpoint.
+ALTER TABLE instances ADD COLUMN network_policy_kind     TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE instances ADD COLUMN network_policy_entries  TEXT NOT NULL DEFAULT '';
+ALTER TABLE instances ADD COLUMN network_policy_cidrs    TEXT NOT NULL DEFAULT '';

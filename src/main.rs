@@ -159,13 +159,41 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         },
     };
     tracing::info!(proxy_base = %proxy_base, "agent /llm proxy URL");
+
+    // Derive the swarm-proxy CIDR for the per-instance network
+    // policy resolver.  Only the IP-form of `cube_facing_addr`
+    // produces a CIDR — a hostname-form address would need DNS
+    // resolution, which we DO support for user-supplied entries but
+    // not for the swarm's own bootstrap (the resolver is only
+    // available after InstanceService is built; we'd be chasing our
+    // tail).  Operators who want Airgap/Allowlist must set
+    // `cube_facing_addr` to an IPv4 (the live deploy already does:
+    // 192.168.0.1).  None ⇒ Airgap/Allowlist hires return
+    // BadRequest; Open/Denylist still work.
+    let llm_cidr: Option<String> = cfg
+        .cube_facing_addr
+        .as_deref()
+        .and_then(|addr| addr.split(':').next())
+        .filter(|host| !host.is_empty())
+        .filter(|host| host.parse::<std::net::Ipv4Addr>().is_ok())
+        .map(|host| format!("{host}/32"));
+    if let Some(cidr) = &llm_cidr {
+        tracing::info!(llm_cidr = %cidr, "network-policy: LLM CIDR for Airgap/Allowlist");
+    } else {
+        tracing::warn!(
+            "network-policy: no IPv4 cube_facing_addr — Airgap and Allowlist hires will return 400 \
+             until cfg.cube_facing_addr is set to an IPv4 address (e.g. \"192.168.0.1:8080\")"
+        );
+    }
+
     let mut instance_svc = InstanceService::new(
         cube.clone(),
         instances_store.clone(),
         secrets_store.clone(),
         tokens_store.clone(),
         proxy_base,
-    );
+    )
+    .with_llm_cidr(llm_cidr);
     let secrets_svc = Arc::new(SecretsService::new(secrets_store, cipher_dir.clone()));
     let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
         user_secrets_store,

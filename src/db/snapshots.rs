@@ -155,6 +155,8 @@ mod tests {
                 created_at: 0,
                 destroyed_at: None,
                 rotated_to: None,
+                network_policy: crate::network_policy::NetworkPolicy::Open,
+                network_policy_cidrs: Vec::new(),
             })
             .await
             .unwrap();

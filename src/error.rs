@@ -44,6 +44,8 @@ pub enum SwarmError {
     Config(#[from] crate::config::ConfigError),
     #[error("policy denied: {0}")]
     PolicyDenied(String),
+    #[error("bad request: {0}")]
+    BadRequest(String),
     #[error("not found")]
     NotFound,
     /// Used for failures we surface but don't have a more specific variant
@@ -51,4 +53,10 @@ pub enum SwarmError {
     /// exhaustion (which would otherwise leave the cube in warmup mode).
     #[error("internal: {0}")]
     Internal(String),
+}
+
+impl From<crate::network_policy::PolicyError> for SwarmError {
+    fn from(e: crate::network_policy::PolicyError) -> Self {
+        SwarmError::BadRequest(e.to_string())
+    }
 }

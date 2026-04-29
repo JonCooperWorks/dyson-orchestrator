@@ -17,6 +17,7 @@ use crate::auth::CallerIdentity;
 use crate::error::SwarmError;
 use crate::http::{secrets::store_err_to_status, AppState};
 use crate::instance::{CreateRequest, CreatedInstance};
+use crate::network_policy::NetworkPolicy;
 use crate::traits::{InstanceRow, InstanceStatus, ListFilter, ProbeResult};
 
 pub fn router(state: AppState) -> Router {
@@ -28,7 +29,44 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/instances/:id/url", get(instance_url))
         .route("/v1/instances/:id/probe", post(probe_instance))
+        .route(
+            "/v1/instances/:id/change-network",
+            post(change_network),
+        )
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangeNetworkBody {
+    network_policy: NetworkPolicy,
+}
+
+/// Change a Live instance's egress profile.  CubeAPI doesn't expose
+/// a runtime PATCH for the eBPF maps, so this snapshot+restore+
+/// destroys.  The successor has a NEW id; the SPA should redirect to
+/// `#/i/<new-id>`.  Owner-scoped; `SYSTEM_OWNER`/`"*"` bypasses for
+/// admin paths.  Workspace state survives via the snapshot.
+async fn change_network(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+    Json(body): Json<ChangeNetworkBody>,
+) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
+    match state
+        .instances
+        .change_network_policy(&caller.user_id, &id, &state.snapshots, body.network_policy)
+        .await
+    {
+        Ok(mut c) => {
+            // Same `<id>.<hostname>` rewrite as `create_instance` so
+            // the SPA gets a usable url.
+            if let Some(host) = state.hostname.as_deref().filter(|h| !h.is_empty()) {
+                c.url = format!("https://{}.{}/", c.id, host.trim_end_matches('/'));
+            }
+            Ok((StatusCode::CREATED, Json(c)))
+        }
+        Err(e) => Err(swarm_err_to_status(e)),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,6 +289,14 @@ pub struct InstanceView {
     pub created_at: i64,
     pub destroyed_at: Option<i64>,
     pub open_url: Option<String>,
+    /// Per-instance egress profile + the user's raw entries (CIDR
+    /// or hostname).  The SPA's detail-page badge reads this to show
+    /// which profile is active and what the user typed.
+    pub network_policy: NetworkPolicy,
+    /// Post-DNS resolved IPv4 CIDR set the cube actually enforces.
+    /// SPA shows this alongside `network_policy.entries` so the
+    /// operator sees both "what you typed" and "what's enforced".
+    pub network_policy_cidrs: Vec<String>,
 }
 
 impl InstanceView {
@@ -276,6 +322,8 @@ impl InstanceView {
             created_at: r.created_at,
             destroyed_at: r.destroyed_at,
             open_url,
+            network_policy: r.network_policy,
+            network_policy_cidrs: r.network_policy_cidrs,
         }
     }
 }
@@ -284,6 +332,7 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
     match e {
         SwarmError::NotFound => StatusCode::NOT_FOUND,
         SwarmError::PolicyDenied(_) => StatusCode::FORBIDDEN,
+        SwarmError::BadRequest(_) => StatusCode::BAD_REQUEST,
         // Internal: surfaced when create-time configure-push to dyson
         // exhausts its retry budget; the SPA will see 502 and the user
         // can retry the create.
