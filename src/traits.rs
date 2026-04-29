@@ -237,6 +237,12 @@ pub struct SnapshotRow {
     pub size_bytes: Option<i64>,
     pub created_at: i64,
     pub deleted_at: Option<i64>,
+    /// Hex-encoded content hash (SHA-256) of the snapshot archive on
+    /// disk, computed by the snapshot service for tamper detection
+    /// (A3).  `None` for legacy rows written before the column
+    /// existed and for rows whose hash hasn't been computed yet —
+    /// callers verify only when present.
+    pub content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +409,12 @@ pub trait TokenStore: Send + Sync {
     async fn mint(&self, instance_id: &str, provider: &str) -> Result<String, StoreError>;
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError>;
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError>;
+    /// Revoke a single proxy_token by its plaintext value (B1).
+    /// Returns `Ok(true)` when a row was updated, `Ok(false)` when
+    /// the token doesn't exist or was already revoked.  Used by the
+    /// `/v1/tokens/revoke` admin path so an operator can yank a
+    /// leaked token without destroying its instance.
+    async fn revoke_token(&self, token: &str) -> Result<bool, StoreError>;
     /// Reverse of `resolve`: given an instance id, return the active
     /// (non-revoked) proxy_token for that instance.  Used by the
     /// image-gen rewire sweep — it needs the same token already
@@ -436,6 +448,14 @@ pub struct AuditEntry {
     /// step 3) carry `"platform"` as a placeholder — the call never
     /// reached an upstream so the value is informational only.
     pub key_source: String,
+    /// Whether the upstream call streamed to completion.  Proxy writes
+    /// `false` up-front (before the upstream body is consumed) so a
+    /// crash mid-stream still leaves a forensic row, then stamps
+    /// `true` + the final `output_tokens` count via
+    /// [`AuditStore::update_completion`] once the body finishes.  Rows
+    /// that never streamed (early policy denial, upstream error
+    /// before body) are inserted with `completed = true` directly.
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -455,6 +475,18 @@ pub trait SnapshotStore: Send + Sync {
     async fn update_remote_uri(&self, id: &str, uri: &str) -> Result<(), StoreError>;
     async fn update_path(&self, id: &str, path: &str) -> Result<(), StoreError>;
     async fn mark_deleted(&self, id: &str, when: i64) -> Result<(), StoreError>;
+    /// Stamp `content_hash` on a row that was inserted before the hash
+    /// was computed (snapshot service computes the digest after the
+    /// archive bytes are flushed; the row is created up-front).
+    async fn update_content_hash(&self, id: &str, hash: &str) -> Result<(), StoreError>;
+    /// Count of live (non-deleted) snapshots owned by `owner_id` for
+    /// `instance_id`.  Used by the per-instance snapshot quota check
+    /// in http/snapshots.rs.
+    async fn count_for_instance(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<u64, StoreError>;
 }
 
 #[async_trait]
@@ -468,10 +500,22 @@ pub trait PolicyStore: Send + Sync {
 
 #[async_trait]
 pub trait AuditStore: Send + Sync {
-    async fn insert(&self, entry: &AuditEntry) -> Result<(), StoreError>;
+    /// Insert an audit row.  Returns the auto-assigned row id so the
+    /// proxy can stamp `update_completion` on the same row once the
+    /// upstream body finishes streaming.
+    async fn insert(&self, entry: &AuditEntry) -> Result<i64, StoreError>;
     /// Sum prompt+output tokens for `subject` (instance_id today, owner_id
     /// after phase 6) over the past 24h.
     async fn daily_tokens(&self, subject: &str, now: i64) -> Result<u64, StoreError>;
+    /// Stamp `output_tokens` and `completed = true` on the row at
+    /// `audit_id` once the upstream body has fully streamed (D1).
+    /// Idempotent: re-stamping an already-completed row is a no-op
+    /// at the SQL layer (UPDATE matches but writes the same values).
+    async fn update_completion(
+        &self,
+        audit_id: i64,
+        output_tokens: Option<i64>,
+    ) -> Result<(), StoreError>;
 }
 
 #[async_trait]

@@ -1,0 +1,21 @@
+-- Migrate existing Open-profile instances to NoLocalNet to close the
+-- cloud-metadata egress vector flagged in the security review (A1).
+-- The Open profile allows 0.0.0.0/0 with only RFC1918+linklocal in
+-- the deny list, which means cubes can reach 169.254.169.254 (AWS /
+-- GCP / Azure metadata services) before our default-deny on
+-- 169.254.0.0/16 kicks in — but more importantly any link-local IPv6
+-- and any operator-deployed sidecar on the host network is reachable.
+-- NoLocalNet is the new safe default: full internet minus a hardened
+-- default-deny set (cloud metadata, host services, IPv6 link-local).
+--
+-- The column is `instances.network_policy_kind` (added in
+-- migrations/sqlite/0009_instance_network_policy.sql); current values
+-- are 'open' / 'airgap' / 'allowlist' / 'denylist'.  We add a fifth
+-- value 'nolocalnet' and rewrite every existing 'open' row.
+--
+-- No CHECK constraint exists on the column today, so adding the new
+-- enum value is just a data update — no schema rewrite needed.  The
+-- application-side default lives in network_policy.rs and is updated
+-- by Agent 3 in lockstep with this migration.
+
+UPDATE instances SET network_policy_kind = 'nolocalnet' WHERE network_policy_kind = 'open';

@@ -24,17 +24,39 @@
 //! negligible at human scales (a tenant minting 65k keys still has only
 //! ~50% chance of any prefix collision), so the expected per-resolve
 //! cost is exactly one age open.
+//!
+//! # Race-free JIT provisioning (G4)
+//!
+//! `create` uses `INSERT … ON CONFLICT(subject) DO NOTHING` so two
+//! racing resolve-or-provision callers don't surface a constraint
+//! error to the loser; the loser's `INSERT` becomes a no-op and the
+//! caller's subsequent `get_by_subject` returns the canonical row
+//! (the winner's id).  The previous check-then-insert flow flagged in
+//! the security review (G4) could mint two distinct internal ids for
+//! the same OIDC subject if two requests arrived in the same JIT
+//! window.
+//!
+//! # Constant-cost api-key resolve (B6)
+//!
+//! `resolve_api_key` performs a dummy age-open against a fixed
+//! sentinel ciphertext when the prefix lookup yields zero rows, so
+//! the timing channel between "no-such-prefix" and
+//! "prefix-exists-but-wrong-secret" is closed.  The sentinel cipher
+//! is built once via `LazyLock` and uses an in-memory ephemeral age
+//! identity — no key material lands on disk.  This pads the miss
+//! path to roughly the same cost as a single-candidate hit.
 
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
+use age::secrecy::ExposeSecret;
 use async_trait::async_trait;
 use rand::RngCore;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::db::map_sqlx;
-use crate::envelope::CipherDirectory;
+use crate::envelope::{AgeCipher, CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::{UserApiKey, UserRow, UserStatus, UserStore};
@@ -45,6 +67,32 @@ pub const TOKEN_PREFIX: &str = "dy_";
 /// Width (in chars) of the indexed plaintext lookup prefix.  8 hex
 /// chars = 32 bits = collision-rare at any realistic tenant scale.
 const LOOKUP_PREFIX_LEN: usize = 8;
+
+/// Plaintext sentinel sealed once at startup.  Mismatches every
+/// possible real bearer (a real bearer is `dy_<32 hex>`; this string
+/// isn't).  Used by `resolve_api_key` to pad the miss path.
+const SENTINEL_PLAINTEXT: &str = "sentinel.miss";
+
+/// Lazy-initialised sentinel: an ephemeral in-memory age identity +
+/// the ciphertext of [`SENTINEL_PLAINTEXT`] sealed with it.  On a
+/// resolve miss we open `ciphertext` with `cipher` and ct_eq the
+/// resulting plaintext against the bearer; the result is always
+/// false (different content, different length) but the timing
+/// matches a single-candidate hit on the success path.
+static SENTINEL: LazyLock<(Arc<dyn EnvelopeCipher>, Vec<u8>)> = LazyLock::new(|| {
+    let identity = age::x25519::Identity::generate();
+    // `SecretString::expose_secret` hands back an `&str` view of the
+    // PEM bytes; we feed it straight into the in-memory constructor
+    // — the file path is only used by the `Debug` impl, never read.
+    let pem = identity.to_string();
+    let cipher = AgeCipher::from_identity_text(pem.expose_secret(), std::path::PathBuf::new())
+        .expect("ephemeral age identity is well-formed");
+    let ciphertext = cipher
+        .seal(SENTINEL_PLAINTEXT.as_bytes())
+        .expect("ephemeral age cipher seals deterministically");
+    let cipher: Arc<dyn EnvelopeCipher> = Arc::new(cipher);
+    (cipher, ciphertext)
+});
 
 fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> Result<UserRow, StoreError> {
     let status_text: String = row.try_get("status").map_err(map_sqlx)?;
@@ -155,13 +203,41 @@ fn ciphertext_matches_token(
     ct_eq(plaintext_str, token)
 }
 
+/// Constant-cost dummy decrypt for the no-prefix-match path (B6).
+/// Opens the lazily-built sentinel ciphertext and ct_eqs the result
+/// against `token`.  Always returns `false` (the sentinel plaintext
+/// is fixed, length-distinct from any real bearer) but the work
+/// performed matches a single real candidate decrypt, closing the
+/// timing oracle between "no row in this prefix bucket" and "row
+/// exists but ciphertext doesn't match".
+fn dummy_decrypt_against_sentinel(token: &str) -> bool {
+    let (cipher, ciphertext) = &*SENTINEL;
+    let Ok(plaintext) = cipher.open(ciphertext) else {
+        // Self-built sentinel — open failure would be a programmer
+        // error, not a runtime hazard.  Treat as non-match.
+        return false;
+    };
+    let Ok(plaintext_str) = std::str::from_utf8(&plaintext) else {
+        return false;
+    };
+    ct_eq(plaintext_str, token)
+}
+
 #[async_trait]
 impl UserStore for SqlxUserStore {
+    /// Idempotent insert: race-free under concurrent JIT-provision
+    /// calls (G4).  The conflict target is `subject` because that's
+    /// the OIDC-side identity; if two callers race to provision the
+    /// same subject, only one row materialises and the loser's call
+    /// is a no-op.  Callers that need the canonical id MUST follow
+    /// up with `get_by_subject` — the row id they constructed is
+    /// authoritative only on the winner's path.
     async fn create(&self, row: UserRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO users \
              (id, subject, email, display_name, status, created_at, activated_at, last_seen_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(subject) DO NOTHING",
         )
         .bind(&row.id)
         .bind(&row.subject)
@@ -282,6 +358,11 @@ impl UserStore for SqlxUserStore {
 
     async fn resolve_api_key(&self, token: &str) -> Result<Option<UserApiKey>, StoreError> {
         let Some(prefix) = lookup_prefix(token) else {
+            // Token not shaped like ours: short-circuit with a
+            // sentinel decrypt anyway so the rejection cost matches
+            // the prefix-miss cost.  Defends against an attacker
+            // probing whether a candidate string is even our shape.
+            let _ = dummy_decrypt_against_sentinel(token);
             return Ok(None);
         };
         // Pull every live row whose plaintext prefix matches.  At 32
@@ -296,6 +377,15 @@ impl UserStore for SqlxUserStore {
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx)?;
+        if rows.is_empty() {
+            // No candidates → pad with a sentinel decrypt so this
+            // path costs about the same as a single-candidate hit.
+            // Closes the timing oracle between "prefix bucket empty"
+            // (cheap reject) and "prefix bucket has one row, wrong
+            // secret" (one age open + ct_eq).
+            let _ = dummy_decrypt_against_sentinel(token);
+            return Ok(None);
+        }
         for r in rows {
             let user_id: String = r.get("user_id");
             let ciphertext: String = r.get("ciphertext");
@@ -460,6 +550,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_is_idempotent_on_subject_conflict() {
+        // G4 regression: two racing JIT-provision calls for the same
+        // subject must not surface a constraint error.  The second
+        // INSERT is a no-op; the canonical row is the winner's.  The
+        // caller (auth/user.rs::resolve_or_provision) MUST re-fetch
+        // by subject after `create` to get the authoritative id.
+        let pool = open_in_memory().await.unwrap();
+        let (_tmp, store) = build_store()(pool);
+        let alice_winner = fixed_id(0xa1);
+        let alice_loser = fixed_id(0xa2);
+
+        // Winner lands first.
+        store
+            .create(sample(&alice_winner, "alice"))
+            .await
+            .unwrap();
+        // Loser tries to provision the same subject with a different id.
+        // Old behaviour: UNIQUE constraint violation → StoreError::Constraint.
+        // New behaviour: silent no-op.
+        store
+            .create(sample(&alice_loser, "alice"))
+            .await
+            .expect("upsert collapses subject conflicts to a no-op");
+
+        // Canonical row carries the winner's id.
+        let got = store.get_by_subject("alice").await.unwrap().unwrap();
+        assert_eq!(got.id, alice_winner);
+        // Loser id never made it into the table.
+        assert!(store.get(&alice_loser).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn activate_user_sets_activated_at() {
         let pool = open_in_memory().await.unwrap();
         let (_tmp, store) = build_store()(pool);
@@ -501,13 +623,27 @@ mod tests {
     async fn api_key_resolve_rejects_unprefixed_token() {
         let pool = open_in_memory().await.unwrap();
         let (_tmp, store) = build_store()(pool);
-        // No DB hit needed — short-circuits on token shape.
+        // No DB hit needed — short-circuits on token shape.  Sentinel
+        // decrypt still runs for timing parity, but the result is
+        // discarded.
         assert!(store.resolve_api_key("not-ours").await.unwrap().is_none());
         assert!(store
             .resolve_api_key("dy_short")
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn api_key_resolve_unknown_prefix_returns_none() {
+        // B6 mitigation: a well-shaped bearer whose prefix matches no
+        // row must not error and must return `None`.  Sentinel decrypt
+        // pads the timing.
+        let pool = open_in_memory().await.unwrap();
+        let (_tmp, store) = build_store()(pool);
+        // Well-shaped token that nobody minted.
+        let bogus = "dy_deadbeefcafef00d11223344556677";
+        assert!(store.resolve_api_key(bogus).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -572,5 +708,22 @@ mod tests {
         let legacy = store.get("legacy").await.unwrap().unwrap();
         assert_eq!(legacy.subject, "legacy");
         assert_eq!(legacy.status, UserStatus::Suspended);
+    }
+
+    #[test]
+    fn sentinel_decrypts_to_fixed_plaintext() {
+        // The sentinel-cipher invariant: open(seal(plaintext)) ==
+        // plaintext.  Validates that the LazyLock initialiser produced
+        // a usable cipher pair and that the dummy_decrypt path won't
+        // panic at runtime.
+        let (cipher, ct) = &*SENTINEL;
+        let pt = cipher.open(ct).unwrap();
+        assert_eq!(std::str::from_utf8(&pt).unwrap(), SENTINEL_PLAINTEXT);
+        // And dummy_decrypt returns false against any plausible
+        // bearer (real bearers are `dy_<32 hex>`, length 35 — the
+        // sentinel plaintext is length-distinct, and ct_eq returns
+        // false on any length mismatch).
+        assert!(!dummy_decrypt_against_sentinel("dy_anything_at_all"));
+        assert!(!dummy_decrypt_against_sentinel("dy_deadbeefcafef00d11223344556677"));
     }
 }

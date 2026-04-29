@@ -66,6 +66,24 @@ impl TokenStore for SqlxTokenStore {
         Ok(())
     }
 
+    async fn revoke_token(&self, token: &str) -> Result<bool, StoreError> {
+        // Targeted single-row revoke (B1).  Does NOT cascade to other
+        // tokens on the same instance — that's `revoke_for_instance`'s
+        // job, called by the destroy path.  Already-revoked rows
+        // return `false` (no-op) rather than an error so a duplicate
+        // revoke is idempotent at the API boundary.
+        let r = sqlx::query(
+            "UPDATE proxy_tokens SET revoked_at = ? \
+             WHERE token = ? AND revoked_at IS NULL",
+        )
+        .bind(now_secs())
+        .bind(token)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(r.rows_affected() > 0)
+    }
+
     async fn lookup_by_instance(
         &self,
         instance_id: &str,
@@ -156,5 +174,36 @@ mod tests {
         store.revoke_for_instance("i1").await.unwrap();
         assert!(store.resolve(&t1).await.unwrap().is_none());
         assert!(store.resolve(&t2).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn revoke_token_targets_named_row_only() {
+        // B1 regression: revoking a single leaked proxy_token must
+        // NOT cascade to sibling tokens on the same instance.  We
+        // mint two rows for one instance (a contrived shape — mint
+        // is normally called once per create — but the SPA could
+        // hand-issue), revoke one by value, and assert the other
+        // remains live.
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqlxTokenStore::new(pool);
+        let t1 = store.mint("i1", "openai").await.unwrap();
+        let t2 = store.mint("i1", "anthropic").await.unwrap();
+
+        let revoked = store.revoke_token(&t1).await.unwrap();
+        assert!(revoked, "revoke_token returns true on first call");
+        assert!(store.resolve(&t1).await.unwrap().is_none());
+        // Sibling token on the same instance survives.
+        let r2 = store.resolve(&t2).await.unwrap().expect("t2 still live");
+        assert_eq!(r2.instance_id, "i1");
+        assert!(r2.revoked_at.is_none());
+
+        // Idempotent: revoking again returns false (already revoked).
+        let again = store.revoke_token(&t1).await.unwrap();
+        assert!(!again);
+
+        // Unknown token: false, no error.
+        let unknown = store.revoke_token("not-a-real-token").await.unwrap();
+        assert!(!unknown);
     }
 }

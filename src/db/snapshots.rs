@@ -2,6 +2,18 @@
 //! [`SqliteSnapshotStore`] implementing [`SnapshotStore`] so services hold a
 //! trait object instead of a `SqlitePool` and a Postgres impl can slot in
 //! without touching the service layer.
+//!
+//! # Content hash (A3)
+//!
+//! Each row carries a nullable `content_hash` column for tamper
+//! detection.  The snapshot service computes a SHA-256 over the
+//! on-disk archive (or per-file digest set, depending on the
+//! sink) and stamps it via [`SnapshotStore::update_content_hash`]
+//! once the bytes are flushed.  Restore-time verification is the
+//! caller's responsibility — this layer only persists the value.
+//! Pre-A3 rows are migrated as `NULL` (see
+//! migrations/sqlite/0013_snapshot_hash.sql) and treated as
+//! "unverified" until rehashed.
 
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
@@ -26,6 +38,7 @@ fn row_to_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<SnapshotRow, StoreEr
         size_bytes: row.try_get("size_bytes").map_err(map_sqlx)?,
         created_at: row.try_get("created_at").map_err(map_sqlx)?,
         deleted_at: row.try_get("deleted_at").map_err(map_sqlx)?,
+        content_hash: row.try_get("content_hash").map_err(map_sqlx)?,
     })
 }
 
@@ -45,8 +58,8 @@ impl SnapshotStore for SqliteSnapshotStore {
     async fn insert(&self, row: &SnapshotRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO snapshots \
-             (id, owner_id, source_instance_id, parent_snapshot_id, kind, path, host_ip, remote_uri, size_bytes, created_at, deleted_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, owner_id, source_instance_id, parent_snapshot_id, kind, path, host_ip, remote_uri, size_bytes, created_at, deleted_at, content_hash) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.owner_id)
@@ -59,6 +72,7 @@ impl SnapshotStore for SqliteSnapshotStore {
         .bind(row.size_bytes)
         .bind(row.created_at)
         .bind(row.deleted_at)
+        .bind(&row.content_hash)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -126,6 +140,37 @@ impl SnapshotStore for SqliteSnapshotStore {
         }
         Ok(())
     }
+
+    async fn update_content_hash(&self, id: &str, hash: &str) -> Result<(), StoreError> {
+        let r = sqlx::query("UPDATE snapshots SET content_hash = ? WHERE id = ?")
+            .bind(hash)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn count_for_instance(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<u64, StoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS cnt FROM snapshots \
+             WHERE owner_id = ? AND source_instance_id = ? AND deleted_at IS NULL",
+        )
+        .bind(owner_id)
+        .bind(instance_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let cnt: i64 = row.try_get("cnt").map_err(map_sqlx)?;
+        Ok(u64::try_from(cnt.max(0)).unwrap_or(0))
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +220,7 @@ mod tests {
             size_bytes: Some(1234),
             created_at: 100,
             deleted_at: None,
+            content_hash: None,
         }
     }
 
@@ -226,5 +272,50 @@ mod tests {
         store.insert(&s).await.unwrap();
         let g = store.get("s1").await.unwrap().unwrap();
         assert_eq!(g.kind, SnapshotKind::Backup);
+    }
+
+    #[tokio::test]
+    async fn content_hash_insert_and_update() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqliteSnapshotStore::new(pool);
+
+        // Insert with no hash, then stamp it.
+        store.insert(&snap("s1", None, "i1")).await.unwrap();
+        let g0 = store.get("s1").await.unwrap().unwrap();
+        assert!(g0.content_hash.is_none());
+
+        store.update_content_hash("s1", "deadbeef").await.unwrap();
+        let g1 = store.get("s1").await.unwrap().unwrap();
+        assert_eq!(g1.content_hash.as_deref(), Some("deadbeef"));
+
+        // Insert with a hash up-front round-trips intact.
+        let mut s2 = snap("s2", None, "i1");
+        s2.content_hash = Some("cafef00d".into());
+        store.insert(&s2).await.unwrap();
+        let g2 = store.get("s2").await.unwrap().unwrap();
+        assert_eq!(g2.content_hash.as_deref(), Some("cafef00d"));
+    }
+
+    #[tokio::test]
+    async fn count_for_instance_excludes_deleted_and_other_owners() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        seed(&pool, "i2").await;
+        let store = SqliteSnapshotStore::new(pool);
+
+        // Two live + one tombstoned for (legacy, i1).
+        store.insert(&snap("s1", None, "i1")).await.unwrap();
+        store.insert(&snap("s2", None, "i1")).await.unwrap();
+        store.insert(&snap("s3", None, "i1")).await.unwrap();
+        store.mark_deleted("s3", 200).await.unwrap();
+
+        // One live for (legacy, i2) — must not leak into i1's count.
+        store.insert(&snap("s4", None, "i2")).await.unwrap();
+
+        assert_eq!(store.count_for_instance("legacy", "i1").await.unwrap(), 2);
+        assert_eq!(store.count_for_instance("legacy", "i2").await.unwrap(), 1);
+        // Different owner: zero.
+        assert_eq!(store.count_for_instance("other", "i1").await.unwrap(), 0);
     }
 }

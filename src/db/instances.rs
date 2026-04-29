@@ -17,14 +17,16 @@ use crate::traits::{
 fn decode_policy(kind: &str, entries_csv: &str, cidrs_csv: &str) -> (NetworkPolicy, Vec<String>) {
     let entries: Vec<String> = csv_to_vec(entries_csv);
     let cidrs: Vec<String> = csv_to_vec(cidrs_csv);
-    // Unknown kinds collapse to `Open` — same as the explicit
-    // `"open"` arm — so an old swarm binary doesn't crash on rows
-    // a future binary wrote with a new profile.
+    // Unknown kinds collapse to `NoLocalNet` (the safer default) so
+    // an old swarm binary doesn't open up local-network egress on rows
+    // a newer binary wrote with an unknown profile.  `"nolocalnet"`
+    // intentionally falls through the wildcard for the same reason.
     let policy = match kind {
         "airgap" => NetworkPolicy::Airgap,
         "allowlist" => NetworkPolicy::Allowlist { entries },
         "denylist" => NetworkPolicy::Denylist { entries },
-        _ => NetworkPolicy::Open,
+        "open" => NetworkPolicy::Open,
+        _ => NetworkPolicy::NoLocalNet,
     };
     (policy, cidrs)
 }
