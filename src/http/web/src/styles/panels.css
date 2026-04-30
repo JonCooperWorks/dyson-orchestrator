@@ -647,12 +647,17 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 8px;
-  border-radius: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
   cursor: pointer;
   font-size: 12px;
+  transition: border-color 120ms ease;
 }
-.tools-cell:hover { background: var(--bg-2); }
+.tools-cell:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
 .tools-cell input[type="checkbox"] {
   margin: 0;
   accent-color: var(--accent);
