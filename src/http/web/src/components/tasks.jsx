@@ -179,7 +179,7 @@ function TaskRow({ row, instanceId, onToggle, onDelete }) {
       {row.description ? (
         <div className="tasks-row-desc muted small">{row.description}</div>
       ) : (
-        <div className="tasks-row-desc muted small"><em>no description</em></div>
+        <div className="tasks-row-desc muted small"><em>no instructions</em></div>
       )}
       <div className="tasks-row-url">
         <code className="mono-sm" title={fullUrl}>{fullUrl}</code>
@@ -337,7 +337,7 @@ function TaskForm({ instanceId, taskName }) {
             </label>
           ) : null}
           <label className="field">
-            <span>description</span>
+            <span>instructions</span>
             <textarea
               className="textarea"
               value={description}
