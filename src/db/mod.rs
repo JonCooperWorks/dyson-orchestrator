@@ -23,6 +23,7 @@ pub mod secrets;
 pub mod snapshots;
 pub mod tokens;
 pub mod users;
+pub mod webhooks;
 
 #[cfg(feature = "postgres")]
 pub mod pg;

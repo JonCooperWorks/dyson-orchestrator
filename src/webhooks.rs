@@ -1,0 +1,732 @@
+//! Per-instance webhooks ("tasks" in the SPA copy).
+//!
+//! - `WebhookService` glues:
+//!     1. `WebhookStore`         — metadata (name, description, scheme, enabled)
+//!     2. `SecretsService`       — signing keys (sealed under owner's age cipher)
+//!     3. `DeliveryStore`        — audit log (metadata-only)
+//!     4. `WebhookDispatcher`    — kicks off a fresh agent conversation
+//!
+//! Verification timing-attack defenses: HMAC compares use `subtle`'s
+//! constant-time `ConstantTimeEq`; bearer compares use the same.
+//!
+//! No request bodies are ever persisted — the agent receives the
+//! payload once and that's the only copy we keep.  Delivery rows
+//! capture *what happened*, not *what was sent*.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_trait::async_trait;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+use uuid::Uuid;
+
+use crate::error::StoreError;
+use crate::instance::InstanceService;
+use crate::secrets::{SecretsError, SecretsService};
+use crate::traits::{
+    DeliveryRow, DeliveryStore, InstanceRow, WebhookAuthScheme, WebhookRow, WebhookStore,
+};
+
+/// Maximum body size accepted at `/webhooks/<id>/<name>`.  Mirrors
+/// dyson's `MAX_TURN_BODY` so we never accept a payload the agent
+/// would refuse downstream.
+pub const MAX_WEBHOOK_BODY: usize = 4 * 1024 * 1024;
+
+/// Default page size for "recent deliveries" panel.  Caps higher to
+/// keep the SPA's payload bounded; operators with shell access can
+/// query the table directly.
+pub const DEFAULT_DELIVERY_LIMIT: u32 = 50;
+pub const MAX_DELIVERY_LIMIT: u32 = 200;
+
+/// Convention for the `secret_name` column: signing keys are stored
+/// in `instance_secrets` with this prefix so the SPA's regular
+/// secrets panel can hide them (they're managed, not user-set).
+pub const WEBHOOK_SECRET_PREFIX: &str = "_webhook_";
+
+pub fn webhook_secret_name(webhook_name: &str) -> String {
+    format!("{WEBHOOK_SECRET_PREFIX}{webhook_name}")
+}
+
+/// Lower-cased name accepted for the URL path.  Slug-ish: ascii
+/// alnum, hyphen, underscore, 1..64.
+pub fn validate_webhook_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("webhook name must not be empty");
+    }
+    if name.len() > 64 {
+        return Err("webhook name too long (max 64 chars)");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(
+            "webhook name must be lowercase ascii alphanumerics, hyphens or underscores",
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Secrets(#[from] SecretsError),
+    #[error("bad request: {0}")]
+    BadRequest(String),
+    #[error("not found")]
+    NotFound,
+    #[error("signature mismatch")]
+    SignatureMismatch,
+    #[error("instance not yet ready (warming up)")]
+    NotReady,
+    #[error("dispatch failed: {0}")]
+    Dispatch(String),
+}
+
+/// One ready-to-write spec.  `secret` is plaintext on the way in;
+/// the service seals it via `SecretsService` and stores the resulting
+/// `secret_name` pointer on the row.  `secret = None` is only valid
+/// for `auth_scheme = None`; the service enforces this at PUT time.
+#[derive(Debug, Clone)]
+pub struct WebhookSpec {
+    pub instance_id: String,
+    pub name: String,
+    pub description: String,
+    pub auth_scheme: WebhookAuthScheme,
+    /// `Some(plaintext)` to (re)set the signing key, `None` to leave
+    /// the existing secret in place (only meaningful on update).
+    pub secret_plaintext: Option<String>,
+    pub enabled: bool,
+}
+
+/// Anything that can deliver a verified webhook payload to a running
+/// dyson sandbox.  Trait so tests can swap in a recorder without
+/// standing up an agent HTTP server.
+#[async_trait]
+pub trait WebhookDispatcher: Send + Sync {
+    /// Mint a fresh conversation in the agent and post the payload as
+    /// the first turn.  `description` is the operator-authored task
+    /// brief; `headers` is the safe-allowlisted header subset to
+    /// forward; `body` is the raw inbound body bytes.
+    ///
+    /// Returns the agent's HTTP status on the *turn* call (the most
+    /// meaningful one to surface in the delivery row).
+    async fn dispatch(
+        &self,
+        instance: &InstanceRow,
+        webhook_name: &str,
+        description: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<u16, String>;
+}
+
+/// No-op dispatcher used in tests and any deployment that wants to
+/// disable webhook delivery without removing the routes.  Always
+/// returns 204 — but the caller's verify-and-log path is still
+/// exercised, so signatures, audit rows, and rate limits all behave.
+pub struct NullWebhookDispatcher;
+
+#[async_trait]
+impl WebhookDispatcher for NullWebhookDispatcher {
+    async fn dispatch(
+        &self,
+        _: &InstanceRow,
+        _: &str,
+        _: &str,
+        _: &[(String, String)],
+        _: &[u8],
+    ) -> Result<u16, String> {
+        Ok(204)
+    }
+}
+
+/// Default dispatcher: hits the cubeproxy hostname with the instance
+/// bearer.  Mirrors how `dyson_proxy::forward` reaches the agent.
+pub struct HttpWebhookDispatcher {
+    http: reqwest::Client,
+    sandbox_domain: String,
+}
+
+impl HttpWebhookDispatcher {
+    pub fn new(http: reqwest::Client, sandbox_domain: impl Into<String>) -> Self {
+        Self {
+            http,
+            sandbox_domain: sandbox_domain.into(),
+        }
+    }
+
+    fn cube_port() -> u16 {
+        std::env::var("SWARM_CUBE_INTERNAL_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(80)
+    }
+}
+
+#[async_trait]
+impl WebhookDispatcher for HttpWebhookDispatcher {
+    async fn dispatch(
+        &self,
+        instance: &InstanceRow,
+        webhook_name: &str,
+        description: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<u16, String> {
+        let Some(sandbox_id) = instance.cube_sandbox_id.as_deref().filter(|s| !s.is_empty())
+        else {
+            return Err("instance has no cube sandbox id".into());
+        };
+        let port = Self::cube_port();
+        let base = format!(
+            "https://{port}-{sandbox_id}.{}",
+            self.sandbox_domain.trim_end_matches('/')
+        );
+        let bearer = format!("Bearer {}", instance.bearer_token);
+
+        // 1. Mint a fresh conversation.  Title carries the webhook
+        //    name + ts so it sorts naturally in the agent's chat list.
+        let now = chrono_seconds();
+        let title = format!("webhook: {webhook_name} @ {now}");
+        let create_resp = self
+            .http
+            .post(format!("{base}/api/conversations"))
+            .header("Authorization", &bearer)
+            .header("X-Dyson-CSRF", "swarm-webhook")
+            .json(&serde_json::json!({ "title": title }))
+            .send()
+            .await
+            .map_err(|e| format!("create-conversation send: {e}"))?;
+        let create_status = create_resp.status();
+        if !create_status.is_success() {
+            let body = create_resp.text().await.unwrap_or_default();
+            return Err(format!("create-conversation {create_status}: {body}"));
+        }
+        let created: serde_json::Value = create_resp
+            .json()
+            .await
+            .map_err(|e| format!("create-conversation parse: {e}"))?;
+        let chat_id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "create-conversation: response missing id".to_string())?;
+
+        // 2. Compose the prompt and POST a turn.
+        let prompt = render_prompt(description, headers, body);
+        let turn_resp = self
+            .http
+            .post(format!(
+                "{base}/api/conversations/{}/turn",
+                urlencode(chat_id)
+            ))
+            .header("Authorization", &bearer)
+            .header("X-Dyson-CSRF", "swarm-webhook")
+            .json(&serde_json::json!({ "prompt": prompt, "attachments": [] }))
+            .send()
+            .await
+            .map_err(|e| format!("turn send: {e}"))?;
+        let turn_status = turn_resp.status();
+        if !turn_status.is_success() {
+            let body = turn_resp.text().await.unwrap_or_default();
+            return Err(format!("turn {turn_status}: {body}"));
+        }
+        Ok(turn_status.as_u16())
+    }
+}
+
+fn chrono_seconds() -> i64 {
+    crate::now_secs()
+}
+
+/// Build the prompt shipped to the agent.  Bodies are best-effort
+/// utf8-decoded and truncated; non-utf8 payloads land as a hex
+/// hexdump-of-first-bytes rather than getting silently dropped.
+fn render_prompt(description: &str, headers: &[(String, String)], body: &[u8]) -> String {
+    let mut s = String::with_capacity(description.len() + body.len() + 256);
+    if !description.trim().is_empty() {
+        s.push_str(description.trim());
+        s.push_str("\n\n");
+    }
+    s.push_str("---\nWebhook payload");
+    if !headers.is_empty() {
+        s.push_str(" (headers: ");
+        for (i, (k, v)) in headers.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(k);
+            s.push('=');
+            s.push_str(v);
+        }
+        s.push(')');
+    }
+    s.push_str(":\n");
+    if let Ok(text) = std::str::from_utf8(body) {
+        s.push_str(text);
+    } else {
+        // Cap binary payloads at 1KiB hex preview — nothing useful
+        // beyond that fits in a turn prompt.
+        let preview_len = body.len().min(1024);
+        s.push_str("(non-utf8, hex preview): ");
+        s.push_str(&hex::encode(&body[..preview_len]));
+        if body.len() > preview_len {
+            s.push_str("...");
+        }
+    }
+    s
+}
+
+fn urlencode(s: &str) -> String {
+    // Conservative: encode anything that isn't unreserved.  Used only
+    // for `chat_id` (uuid) and webhook names (already validated to
+    // ascii-alnum + - + _).
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        let unreserved = b.is_ascii_alphanumeric()
+            || b == b'-'
+            || b == b'_'
+            || b == b'.'
+            || b == b'~';
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+#[derive(Clone)]
+pub struct WebhookService {
+    webhooks: Arc<dyn WebhookStore>,
+    deliveries: Arc<dyn DeliveryStore>,
+    secrets: Arc<SecretsService>,
+    instances: Arc<InstanceService>,
+    dispatcher: Arc<dyn WebhookDispatcher>,
+}
+
+impl WebhookService {
+    pub fn new(
+        webhooks: Arc<dyn WebhookStore>,
+        deliveries: Arc<dyn DeliveryStore>,
+        secrets: Arc<SecretsService>,
+        instances: Arc<InstanceService>,
+        dispatcher: Arc<dyn WebhookDispatcher>,
+    ) -> Self {
+        Self {
+            webhooks,
+            deliveries,
+            secrets,
+            instances,
+            dispatcher,
+        }
+    }
+
+    pub async fn list(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<WebhookRow>, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        Ok(self.webhooks.list_for_instance(instance_id).await?)
+    }
+
+    pub async fn get(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<WebhookRow, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        self.webhooks
+            .get(instance_id, name)
+            .await?
+            .ok_or(WebhookError::NotFound)
+    }
+
+    /// Create OR update — idempotent.  When `auth_scheme` requires a
+    /// secret, `spec.secret_plaintext` must be `Some(...)` on create
+    /// or whenever the scheme is being switched.  On update with the
+    /// same scheme, `None` leaves the existing secret in place.
+    pub async fn put(
+        &self,
+        owner_id: &str,
+        spec: WebhookSpec,
+    ) -> Result<WebhookRow, WebhookError> {
+        validate_webhook_name(&spec.name)
+            .map_err(|m| WebhookError::BadRequest(m.to_string()))?;
+        self.ensure_owner(owner_id, &spec.instance_id).await?;
+
+        let now = crate::now_secs();
+        let existing = self.webhooks.get(&spec.instance_id, &spec.name).await?;
+
+        // Resolve the secret pointer.  When the scheme needs a key,
+        // we either (a) reuse the existing secret_name when no new
+        // plaintext is provided AND the row already had one, or
+        // (b) seal the new plaintext under the convention name.
+        let secret_name = if spec.auth_scheme.needs_secret() {
+            match (&spec.secret_plaintext, existing.as_ref().and_then(|r| r.secret_name.as_ref())) {
+                (Some(plain), _) => {
+                    let target = webhook_secret_name(&spec.name);
+                    self.secrets
+                        .put(owner_id, &spec.instance_id, &target, plain)
+                        .await?;
+                    Some(target)
+                }
+                (None, Some(prev)) => Some(prev.clone()),
+                (None, None) => {
+                    return Err(WebhookError::BadRequest(
+                        "auth scheme requires a signing secret on first save".into(),
+                    ));
+                }
+            }
+        } else {
+            // Auth = none — no secret needed.  If the row had one,
+            // we leave the orphaned ciphertext in place rather than
+            // deleting it; flipping back to a signed scheme will
+            // overwrite the same name anyway, and removing it would
+            // require an audit hop we don't need.
+            None
+        };
+
+        let row = WebhookRow {
+            instance_id: spec.instance_id,
+            name: spec.name,
+            description: spec.description,
+            auth_scheme: spec.auth_scheme,
+            secret_name,
+            enabled: spec.enabled,
+            created_at: existing.as_ref().map(|r| r.created_at).unwrap_or(now),
+            updated_at: now,
+        };
+        self.webhooks.put(&row).await?;
+        Ok(row)
+    }
+
+    pub async fn delete(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<(), WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        // Cascade the linked signing key, best-effort.  A failed
+        // secret delete is logged but doesn't block the row delete —
+        // the orphan would be invisible (not exposed in the SPA's
+        // secrets list because of the `_webhook_` prefix filter).
+        if let Ok(Some(row)) = self.webhooks.get(instance_id, name).await
+            && let Some(secret_name) = row.secret_name.as_deref()
+            && let Err(e) = self.secrets.delete(instance_id, secret_name).await
+        {
+            tracing::warn!(
+                instance = %instance_id, webhook = %name, error = %e,
+                "webhook delete: linked secret cleanup failed"
+            );
+        }
+        self.webhooks.delete(instance_id, name).await?;
+        Ok(())
+    }
+
+    pub async fn set_enabled(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<WebhookRow, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        self.webhooks.set_enabled(instance_id, name, enabled).await?;
+        self.webhooks
+            .get(instance_id, name)
+            .await?
+            .ok_or(WebhookError::NotFound)
+    }
+
+    pub async fn list_deliveries(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<DeliveryRow>, WebhookError> {
+        self.ensure_owner(owner_id, instance_id).await?;
+        let limit = limit.min(MAX_DELIVERY_LIMIT).max(1);
+        Ok(self
+            .deliveries
+            .list_for_webhook(instance_id, name, limit)
+            .await?)
+    }
+
+    /// Public-facing entrypoint.  Owner-LESS — verification replaces
+    /// user auth.  Returns 4xx-shaped errors as `Err(...)` so the HTTP
+    /// layer can map them; on success returns the agent's status code
+    /// (typically 202 from the agent's own `POST /turn`).
+    ///
+    /// Always writes a `webhook_deliveries` row in the terminal arm so
+    /// failed signatures show up alongside successes.
+    pub async fn verify_and_dispatch(
+        &self,
+        instance_id: &str,
+        name: &str,
+        sig_header: Option<&str>,
+        bearer_header: Option<&str>,
+        request_id: Option<&str>,
+        forward_headers: Vec<(String, String)>,
+        body: &[u8],
+    ) -> Result<u16, WebhookError> {
+        let started = Instant::now();
+        let res = self
+            .verify_and_dispatch_inner(
+                instance_id,
+                name,
+                sig_header,
+                bearer_header,
+                &forward_headers,
+                body,
+            )
+            .await;
+        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let (status_code, signature_ok, error_text) = match &res {
+            Ok(s) => (i32::from(*s), true, None),
+            Err(WebhookError::SignatureMismatch) => (401, false, Some("signature mismatch".into())),
+            Err(WebhookError::NotFound) => (404, false, Some("not found".into())),
+            Err(WebhookError::NotReady) => (503, true, Some("instance warming up".into())),
+            Err(WebhookError::Dispatch(e)) => (502, true, Some(e.clone())),
+            Err(WebhookError::BadRequest(m)) => (400, false, Some(m.clone())),
+            Err(WebhookError::Store(e)) => (500, false, Some(e.to_string())),
+            Err(WebhookError::Secrets(e)) => (500, false, Some(e.to_string())),
+        };
+
+        // Don't write a delivery row when the webhook itself was 404 —
+        // the FK would fail (no such (instance_id, webhook_name) pair)
+        // and a "delivery for a webhook that doesn't exist" row is
+        // useless to operators anyway.
+        if !matches!(res, Err(WebhookError::NotFound)) {
+            let row = DeliveryRow {
+                id: Uuid::new_v4().simple().to_string(),
+                instance_id: instance_id.to_string(),
+                webhook_name: name.to_string(),
+                fired_at: crate::now_secs(),
+                status_code,
+                latency_ms: elapsed_ms,
+                request_id: request_id.map(str::to_owned),
+                signature_ok,
+                error: error_text,
+            };
+            if let Err(e) = self.deliveries.insert(&row).await {
+                tracing::warn!(
+                    instance = %instance_id, webhook = %name, error = %e,
+                    "webhook delivery: log insert failed"
+                );
+            }
+        }
+        res
+    }
+
+    async fn verify_and_dispatch_inner(
+        &self,
+        instance_id: &str,
+        name: &str,
+        sig_header: Option<&str>,
+        bearer_header: Option<&str>,
+        forward_headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<u16, WebhookError> {
+        let row = self
+            .webhooks
+            .get(instance_id, name)
+            .await?
+            .filter(|r| r.enabled)
+            .ok_or(WebhookError::NotFound)?;
+
+        // Fetch the instance row unscoped — owner check doesn't apply
+        // here, the caller is anonymous and we've already proved
+        // possession via signature (or no-auth was explicitly chosen).
+        let instance = self
+            .instances
+            .get_unscoped(instance_id)
+            .await
+            .map_err(|_| WebhookError::NotFound)?;
+        if instance.cube_sandbox_id.as_deref().unwrap_or("").is_empty() {
+            return Err(WebhookError::NotReady);
+        }
+        let owner_id = instance.owner_id.clone();
+
+        // Verify before fetching the secret for `none` (cheap path
+        // first) so we avoid the round-trip when auth is disabled.
+        match row.auth_scheme {
+            WebhookAuthScheme::None => {}
+            WebhookAuthScheme::Bearer => {
+                let provided = bearer_header
+                    .and_then(strip_bearer)
+                    .ok_or(WebhookError::SignatureMismatch)?;
+                let expected = self.load_secret(&owner_id, &row).await?;
+                if !ct_eq(expected.as_bytes(), provided.as_bytes()) {
+                    return Err(WebhookError::SignatureMismatch);
+                }
+            }
+            WebhookAuthScheme::HmacSha256 => {
+                let header = sig_header.ok_or(WebhookError::SignatureMismatch)?;
+                let provided_hex = header
+                    .strip_prefix("sha256=")
+                    .unwrap_or(header)
+                    .trim();
+                let provided = hex::decode(provided_hex)
+                    .map_err(|_| WebhookError::SignatureMismatch)?;
+                let key = self.load_secret(&owner_id, &row).await?;
+                let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_bytes())
+                    .map_err(|_| WebhookError::SignatureMismatch)?;
+                mac.update(body);
+                if mac.verify_slice(&provided).is_err() {
+                    return Err(WebhookError::SignatureMismatch);
+                }
+            }
+        }
+
+        let status = self
+            .dispatcher
+            .dispatch(&instance, &row.name, &row.description, forward_headers, body)
+            .await
+            .map_err(WebhookError::Dispatch)?;
+        Ok(status)
+    }
+
+    async fn load_secret(
+        &self,
+        owner_id: &str,
+        row: &WebhookRow,
+    ) -> Result<String, WebhookError> {
+        let secret_name = row
+            .secret_name
+            .as_deref()
+            .ok_or(WebhookError::SignatureMismatch)?;
+        let listed = self.secrets.list(owner_id, &row.instance_id).await?;
+        listed
+            .into_iter()
+            .find(|(n, _)| n == secret_name)
+            .map(|(_, v)| v)
+            .ok_or(WebhookError::SignatureMismatch)
+    }
+
+    async fn ensure_owner(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+    ) -> Result<(), WebhookError> {
+        match self.instances.get(owner_id, instance_id).await {
+            Ok(_) => Ok(()),
+            Err(crate::error::SwarmError::NotFound) => Err(WebhookError::NotFound),
+            Err(e) => Err(WebhookError::Dispatch(e.to_string())),
+        }
+    }
+}
+
+fn strip_bearer(h: &str) -> Option<&str> {
+    let trimmed = h.trim();
+    trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .map(str::trim)
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::WebhookAuthScheme;
+
+    #[test]
+    fn validate_name_accepts_slug() {
+        assert!(validate_webhook_name("ping").is_ok());
+        assert!(validate_webhook_name("github-deploy").is_ok());
+        assert!(validate_webhook_name("with_underscore").is_ok());
+        assert!(validate_webhook_name("a1b2c3").is_ok());
+    }
+
+    #[test]
+    fn validate_name_rejects_uppercase() {
+        assert!(validate_webhook_name("PING").is_err());
+        assert!(validate_webhook_name("Ping").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_empty_or_too_long() {
+        assert!(validate_webhook_name("").is_err());
+        assert!(validate_webhook_name(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_whitespace_or_special() {
+        assert!(validate_webhook_name("hello world").is_err());
+        assert!(validate_webhook_name("with/slash").is_err());
+        assert!(validate_webhook_name("with.dot").is_err());
+    }
+
+    #[test]
+    fn webhook_secret_name_uses_prefix() {
+        assert_eq!(webhook_secret_name("ping"), "_webhook_ping");
+    }
+
+    #[test]
+    fn auth_scheme_roundtrip() {
+        for s in [
+            WebhookAuthScheme::HmacSha256,
+            WebhookAuthScheme::Bearer,
+            WebhookAuthScheme::None,
+        ] {
+            assert_eq!(WebhookAuthScheme::parse(s.as_str()), Some(s));
+        }
+        assert!(WebhookAuthScheme::parse("nonsense").is_none());
+    }
+
+    #[test]
+    fn auth_scheme_needs_secret_only_when_authed() {
+        assert!(WebhookAuthScheme::HmacSha256.needs_secret());
+        assert!(WebhookAuthScheme::Bearer.needs_secret());
+        assert!(!WebhookAuthScheme::None.needs_secret());
+    }
+
+    #[test]
+    fn ct_eq_matches_eq_for_same_length() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+    }
+
+    #[test]
+    fn ct_eq_short_circuits_on_length() {
+        assert!(!ct_eq(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn strip_bearer_handles_both_cases() {
+        assert_eq!(strip_bearer("Bearer abc"), Some("abc"));
+        assert_eq!(strip_bearer("bearer abc"), Some("abc"));
+        assert_eq!(strip_bearer("abc"), None);
+    }
+
+    #[test]
+    fn render_prompt_truncates_and_labels() {
+        let s = render_prompt("do thing", &[("X-Type".into(), "json".into())], b"{\"a\":1}");
+        assert!(s.contains("do thing"));
+        assert!(s.contains("X-Type=json"));
+        assert!(s.contains("{\"a\":1}"));
+    }
+
+    #[test]
+    fn render_prompt_handles_non_utf8() {
+        let s = render_prompt("brief", &[], &[0xff, 0xfe]);
+        assert!(s.contains("non-utf8"));
+        assert!(s.contains("fffe"));
+    }
+}

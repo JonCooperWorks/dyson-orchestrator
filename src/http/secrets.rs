@@ -265,13 +265,24 @@ mod tests {
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let snapshots_store: Arc<dyn crate::traits::SnapshotStore> =
-            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool));
+            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
             instances_store,
             snapshots_store,
             backup,
             instance_svc.clone(),
+        ));
+        let webhook_store: Arc<dyn crate::traits::WebhookStore> =
+            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone()));
+        let delivery_store: Arc<dyn crate::traits::DeliveryStore> =
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool));
+        let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
+            webhook_store,
+            delivery_store,
+            svc.clone(),
+            instance_svc.clone(),
+            Arc::new(crate::webhooks::NullWebhookDispatcher),
         ));
         let state = AppState {
             secrets: svc,
@@ -292,6 +303,7 @@ mod tests {
             openrouter_provisioning: None,
             user_or_keys: None,
             providers: Arc::new(crate::config::Providers::default()),
+            webhooks: webhooks_svc,
         };
         (state, raw, user_auth, user_id)
     }

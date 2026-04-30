@@ -22,6 +22,14 @@ const initial = {
     order: [],
     selectedId: null,
   },
+  // Per-instance webhook ("tasks") roster keyed by instance id.  Each
+  // value is `{ rows: WebhookView[], loadedAt }` where rows is the
+  // array returned by listWebhooks().  Cached so the badge in the
+  // detail-view "tasks" button doesn't blink to zero every time the
+  // user reopens the row.
+  webhooks: {
+    byInstance: {},
+  },
 };
 
 export const store = createStore(initial);
@@ -87,6 +95,56 @@ export function selectInstance(id) {
   });
 }
 
+// ─── webhooks (UI: "tasks") ────────────────────────────────────────
+
+export function setWebhooksFor(instanceId, rows) {
+  if (!instanceId) return;
+  store.dispatch(s => ({
+    ...s,
+    webhooks: {
+      ...s.webhooks,
+      byInstance: {
+        ...s.webhooks.byInstance,
+        [instanceId]: { rows: Array.isArray(rows) ? rows : [], loadedAt: Date.now() },
+      },
+    },
+  }));
+}
+
+export function upsertWebhook(instanceId, row) {
+  if (!instanceId || !row?.name) return;
+  store.dispatch(s => {
+    const slot = s.webhooks.byInstance[instanceId] || { rows: [], loadedAt: 0 };
+    const idx = slot.rows.findIndex(r => r.name === row.name);
+    const rows = idx >= 0
+      ? slot.rows.map((r, i) => (i === idx ? { ...r, ...row } : r))
+      : [...slot.rows, row];
+    return {
+      ...s,
+      webhooks: {
+        ...s.webhooks,
+        byInstance: { ...s.webhooks.byInstance, [instanceId]: { rows, loadedAt: Date.now() } },
+      },
+    };
+  });
+}
+
+export function removeWebhook(instanceId, name) {
+  if (!instanceId || !name) return;
+  store.dispatch(s => {
+    const slot = s.webhooks.byInstance[instanceId];
+    if (!slot) return s;
+    const rows = slot.rows.filter(r => r.name !== name);
+    return {
+      ...s,
+      webhooks: {
+        ...s.webhooks,
+        byInstance: { ...s.webhooks.byInstance, [instanceId]: { rows, loadedAt: Date.now() } },
+      },
+    };
+  });
+}
+
 // ─── hash routing ──────────────────────────────────────────────────
 //
 // Hash paths the SPA understands (mirrors what Dyson does — keeps a
@@ -97,13 +155,24 @@ export function selectInstance(id) {
 //   #/new              → dedicated hire page (replaces the old CreateModal)
 //   #/admin            → admin (users, proxy tokens)
 //
-// Anything else falls back to the list.  Order matters: the edit
-// pattern is a strict prefix of the detail pattern, so it has to be
-// checked first or `#/i/foo/edit` would be parsed as `view.id = "foo"`.
+// Anything else falls back to the list.  Order matters: every
+// /tasks subroute is a strict prefix of the detail pattern, so all
+// of them must match BEFORE the bare `#/i/<id>` rule.  Same trick the
+// edit pattern uses.
 
 export function parseHashView() {
   if (typeof window === 'undefined') return { name: 'instances', id: null };
   const h = window.location.hash || '#/';
+  const taskNew = h.match(/^#\/i\/([^/?#]+)\/tasks\/new/);
+  if (taskNew) return { name: 'instance-task-new', id: decodeURIComponent(taskNew[1]), taskName: null };
+  const taskEdit = h.match(/^#\/i\/([^/?#]+)\/tasks\/([^/?#]+)/);
+  if (taskEdit) return {
+    name: 'instance-task-edit',
+    id: decodeURIComponent(taskEdit[1]),
+    taskName: decodeURIComponent(taskEdit[2]),
+  };
+  const tasks = h.match(/^#\/i\/([^/?#]+)\/tasks/);
+  if (tasks) return { name: 'instance-tasks', id: decodeURIComponent(tasks[1]), taskName: null };
   const edit = h.match(/^#\/i\/([^/?#]+)\/edit/);
   if (edit) return { name: 'instance-edit', id: decodeURIComponent(edit[1]) };
   const m = h.match(/^#\/i\/([^/?#]+)/);

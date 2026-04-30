@@ -69,4 +69,33 @@ describe('parseHashView', () => {
       id: 'fluffy-otter-042',
     });
   });
+
+  test('"#/i/<id>/tasks" routes to the tasks list (NOT the detail view)', () => {
+    // Same prefix-shadow concern as edit: every /tasks subroute
+    // must match before the bare detail pattern.
+    window.location.hash = '#/i/abc/tasks';
+    expect(parseHashView()).toEqual({
+      name: 'instance-tasks',
+      id: 'abc',
+      taskName: null,
+    });
+  });
+
+  test('"#/i/<id>/tasks/new" routes to the new-task page', () => {
+    window.location.hash = '#/i/abc/tasks/new';
+    expect(parseHashView()).toEqual({
+      name: 'instance-task-new',
+      id: 'abc',
+      taskName: null,
+    });
+  });
+
+  test('"#/i/<id>/tasks/<name>" routes to the edit-task page', () => {
+    window.location.hash = '#/i/abc/tasks/github-deploy';
+    expect(parseHashView()).toEqual({
+      name: 'instance-task-edit',
+      id: 'abc',
+      taskName: 'github-deploy',
+    });
+  });
 });

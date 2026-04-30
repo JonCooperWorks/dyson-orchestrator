@@ -658,6 +658,36 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         users_store.clone(),
     );
 
+    // Per-instance webhook ("tasks") plumbing.  Stores reuse the same
+    // sqlite pool every other table sits on; the dispatcher uses the
+    // shared cube-trusted reqwest client so it can reach a sandbox at
+    // `<port>-<sandbox_id>.<sandbox_domain>` over cubeproxy's
+    // mkcert-rooted TLS (same path `dyson_proxy::forward` takes).
+    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> =
+        Arc::new(dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()));
+    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> =
+        Arc::new(dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()));
+    let webhook_dispatcher: Arc<dyn dyson_swarm::webhooks::WebhookDispatcher> = {
+        let http_client = match http::dyson_proxy::build_client() {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::error!(error = %err, "webhook dispatcher http client init failed");
+                return ExitCode::from(2);
+            }
+        };
+        Arc::new(dyson_swarm::webhooks::HttpWebhookDispatcher::new(
+            http_client,
+            cfg.cube.sandbox_domain.clone(),
+        ))
+    };
+    let webhooks_svc = Arc::new(dyson_swarm::webhooks::WebhookService::new(
+        webhook_store,
+        delivery_store,
+        secrets_svc.clone(),
+        instance_svc.clone(),
+        webhook_dispatcher,
+    ));
+
     let app_state = http::AppState {
         secrets: secrets_svc,
         user_secrets: user_secrets_svc,
@@ -685,6 +715,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         openrouter_provisioning: or_provisioning,
         user_or_keys,
         providers: providers_for_app,
+        webhooks: webhooks_svc,
     };
     let app = http::router(app_state, auth, user_auth, llm_router, mcp_user_router);
 

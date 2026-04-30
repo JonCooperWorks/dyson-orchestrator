@@ -22,6 +22,7 @@ pub mod secrets;
 pub mod snapshot;
 pub mod traits;
 pub mod ttl;
+pub mod webhooks;
 
 /// Wall-clock seconds since the Unix epoch as `i64`. Saturates at 0 on the
 /// (unreachable in practice) pre-epoch path so callers don't need to plumb

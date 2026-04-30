@@ -18,6 +18,7 @@ import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import {
   upsertInstance, removeInstance, selectInstance, setLoadError, setInstances,
+  setWebhooksFor,
 } from '../store/app.js';
 
 // Links inside task markdown open in a new tab — the task pane is a
@@ -106,7 +107,7 @@ function InstanceList({ selectedId, onNew }) {
           <li className="rail-empty muted small">your roster's empty — hire one →</li>
         ) : order.map(id => {
           const row = byId[id];
-          const label = row.name && row.name.trim() ? row.name : 'dyson';
+          const label = row.name && row.name.trim() ? row.name : '(unnamed)';
           return (
             <li key={id} className={`rail-row ${selectedId === id ? 'selected' : ''}`}>
               <a href={`#/i/${encodeURIComponent(id)}`}>
@@ -1441,6 +1442,15 @@ function InstanceDetail({ id, onNew }) {
   const { client } = useApi();
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
   const totalInstances = useAppState(s => s.instances.order.length);
+  // Enabled-task count for the tasks button badge.  Source of truth is
+  // the per-instance webhooks slot in the store; we hydrate it here so
+  // the count is correct on first paint (rather than 0 → real after
+  // the user opens the tasks page).
+  const enabledTaskCount = useAppState(s => {
+    const slot = id ? s.webhooks.byInstance[id] : null;
+    if (!slot) return null;
+    return slot.rows.filter(r => r.enabled).length;
+  });
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
 
@@ -1455,6 +1465,18 @@ function InstanceDetail({ id, onNew }) {
     }).catch(e => {
       if (!cancelled) setErr(e?.message || 'fetch failed');
     });
+    return () => { cancelled = true; };
+  }, [client, id]);
+
+  // Webhooks list — fed into the "tasks" button's count badge.  Quiet
+  // on failure (the badge just stays hidden); the dedicated tasks page
+  // surfaces real errors when the user navigates in.
+  React.useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    client.listWebhooks(id).then(list => {
+      if (!cancelled) setWebhooksFor(id, list || []);
+    }).catch(() => { /* silent — badge falls back to hidden */ });
     return () => { cancelled = true; };
   }, [client, id]);
 
@@ -1532,7 +1554,7 @@ function InstanceDetail({ id, onNew }) {
     }
   };
 
-  const displayName = row.name && row.name.trim() ? row.name : 'dyson';
+  const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
   // open_url is computed by the backend from `[server] hostname` + the
   // instance id.  Null when swarm has no hostname configured (the
   // host-based proxy is a no-op in that case) — that's the only case
@@ -1585,6 +1607,18 @@ function InstanceDetail({ id, onNew }) {
             onClick={(e) => { if (busy) e.preventDefault(); }}
           >
             edit
+          </a>
+          <a
+            className="btn btn-ghost"
+            href={`#/i/${encodeURIComponent(id)}/tasks`}
+            aria-disabled={busy}
+            onClick={(e) => { if (busy) e.preventDefault(); }}
+            title="webhook-triggered tasks for this dyson"
+          >
+            tasks
+            {enabledTaskCount > 0
+              ? <span className="btn-count-badge" aria-label={`${enabledTaskCount} enabled`}>{enabledTaskCount}</span>
+              : null}
           </a>
           <button className="btn btn-ghost" onClick={probe} disabled={busy}>probe</button>
           <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>

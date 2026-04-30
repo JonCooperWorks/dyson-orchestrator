@@ -49,6 +49,13 @@ argon2 = "0.5.3"
 # Already a transitive dep via age/argon2 — promoting to direct so
 # we don't lean on indirect-version drift.
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
+# HMAC-SHA256 for webhook signature verification.  `subtle` for the
+# constant-time tag compare so a wrong signature can't be timed-out
+# byte-by-byte.  `hex` for hex-encoding the digest on the wire
+# (matches GitHub/Stripe-style `sha256=<hex>` headers).
+hmac = { version = "0.12", default-features = false, features = ["std"] }
+subtle = { version = "2.6", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["std"] }
 # CSPRNG for fresh api-key tokens (Stage 4).  Dev-deps already pulled
 # this in; promoting to a runtime dep so mint_api_key can use it
 # directly without hand-rolling a getrandom wrapper.

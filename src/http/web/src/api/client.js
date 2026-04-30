@@ -184,6 +184,78 @@ export class SwarmClient {
     );
   }
 
+  // ─── Per-instance webhooks ("tasks" in UI copy) ────────────────────
+  //
+  // Each row is `{ name, description, auth_scheme, enabled, has_secret,
+  // path, created_at, updated_at }`.  Signing keys never round-trip in
+  // either direction — `has_secret` is the only signal the client gets,
+  // and the secret lives in the standard owner-sealed instance_secrets
+  // store under the convention name `_webhook_<name>`.
+
+  listWebhooks(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  getWebhook(instanceId, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}`,
+    );
+  }
+
+  /// POST a new webhook.  Body: `{name, description, auth_scheme,
+  /// secret?, enabled?}`.  `secret` is required for any scheme other
+  /// than `none`.
+  createWebhook(instanceId, body) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+  }
+
+  /// PATCH an existing webhook.  Any of `description`, `auth_scheme`,
+  /// `secret` (rotates the key), `enabled` may be supplied; missing
+  /// fields stay unchanged.
+  updateWebhook(instanceId, name, body) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+  }
+
+  deleteWebhook(instanceId, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  /// Convenience wrapper around PATCH for the list-page enable/disable
+  /// toggle.  Returns the refreshed row.
+  setWebhookEnabled(instanceId, name, enabled) {
+    return this.updateWebhook(instanceId, name, { enabled });
+  }
+
+  /// Recent delivery log for a webhook — newest first, capped at
+  /// `limit` (default 50, max 200).  No payload bodies; metadata only.
+  listWebhookDeliveries(instanceId, name, { limit = 50 } = {}) {
+    const qs = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/webhooks/${encodeURIComponent(name)}/deliveries${qs}`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
   // ─── Admin (caller must carry the configured admin permission/role) ─
 
   adminListUsers() {

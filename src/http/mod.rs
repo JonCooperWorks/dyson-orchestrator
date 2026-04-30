@@ -24,6 +24,7 @@ pub mod proxy_admin;
 pub mod secrets;
 pub mod snapshots;
 pub mod static_assets;
+pub mod webhooks;
 
 use std::sync::Arc;
 
@@ -90,6 +91,10 @@ pub struct AppState {
     /// list configured providers (`GET /v1/providers`) and run the
     /// upstream validator against the right URL on PUT.
     pub providers: Arc<crate::config::Providers>,
+    /// Per-instance webhook ("tasks") service — backs both the
+    /// management routes under `/v1/instances/:id/webhooks` and the
+    /// public delivery endpoint `/webhooks/:id/:name`.
+    pub webhooks: Arc<crate::webhooks::WebhookService>,
 }
 
 /// Build the public `Router`.
@@ -146,6 +151,7 @@ pub fn router(
         .merge(secrets::router(state.clone()))
         .merge(byok::router(state.clone()))
         .merge(models::router(state.clone()))
+        .merge(webhooks::router(state.clone()))
         .merge(mcp_user_router)
         .layer(middleware::from_fn_with_state(user_auth.clone(), user_middleware));
 
@@ -163,6 +169,7 @@ pub fn router(
         .merge(healthz::router())
         .merge(auth_config::router(state.clone()))
         .merge(instances::internal_router(state.clone()))
+        .merge(webhooks::public_router(state.clone()))
         .merge(admin)
         .merge(tenant)
         .merge(extra)
@@ -266,13 +273,24 @@ mod tests {
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let snapshots_store: Arc<dyn SnapshotStore> =
-            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool));
+            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
             instances_store,
             snapshots_store,
             backup,
             instance_svc.clone(),
+        ));
+        let webhook_store: Arc<dyn crate::traits::WebhookStore> =
+            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone()));
+        let delivery_store: Arc<dyn crate::traits::DeliveryStore> =
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool));
+        let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
+            webhook_store,
+            delivery_store,
+            svc.clone(),
+            instance_svc.clone(),
+            Arc::new(crate::webhooks::NullWebhookDispatcher),
         ));
         let state = AppState {
             secrets: svc,
@@ -293,6 +311,7 @@ mod tests {
             openrouter_provisioning: None,
             user_or_keys: None,
             providers: Arc::new(crate::config::Providers::default()),
+            webhooks: webhooks_svc,
         };
         (state, users_store)
     }

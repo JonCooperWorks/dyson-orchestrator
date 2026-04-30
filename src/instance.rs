@@ -461,7 +461,10 @@ impl InstanceService {
     /// any running dyson whose IDENTITY.md fell out of sync with the
     /// swarm-side row (typical cause: the row was renamed while the
     /// instance was offline, or the instance pre-dates the name push).
-    /// Idempotent.  Returns `(visited, succeeded)` for the log line.
+    /// Idempotent — `/api/admin/configure` returns the same shape and
+    /// the dyson handler short-circuits when the merged IDENTITY.md
+    /// matches what's already on disk.  Returns `(visited, succeeded)`
+    /// for the caller's log line.
     pub async fn push_names_all(&self) -> Result<(usize, usize), SwarmError> {
         let Some(reconfigurer) = self.reconfigurer.as_ref() else {
             return Ok((0, 0));

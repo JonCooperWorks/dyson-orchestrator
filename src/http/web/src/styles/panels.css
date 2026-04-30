@@ -1299,3 +1299,184 @@
   .page-edit,
   .page-new { max-width: 100%; padding: 16px 12px 80px; }
 }
+
+/* ── Tasks (webhooks) ─────────────────────────────────────────── */
+
+/* Tiny pill that hugs the right edge of the "tasks" action button to
+ * surface the enabled count without the user having to drill in.
+ * Same colour as badge-info — the count itself is a neutral fact.  */
+.btn-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg-1);
+}
+
+.tasks-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.tasks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 24px;
+}
+
+.tasks-list-panel { padding: 0; }
+
+.tasks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tasks-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.tasks-row:last-child { border-bottom: none; }
+.tasks-row.disabled { opacity: 0.6; }
+
+.tasks-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tasks-row-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--fg);
+  text-decoration: none;
+}
+.tasks-row-name:hover { text-decoration: underline; }
+
+.tasks-row-desc {
+  white-space: pre-wrap;
+}
+
+.tasks-row-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-1);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tasks-row-url code {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tasks-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-scheme-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-scheme {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.task-scheme.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.task-scheme.danger.selected {
+  border-color: var(--danger, #d97757);
+  box-shadow: 0 0 0 1px var(--danger, #d97757) inset;
+}
+.task-scheme input[type="radio"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.task-scheme-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.task-scheme-label { font-weight: 600; font-size: 13px; }
+.task-scheme-hint { line-height: 1.4; }
+
+.task-url-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.task-url-field input {
+  flex: 1;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.deliveries-panel { margin-top: 4px; }
+
+.deliveries-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.deliveries-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.deliveries-row:last-child { border-bottom: none; }
+.deliveries-row.sig-bad { background: color-mix(in srgb, var(--bg-2) 92%, var(--danger, #d97757) 8%); }
+
+.deliveries-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.deliveries-row-err {
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+}
+
+@media (max-width: 640px) {
+  .tasks-row-actions .btn { flex: 1; text-align: center; }
+}

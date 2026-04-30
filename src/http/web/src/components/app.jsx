@@ -11,6 +11,7 @@ import { useAppState } from '../hooks/useAppState.js';
 import { setView, parseHashView } from '../store/app.js';
 import { TopBar } from './topbar.jsx';
 import { InstancesView, NewInstancePage, EditInstancePage } from './instances.jsx';
+import { TasksListPage, TaskFormPage } from './tasks.jsx';
 import { AdminView } from './admin.jsx';
 import { ByokView } from './byok.jsx';
 
@@ -45,6 +46,12 @@ function renderView(view) {
       return <NewInstancePage/>;
     case 'instance-edit':
       return <EditInstancePage instanceId={view.id}/>;
+    case 'instance-tasks':
+      return <TasksListPage instanceId={view.id}/>;
+    case 'instance-task-new':
+      return <TaskFormPage instanceId={view.id} taskName={null}/>;
+    case 'instance-task-edit':
+      return <TaskFormPage instanceId={view.id} taskName={view.taskName}/>;
     case 'admin':
       return <AdminView/>;
     case 'byok':

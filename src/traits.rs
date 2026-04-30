@@ -532,6 +532,115 @@ pub trait PolicyStore: Send + Sync {
     async fn put(&self, subject: &str, policy: &PolicyRecord) -> Result<(), StoreError>;
 }
 
+/// Per-instance webhook ("task") row.  Pure-data record — no plaintext
+/// secrets ever live here; `secret_name` points into `instance_secrets`
+/// where the signing key is sealed under the owner's age cipher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookRow {
+    pub instance_id: String,
+    pub name: String,
+    pub description: String,
+    pub auth_scheme: WebhookAuthScheme,
+    pub secret_name: Option<String>,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookAuthScheme {
+    /// HMAC-SHA256 over the raw body, hex-encoded, in
+    /// `X-Swarm-Signature: sha256=<hex>`.  Default for new webhooks.
+    HmacSha256,
+    /// `Authorization: Bearer <token>` constant-time compared against
+    /// the stored secret.  No replay protection.
+    Bearer,
+    /// No verification.  Anyone with the URL can fire the webhook.
+    /// UI labels this "dangerous".
+    None,
+}
+
+impl WebhookAuthScheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HmacSha256 => "hmac_sha256",
+            Self::Bearer => "bearer",
+            Self::None => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "hmac_sha256" => Some(Self::HmacSha256),
+            "bearer" => Some(Self::Bearer),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    /// Whether this scheme needs a signing key in `instance_secrets`.
+    pub fn needs_secret(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+#[async_trait]
+pub trait WebhookStore: Send + Sync {
+    async fn put(&self, row: &WebhookRow) -> Result<(), StoreError>;
+    async fn get(
+        &self,
+        instance_id: &str,
+        name: &str,
+    ) -> Result<Option<WebhookRow>, StoreError>;
+    async fn list_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<WebhookRow>, StoreError>;
+    async fn delete(&self, instance_id: &str, name: &str) -> Result<(), StoreError>;
+    async fn set_enabled(
+        &self,
+        instance_id: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError>;
+    async fn update_fields(
+        &self,
+        instance_id: &str,
+        name: &str,
+        description: Option<&str>,
+        auth_scheme: Option<WebhookAuthScheme>,
+        secret_name: Option<Option<&str>>,
+        enabled: Option<bool>,
+    ) -> Result<(), StoreError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryRow {
+    pub id: String,
+    pub instance_id: String,
+    pub webhook_name: String,
+    pub fired_at: i64,
+    pub status_code: i32,
+    pub latency_ms: i64,
+    pub request_id: Option<String>,
+    pub signature_ok: bool,
+    pub error: Option<String>,
+}
+
+#[async_trait]
+pub trait DeliveryStore: Send + Sync {
+    async fn insert(&self, row: &DeliveryRow) -> Result<(), StoreError>;
+    /// Newest-first, capped at `limit`.  Used by the SPA's "recent
+    /// deliveries" panel on the task edit page.
+    async fn list_for_webhook(
+        &self,
+        instance_id: &str,
+        webhook_name: &str,
+        limit: u32,
+    ) -> Result<Vec<DeliveryRow>, StoreError>;
+}
+
 #[async_trait]
 pub trait AuditStore: Send + Sync {
     /// Insert an audit row.  Returns the auto-assigned row id so the

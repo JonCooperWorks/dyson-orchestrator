@@ -398,7 +398,7 @@ mod tests {
         ));
         let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
         let snapshots_store: Arc<dyn crate::traits::SnapshotStore> =
-            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool));
+            Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
             instances_store,
@@ -417,6 +417,17 @@ mod tests {
             },
         );
 
+        let webhook_store: Arc<dyn crate::traits::WebhookStore> =
+            Arc::new(crate::db::webhooks::SqlxWebhookStore::new(pool.clone()));
+        let delivery_store: Arc<dyn crate::traits::DeliveryStore> =
+            Arc::new(crate::db::webhooks::SqlxDeliveryStore::new(pool));
+        let webhooks_svc = Arc::new(crate::webhooks::WebhookService::new(
+            webhook_store,
+            delivery_store,
+            svc.clone(),
+            instance_svc.clone(),
+            Arc::new(crate::webhooks::NullWebhookDispatcher),
+        ));
         let state = AppState {
             secrets: svc,
             user_secrets,
@@ -436,6 +447,7 @@ mod tests {
             openrouter_provisioning: None,
             user_or_keys: None,
             providers: Arc::new(providers),
+            webhooks: webhooks_svc,
         };
         // We don't return the upstream URL here; tests close over their
         // own variables.  The third return is kept stable for symmetry
