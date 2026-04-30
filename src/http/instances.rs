@@ -37,6 +37,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/instances/:id/rotate-template",
             post(rotate_template),
         )
+        .route(
+            "/v1/instances/:id/recreate",
+            post(recreate_instance),
+        )
         .with_state(state)
 }
 
@@ -153,6 +157,33 @@ async fn rotate_template(
     match state
         .instances
         .rotate_in_place(&caller.user_id, &id, &state.snapshots, &target, None)
+        .await
+    {
+        Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),
+        Err(e) => Err(swarm_err_to_status(e)),
+    }
+}
+
+/// Snapshot-less template swap.  Same in-place semantics as
+/// `rotate-template` for swarm-side metadata (DNS, bearer, name,
+/// task, models, tools, secrets) but the in-VM workspace is
+/// destroyed — the new cube boots from the template's clean rootfs.
+/// Operator escape hatch when the cube snapshot path is unavailable.
+async fn recreate_instance(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+    Json(body): Json<RotateTemplateBody>,
+) -> Result<Json<InstanceView>, StatusCode> {
+    let target = body
+        .template_id
+        .clone()
+        .or_else(|| state.auth_config.default_template_id.clone())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state
+        .instances
+        .recreate_in_place(&caller.user_id, &id, &target, None)
         .await
     {
         Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),

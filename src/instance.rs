@@ -1018,6 +1018,167 @@ impl InstanceService {
             .ok_or(SwarmError::NotFound)
     }
 
+    /// Snapshot-less variant of [`Self::rotate_in_place`].  Spins up a
+    /// fresh cube under `new_template_id` using the same swarm id,
+    /// bearer, name, task, models, tools, and per-instance secrets;
+    /// swaps the row; pushes the configure envelope; destroys the
+    /// old cube.  No workspace snapshot is taken, so any in-VM state
+    /// (chat history, on-disk artefacts, agent memory) is lost — the
+    /// new cube starts from the template's clean rootfs.
+    ///
+    /// Used as the operator escape hatch when the cube snapshot path
+    /// is broken but a template swap still has to happen.  The DNS,
+    /// bearer, and DB-side metadata all survive identically to the
+    /// snapshot-preserving rotation.
+    pub async fn recreate_in_place(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        new_template_id: &str,
+        new_network_policy: Option<NetworkPolicy>,
+    ) -> Result<InstanceRow, SwarmError> {
+        if new_template_id.trim().is_empty() {
+            return Err(SwarmError::BadRequest("template_id is required".into()));
+        }
+        let source = self
+            .instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        if source.status == InstanceStatus::Destroyed {
+            return Err(SwarmError::BadRequest(
+                "cannot recreate a destroyed instance".into(),
+            ));
+        }
+        let old_sandbox_id = source
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                SwarmError::BadRequest(
+                    "instance has no live cube sandbox; recreate requires a Live row".into(),
+                )
+            })?
+            .to_owned();
+        let target_policy = new_network_policy.unwrap_or(source.network_policy.clone());
+        let resolved = network_policy::resolve(
+            &target_policy,
+            self.llm_cidr.as_deref(),
+            &*self.resolver,
+        )
+        .await?;
+
+        tracing::warn!(
+            instance = %source.id,
+            from_template = %source.template_id,
+            to_template = %new_template_id,
+            "recreate-in-place: starting destructive swap (workspace WILL NOT be preserved)"
+        );
+
+        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
+            Some(t) => t,
+            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
+        };
+        let existing = self.secrets.list(&source.id).await?;
+        let managed = managed_env(
+            &self.proxy_base,
+            &proxy_token,
+            &source.id,
+            &source.bearer_token,
+            &source.name,
+            &source.task,
+        );
+        let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
+
+        let info = self
+            .cube
+            .create_sandbox(CreateSandboxArgs {
+                template_id: new_template_id.to_owned(),
+                env,
+                from_snapshot_path: None,
+                resolved_policy: resolved.clone(),
+            })
+            .await?;
+        tracing::info!(
+            instance = %source.id,
+            old_sandbox = %old_sandbox_id,
+            new_sandbox = %info.sandbox_id,
+            "recreate-in-place: new cube live"
+        );
+
+        self.instances
+            .replace_cube_sandbox(
+                &source.id,
+                &info.sandbox_id,
+                new_template_id,
+                &target_policy,
+                &resolved.allow_out,
+                now_secs(),
+            )
+            .await?;
+
+        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let body = ReconfigureBody {
+                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
+                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+                models: source.models.clone(),
+                instance_id: Some(source.id.clone()),
+                proxy_token: Some(proxy_token.clone()),
+                proxy_base: Some(format!(
+                    "{}/openrouter",
+                    self.proxy_base.trim_end_matches('/')
+                )),
+                image_provider_name: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_provider_block: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
+                image_generation_provider: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_generation_model: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.model.clone()),
+                reset_skills: true,
+                mcp_servers: None,
+            };
+            if let Err(err) =
+                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
+            {
+                tracing::warn!(
+                    instance = %source.id,
+                    error = %err,
+                    "recreate-in-place: configure-push failed; will be retried by next sweep"
+                );
+            }
+        }
+
+        if let Err(err) = self.cube.destroy_sandbox(&old_sandbox_id).await {
+            tracing::warn!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                error = %err,
+                "recreate-in-place: old cube destroy failed (orphan cube — janitor will sweep)"
+            );
+        } else {
+            tracing::info!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                "recreate-in-place: old cube destroyed"
+            );
+        }
+
+        self.instances
+            .get_for_owner(owner_id, &source.id)
+            .await?
+            .ok_or(SwarmError::NotFound)
+    }
+
     pub async fn create(
         &self,
         owner_id: &str,
