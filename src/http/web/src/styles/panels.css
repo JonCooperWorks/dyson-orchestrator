@@ -755,6 +755,36 @@
 }
 .field input:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
 
+/* Checkbox-as-field: row layout with the box on the left of its label.
+ * Without this override, `.field` puts the input on its own line and
+ * the input rule above stretches the checkbox into a full-width text
+ * input.  Used by the tasks form's "enabled" / "I understand" rows. */
+.field.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.field.check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.field.check input[type="checkbox"]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.field.check span { color: var(--fg); font-size: 13px; }
+.field.check:has(input:disabled) { cursor: not-allowed; opacity: 0.6; }
+
 .error {
   padding: 8px 12px;
   background: color-mix(in srgb, var(--danger) 15%, transparent);
@@ -886,8 +916,11 @@
   align-items: center;
   justify-content: space-between;
   margin-bottom: 8px;
+  gap: 8px;
 }
-.panel-actions { display: flex; gap: 6px; }
+.panel-actions { display: flex; gap: 6px; align-items: center; }
+.panel-actions .btn { margin-top: 0; }
+.panel-header .panel-title { margin-bottom: 0; }
 
 /* ── Tables (snapshots, etc) ─────────────────────────────────── */
 
@@ -1362,7 +1395,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--bg-1);
+  background: var(--bg-2);
   padding: 6px 10px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
@@ -1380,6 +1413,9 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+.tasks-row-actions .btn { margin-top: 0; }
+.tasks-row-url .btn { margin-top: 0; }
+.task-url-field .btn { margin-top: 0; }
 
 .task-scheme-grid {
   display: flex;
@@ -1390,49 +1426,60 @@
 .task-scheme {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px;
+  gap: 12px;
+  padding: 12px 14px;
   background: var(--bg-1);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
+.task-scheme:hover { background: var(--bg-2); }
 .task-scheme.selected {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-1));
 }
 .task-scheme.danger.selected {
   border-color: var(--danger, #d97757);
-  box-shadow: 0 0 0 1px var(--danger, #d97757) inset;
+  background: color-mix(in srgb, var(--danger, #d97757) 8%, var(--bg-1));
 }
 .task-scheme input[type="radio"] {
-  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  font-family: inherit;
   flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
+.task-scheme.danger input[type="radio"] { accent-color: var(--danger, #d97757); }
 .task-scheme-body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
-.task-scheme-label { font-weight: 600; font-size: 13px; }
-.task-scheme-hint { line-height: 1.4; }
+.task-scheme-label { font-weight: 600; font-size: 13px; color: var(--fg); }
+.task-scheme-hint { line-height: 1.45; }
 
 .task-url-field {
   display: flex;
   gap: 8px;
-  align-items: center;
+  align-items: stretch;
 }
 .task-url-field input {
   flex: 1;
+  min-width: 0;
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 12px;
 }
 
-.deliveries-panel { margin-top: 4px; }
-
 .deliveries-list {
   list-style: none;
-  margin: 0;
+  margin: 4px 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1442,11 +1489,11 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
 }
-.deliveries-row:last-child { border-bottom: none; }
-.deliveries-row.sig-bad { background: color-mix(in srgb, var(--bg-2) 92%, var(--danger, #d97757) 8%); }
+.deliveries-row:first-child { border-top: none; padding-top: 8px; }
+.deliveries-row.sig-bad { color: var(--fg); }
 
 .deliveries-row-head {
   display: flex;
@@ -1458,8 +1505,12 @@
 .deliveries-row-err {
   color: var(--fg-muted);
   white-space: pre-wrap;
+  font-family: var(--mono, ui-monospace, monospace);
+  word-break: break-word;
 }
 
 @media (max-width: 640px) {
-  .tasks-row-actions .btn { flex: 1; text-align: center; }
+  .tasks-row-actions .btn { flex: 1; text-align: center; min-width: 0; }
+  .tasks-row-url { flex-direction: column; align-items: stretch; }
+  .tasks-row-url code { white-space: normal; word-break: break-all; }
 }

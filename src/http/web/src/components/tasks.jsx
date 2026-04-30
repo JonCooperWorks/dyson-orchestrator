@@ -414,10 +414,10 @@ function TaskForm({ instanceId, taskName }) {
               onChange={e => setEnabled(e.target.checked)}
               disabled={submitting}
             />
-            <span>enabled — accept incoming webhook calls</span>
+            <span>accept incoming webhook calls</span>
           </label>
           <small className="muted">
-            Disabled tasks return 404 at the public URL.  The row stays
+            When unchecked, the public URL returns 404.  The row stays
             so the configuration sticks; flip back on to resume.
           </small>
         </section>
@@ -487,16 +487,20 @@ function DeliveriesPanel({ instanceId, taskName }) {
   }, [refresh]);
 
   return (
-    <section className="panel deliveries-panel">
-      <div className="panel-title">
-        recent deliveries
-        <button type="button" className="btn btn-ghost btn-sm" onClick={refresh}>↻</button>
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">recent deliveries</div>
+        <div className="panel-actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={refresh} title="refresh">
+            ↻
+          </button>
+        </div>
       </div>
       {err ? <div className="error">{err}</div> : null}
       {loading ? (
-        <div className="muted small">loading…</div>
+        <p className="muted small">loading…</p>
       ) : rows.length === 0 ? (
-        <div className="muted small">no deliveries yet — fire the webhook to see it here.</div>
+        <p className="muted small">no deliveries yet — fire the webhook to see it here.</p>
       ) : (
         <ul className="deliveries-list">
           {rows.map(d => (
