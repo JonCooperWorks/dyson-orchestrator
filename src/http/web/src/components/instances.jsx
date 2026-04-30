@@ -2289,7 +2289,11 @@ function McpServersPanel({ instanceId, disabled }) {
   const [rows, setRows] = React.useState(null);
   const [err, setErr] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
-  const [editing, setEditing] = React.useState(null); // null | { row | "new" }
+  // editing: null | { mode: 'new' } | { mode: 'edit', row } | { mode: 'loading' }
+  // The "loading" state shows a spinner while we fetch the full URL
+  // for the edit form (the listing strips query strings; the edit
+  // modal needs the un-stripped value to pre-fill cleanly).
+  const [editing, setEditing] = React.useState(null);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -2355,6 +2359,25 @@ function McpServersPanel({ instanceId, disabled }) {
     }
   };
 
+  // Edit-button path: fetch the FULL URL via getMcpServer (the listing
+  // strips query strings) so the modal pre-fills with whatever the
+  // operator originally saved.  Shows a transient busy state while
+  // the round-trip lands; on failure we fall back to the stripped row
+  // so the user can still edit (worst case: they re-paste the URL).
+  const openEdit = async (row) => {
+    setBusy(true); setErr(null);
+    try {
+      const detail = await client.getMcpServer(instanceId, row.name);
+      setEditing({ mode: 'edit', row: detail || row });
+    } catch (e) {
+      // Fall back to listing data — better than blocking the edit.
+      console.warn('[swarm] mcp edit: getMcpServer failed', e);
+      setEditing({ mode: 'edit', row });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="panel">
       <div className="panel-header">
@@ -2386,7 +2409,7 @@ function McpServersPanel({ instanceId, disabled }) {
               key={r.name}
               row={r}
               busy={busy || disabled}
-              onEdit={() => setEditing({ mode: 'edit', row: r })}
+              onEdit={() => openEdit(r)}
               onConnect={() => connect(r.name)}
               onDisconnect={() => disconnect(r.name)}
               onRemove={() => remove(r.name)}

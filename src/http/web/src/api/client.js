@@ -377,9 +377,23 @@ export class SwarmClient {
   /// `[{name, url, auth_kind, connected}, ...]` for one instance.
   /// `connected` is true for bearer/none entries (always usable) and
   /// for OAuth entries that have completed their flow at least once.
+  /// Listing returns URLs with their query string + fragment stripped —
+  /// the listing surface is read-only and we don't want a glance at the
+  /// SPA to leak a query-string credential.  Edit-form pre-fill uses
+  /// `getMcpServer` below, which serves the full URL.
   listMcpServers(instanceId) {
     return this._json(
       `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  /// Single-server detail with the FULL URL (query string included).
+  /// Used by the edit modal to pre-fill without forcing the operator
+  /// to re-enter a query-string credential they already saved.
+  getMcpServer(instanceId, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers/${encodeURIComponent(name)}`,
       { headers: { Accept: 'application/json' } },
     );
   }

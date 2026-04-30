@@ -18,7 +18,7 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -101,8 +101,10 @@ pub fn router(svc: Arc<McpService>) -> Router {
 pub fn user_router(svc: Arc<McpService>) -> Router {
     Router::new()
         .route("/v1/instances/:id/mcp/servers", get(list_servers))
-        .route("/v1/instances/:id/mcp/servers/:name", put(put_server))
-        .route("/v1/instances/:id/mcp/servers/:name", delete(delete_server))
+        .route(
+            "/v1/instances/:id/mcp/servers/:name",
+            get(get_server).put(put_server).delete(delete_server),
+        )
         .route(
             "/v1/instances/:id/mcp/servers/:name/disconnect",
             post(disconnect_server),
@@ -568,10 +570,76 @@ async fn list_servers(
             };
             let connected = matches!(&e.auth, McpAuthSpec::Oauth { .. }) && e.oauth_tokens.is_some()
                 || matches!(&e.auth, McpAuthSpec::Bearer { .. } | McpAuthSpec::None);
-            out.push(ServerSummary { name, url: e.url, auth_kind, connected });
+            // Strip query string + fragment.  Many MCP servers carry their
+            // API key as a `?apikey=...` query param (Alpha Vantage, a few
+            // SaaS gateways), and the listing surface is the only place
+            // that plaintext URL would otherwise leak — the proxy URL the
+            // running agent sees is `<swarm>/mcp/<id>/<name>`, never the
+            // upstream.  By dropping the query here, an operator who
+            // glances at the SPA never sees the secret; if they want to
+            // edit the row they have to re-enter the credential, which is
+            // the right UX for a secret-bearing field anyway.  The full
+            // URL stays sealed in user_secrets and the proxy decrypts it
+            // per request — only the *display* is trimmed.
+            let url = strip_url_query(&e.url);
+            out.push(ServerSummary { name, url, auth_kind, connected });
         }
     }
     Ok(Json(out))
+}
+
+/// Return `s` with `?...` and `#...` removed, if present.  Doesn't
+/// validate the URL — non-URL strings round-trip unchanged (we'd rather
+/// surface a stored value than swallow it).
+fn strip_url_query(s: &str) -> String {
+    let mut end = s.len();
+    if let Some(q) = s.find('?') {
+        end = end.min(q);
+    }
+    if let Some(h) = s.find('#') {
+        end = end.min(h);
+    }
+    s[..end].to_string()
+}
+
+/// Single-server detail.  Surfaces the **full** URL — query string and
+/// all — so the SPA's edit form can pre-fill without forcing the
+/// operator to re-enter a query-string credential they already saved.
+/// The list endpoint above strips queries by design; this one is the
+/// "I'm about to edit, give me what I had" path.  Owner-scoped same as
+/// list_servers.
+async fn get_server(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, name)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+) -> Result<Json<ServerSummary>, Response<Body>> {
+    let owner_id = caller.user_id.clone();
+    if !owner_owns_instance(&svc, &owner_id, &instance_id).await {
+        return Err(error_resp(StatusCode::NOT_FOUND, "no such instance"));
+    }
+    let entry = mcp_servers::get(&svc.user_secrets, &owner_id, &instance_id, &name)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "mcp: get secret read failed");
+            error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error")
+        })?;
+    let entry = match entry {
+        Some(e) => e,
+        None => return Err(error_resp(StatusCode::NOT_FOUND, "no such mcp server")),
+    };
+    let auth_kind: &'static str = match &entry.auth {
+        McpAuthSpec::None => "none",
+        McpAuthSpec::Bearer { .. } => "bearer",
+        McpAuthSpec::Oauth { .. } => "oauth",
+    };
+    let connected = matches!(&entry.auth, McpAuthSpec::Oauth { .. }) && entry.oauth_tokens.is_some()
+        || matches!(&entry.auth, McpAuthSpec::Bearer { .. } | McpAuthSpec::None);
+    Ok(Json(ServerSummary {
+        name,
+        url: entry.url,
+        auth_kind,
+        connected,
+    }))
 }
 
 async fn owner_owns_instance(svc: &McpService, owner_id: &str, instance_id: &str) -> bool {
@@ -739,6 +807,38 @@ mod tests {
     use crate::db::open_in_memory;
     use crate::db::secrets::SqlxUserSecretStore;
     use crate::envelope::AgeCipherDirectory;
+
+    #[test]
+    fn strip_url_query_drops_query_and_fragment() {
+        assert_eq!(
+            strip_url_query("https://mcp.alphavantage.co/mcp?apikey=AABBCC"),
+            "https://mcp.alphavantage.co/mcp"
+        );
+        assert_eq!(
+            strip_url_query("https://example.com/path#frag"),
+            "https://example.com/path"
+        );
+        assert_eq!(
+            strip_url_query("https://example.com/path?k=v#frag"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn strip_url_query_passes_through_clean_url() {
+        let clean = "https://mcp.context7.com/mcp";
+        assert_eq!(strip_url_query(clean), clean);
+    }
+
+    #[test]
+    fn strip_url_query_handles_fragment_before_query() {
+        // RFC violators that put `#` before `?` — strip at the earliest
+        // delimiter so we never accidentally render past it.
+        assert_eq!(
+            strip_url_query("https://example.com/path#frag?secret=x"),
+            "https://example.com/path"
+        );
+    }
 
     async fn seeded_user_secrets() -> (tempfile::TempDir, Arc<UserSecretsService>) {
         let pool = open_in_memory().await.unwrap();
