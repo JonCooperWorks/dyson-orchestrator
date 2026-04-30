@@ -30,6 +30,12 @@ const initial = {
   webhooks: {
     byInstance: {},
   },
+  // Per-instance share roster — same shape as webhooks.  Backs the
+  // "shared" button's count badge in the detail header and the
+  // SharesPage roster.
+  shares: {
+    byInstance: {},
+  },
 };
 
 export const store = createStore(initial);
@@ -145,6 +151,44 @@ export function removeWebhook(instanceId, name) {
   });
 }
 
+// ─── shares (anonymous artefact links) ────────────────────────────
+
+export function setSharesFor(instanceId, rows) {
+  if (!instanceId) return;
+  store.dispatch(s => ({
+    ...s,
+    shares: {
+      ...s.shares,
+      byInstance: {
+        ...s.shares.byInstance,
+        [instanceId]: { rows: Array.isArray(rows) ? rows : [], loadedAt: Date.now() },
+      },
+    },
+  }));
+}
+
+export function removeShare(instanceId, jti) {
+  if (!instanceId || !jti) return;
+  store.dispatch(s => {
+    const slot = s.shares.byInstance[instanceId];
+    if (!slot) return s;
+    // Local mark-as-revoked rather than splice — keeps the row in
+    // the table so the operator sees what just happened (the badge
+    // counts only `active` rows so it still ticks down).
+    const now = Math.floor(Date.now() / 1000);
+    const rows = slot.rows.map(r => (
+      r.jti === jti && !r.revoked_at ? { ...r, revoked_at: now, active: false } : r
+    ));
+    return {
+      ...s,
+      shares: {
+        ...s.shares,
+        byInstance: { ...s.shares.byInstance, [instanceId]: { rows, loadedAt: Date.now() } },
+      },
+    };
+  });
+}
+
 // ─── hash routing ──────────────────────────────────────────────────
 //
 // Hash paths the SPA understands (mirrors what Dyson does — keeps a
@@ -184,6 +228,8 @@ export function parseHashView() {
   };
   const tasks = h.match(/^#\/i\/([^/?#]+)\/tasks/);
   if (tasks) return { name: 'instance-tasks', id: decodeURIComponent(tasks[1]), taskName: null };
+  const shares = h.match(/^#\/i\/([^/?#]+)\/shares/);
+  if (shares) return { name: 'instance-shares', id: decodeURIComponent(shares[1]) };
   const edit = h.match(/^#\/i\/([^/?#]+)\/edit/);
   if (edit) return { name: 'instance-edit', id: decodeURIComponent(edit[1]) };
   const m = h.match(/^#\/i\/([^/?#]+)/);

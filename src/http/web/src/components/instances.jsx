@@ -18,9 +18,8 @@ import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import {
   upsertInstance, removeInstance, selectInstance, setLoadError, setInstances,
-  setWebhooksFor,
+  setWebhooksFor, setSharesFor,
 } from '../store/app.js';
-import { SharesPanel } from './shares.jsx';
 
 // Links inside task markdown open in a new tab — the task pane is a
 // scratchpad, not a navigation target, and following a link in-place
@@ -1431,6 +1430,13 @@ function InstanceDetail({ id, onNew }) {
     if (!slot) return null;
     return slot.rows.filter(r => r.enabled).length;
   });
+  // Active share count for the "shared" button badge — same shape
+  // as the tasks badge.  Active = not revoked AND not expired.
+  const activeShareCount = useAppState(s => {
+    const slot = id ? s.shares.byInstance[id] : null;
+    if (!slot) return null;
+    return slot.rows.filter(r => r.active).length;
+  });
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
 
@@ -1456,6 +1462,17 @@ function InstanceDetail({ id, onNew }) {
     let cancelled = false;
     client.listWebhooks(id).then(list => {
       if (!cancelled) setWebhooksFor(id, list || []);
+    }).catch(() => { /* silent — badge falls back to hidden */ });
+    return () => { cancelled = true; };
+  }, [client, id]);
+
+  // Shares list — fed into the "shared" button's count badge.  Same
+  // pattern as webhooks above.
+  React.useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    client.listShares(id).then(list => {
+      if (!cancelled) setSharesFor(id, list || []);
     }).catch(() => { /* silent — badge falls back to hidden */ });
     return () => { cancelled = true; };
   }, [client, id]);
@@ -1503,23 +1520,6 @@ function InstanceDetail({ id, onNew }) {
       <p className="muted">loading…</p>
     </main>
   );
-
-  const probe = async () => {
-    setBusy(true); setErr(null);
-    try {
-      const result = await client.probeInstance(id);
-      // probe returns { result: "healthy" | ... }; refetch row to pick
-      // up the updated last_probe_at / last_probe_status the handler
-      // wrote inline.
-      const next = await client.getInstance(id);
-      if (next) upsertInstance(next);
-      return result;
-    } catch (e) {
-      setErr(e?.message || 'probe failed');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const destroy = async () => {
     if (!confirm(`destroy instance ${id}? this is permanent.`)) return;
@@ -1597,7 +1597,18 @@ function InstanceDetail({ id, onNew }) {
               ? <span className="btn-count-badge" aria-label={`${enabledTaskCount} enabled`}>{enabledTaskCount}</span>
               : null}
           </a>
-          <button className="btn btn-ghost" onClick={probe} disabled={busy}>probe</button>
+          <a
+            className="btn btn-ghost"
+            href={`#/i/${encodeURIComponent(id)}/shares`}
+            aria-disabled={busy}
+            onClick={(e) => { if (busy) e.preventDefault(); }}
+            title="anonymous artefact share links — copy, revoke, audit"
+          >
+            shared
+            {activeShareCount > 0
+              ? <span className="btn-count-badge" aria-label={`${activeShareCount} active`}>{activeShareCount}</span>
+              : null}
+          </a>
           <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>
             destroy
           </button>
@@ -1623,7 +1634,6 @@ function InstanceDetail({ id, onNew }) {
       <ToolsView instance={row}/>
       <SecretsPanel instanceId={id}/>
       <McpServersPanel instanceId={id} disabled={row.status === 'destroyed'}/>
-      <SharesPanel instanceId={id} disabled={row.status === 'destroyed'}/>
 
       {/* IDENTITY.md prose lives at the very bottom — operators reach
           for actions / runtime / snapshots / policy first; the agent's

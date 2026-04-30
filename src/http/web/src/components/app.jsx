@@ -12,6 +12,7 @@ import { setView, parseHashView } from '../store/app.js';
 import { TopBar } from './topbar.jsx';
 import { InstancesView, NewInstancePage, EditInstancePage } from './instances.jsx';
 import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './tasks.jsx';
+import { SharesPage } from './shares.jsx';
 import { AdminView } from './admin.jsx';
 import { ByokView } from './byok.jsx';
 
@@ -56,6 +57,8 @@ function renderView(view) {
       return <AuditListPage instanceId={view.id}/>;
     case 'instance-task-audit-detail':
       return <AuditDetailPage instanceId={view.id} deliveryId={view.deliveryId}/>;
+    case 'instance-shares':
+      return <SharesPage instanceId={view.id}/>;
     case 'admin':
       return <AdminView/>;
     case 'byok':
