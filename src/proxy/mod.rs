@@ -53,19 +53,6 @@ pub struct ProxyService {
     /// store.
     pub user_secrets: Option<Arc<crate::secrets::UserSecretsService>>,
     rate: Arc<RateWindow>,
-    /// Per-owner async mutex used to close the D2 TOCTOU between
-    /// "read `daily_tokens`" and "INSERT audit row" in the proxy
-    /// handler.  Held from the budget snapshot through the post-send
-    /// audit insert so two concurrent requests from one owner can't
-    /// both pass the budget check before either has charged itself.
-    /// Cost: per-owner concurrency caps at 1 in-flight request during
-    /// the budget-check + send window — fine for interactive use,
-    /// real for batch users.  Same `parking_lot<HashMap<…tokio>>>`
-    /// shape `dyson_reconfig::mint_locks` already uses.  Map is never
-    /// GC'd; entries are tiny `Arc<Mutex<()>>` and live for the life
-    /// of the process — one per ever-active owner.
-    budget_locks:
-        Arc<parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl ProxyService {
@@ -92,20 +79,7 @@ impl ProxyService {
             user_or_keys: None,
             user_secrets: None,
             rate: Arc::new(RateWindow::default()),
-            budget_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         })
-    }
-
-    /// Acquire (or lazily create) the per-owner serialization lock that
-    /// guards the budget-check + audit-insert window.  Returns the
-    /// `Arc<Mutex>` so the caller can `.lock_owned().await`; we never
-    /// hand out a guard directly because the caller wants to drop it
-    /// before streaming the response body.
-    pub fn budget_lock_for(&self, owner_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self.budget_locks.lock();
-        map.entry(owner_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
     }
 
     /// Builder-style setter so main.rs can plug in the resolver
