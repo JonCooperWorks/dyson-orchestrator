@@ -637,6 +637,8 @@ function NewInstanceForm() {
         <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
       </section>
 
+      <ToolsPicker value={tools} onChange={setTools}/>
+
       <section className="page-section">
         <h2 className="section-title">MCP servers</h2>
         <McpServersEditor value={mcpServers} onChange={setMcpServers}/>
@@ -648,8 +650,6 @@ function NewInstanceForm() {
           you hire the dyson.
         </span>
       </section>
-
-      <ToolsPicker value={tools} onChange={setTools}/>
 
       <section className="page-section">
         <h2 className="section-title">infrastructure</h2>
