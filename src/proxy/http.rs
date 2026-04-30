@@ -97,15 +97,18 @@ async fn handle(
     // 3. Policy + usage are keyed on owner_id, not instance_id, so a user
     // with N instances shares one budget envelope.
     //
-    // Race: between reading `daily_tokens` here and the audit insert at
-    // step 6, two concurrent requests can both pass the budget check
-    // before either inserts a row.  The atomic version wants:
-    //   `tx = pool.begin_immediate()` → `daily_tokens(...)` (inside tx)
-    //   → enforce → `tx.insert(audit_entry)` → `tx.commit()`.
-    // This is D2 in the security review and requires a new
-    // `AuditStore::insert_with_tx` method (trait surgery owned by
-    // Agent 1).  Until that's plumbed, the window stays — typical
-    // exposure is a single extra request slipping past the cap.
+    // D2: close the TOCTOU between "read `daily_tokens`" and "INSERT
+    // audit row" with a per-owner async mutex.  We hold it from before
+    // the snapshot through the post-`send()` audit insert so two
+    // concurrent requests from one owner can't both pass the budget
+    // check before either has charged itself.  Cost: per-owner
+    // concurrency caps at 1 in-flight request during the budget-check
+    // + upstream-send window — fine for interactive use, real for
+    // batch users.  Single-process serialization (we run one swarm
+    // tokio runtime); a multi-process deployment would need the
+    // SQL-transaction approach instead.
+    let owner_lock = state.budget_lock_for(&owner_id);
+    let _budget_guard = owner_lock.lock_owned().await;
     let policy = match state.policies.get(&owner_id).await {
         Ok(Some(p)) => p,
         Ok(None) => state.default_policy.clone(),
