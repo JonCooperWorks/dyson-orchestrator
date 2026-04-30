@@ -315,21 +315,21 @@ function initialTools(row, kind) {
   return kind === 'airgap' ? [] : [...ALL_TOOL_NAMES];
 }
 
-/// Compact accordion that lists every built-in dyson tool grouped
-/// by category, each with a checkbox.  Closed by default so the
-/// form's primary surface (identity, model, network) stays tight.
-/// Header counter ("12 / 24 enabled") tells the operator at a
-/// glance how trimmed their toolbox is without having to expand.
+/// Group the catalogue once for the picker / display.
+const TOOL_GROUPS = (() => {
+  const m = new Map();
+  for (const t of TOOL_CATALOGUE) {
+    if (!m.has(t.group)) m.set(t.group, []);
+    m.get(t.group).push(t);
+  }
+  return [...m.entries()];
+})();
+
+/// Editable tool picker — every built-in grouped by category with a
+/// checkbox.  Open by default; same panel chrome as snapshots /
+/// secrets / mcp / network so the detail-page rhythm holds.
 function ToolsPicker({ value, onChange }) {
   const enabled = React.useMemo(() => new Set(value), [value]);
-  const groups = React.useMemo(() => {
-    const m = new Map();
-    for (const t of TOOL_CATALOGUE) {
-      if (!m.has(t.group)) m.set(t.group, []);
-      m.get(t.group).push(t);
-    }
-    return [...m.entries()];
-  }, []);
   const toggle = (name) => {
     const next = new Set(enabled);
     if (next.has(name)) next.delete(name);
@@ -339,16 +339,13 @@ function ToolsPicker({ value, onChange }) {
   const setAll = (on) => onChange(on ? [...ALL_TOOL_NAMES] : []);
 
   return (
-    <details className="tools-accordion">
-      <summary className="tools-accordion-summary">
-        <span className="tools-accordion-chev" aria-hidden="true">▸</span>
-        <span className="tools-accordion-title">tools</span>
-        <span className="tools-accordion-count muted small">
-          {enabled.size} / {ALL_TOOL_NAMES.length} enabled
-        </span>
-      </summary>
-      <div className="tools-accordion-body">
-        <div className="tools-accordion-actions">
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">tools</div>
+        <div className="panel-actions">
+          <span className="muted small" style={{ marginRight: 8 }}>
+            {enabled.size} / {ALL_TOOL_NAMES.length} enabled
+          </span>
           <button
             type="button"
             className="btn btn-ghost btn-sm"
@@ -366,7 +363,14 @@ function ToolsPicker({ value, onChange }) {
             disable all
           </button>
         </div>
-        {groups.map(([group, items]) => (
+      </div>
+      <p className="muted small">
+        Built-in tools the dyson registers on boot.  Air-gapped
+        employees start with nothing — pick only what the task
+        actually needs.
+      </p>
+      <div className="tools-body">
+        {TOOL_GROUPS.map(([group, items]) => (
           <fieldset key={group} className="tools-group">
             <legend className="tools-group-label muted small">{group}</legend>
             <div className="tools-grid">
@@ -384,7 +388,61 @@ function ToolsPicker({ value, onChange }) {
           </fieldset>
         ))}
       </div>
-    </details>
+    </section>
+  );
+}
+
+/// Read-only tools view for the instance-detail page.  Same visual
+/// rhythm as the picker but inputs are disabled so the operator
+/// sees what's enabled at a glance and clicks "edit" to change it.
+/// Empty `tools` on the row means "use dyson defaults" — every
+/// builtin is on.
+function ToolsView({ instance }) {
+  const effective = React.useMemo(() => {
+    if (Array.isArray(instance.tools) && instance.tools.length > 0) {
+      return new Set(instance.tools);
+    }
+    // Empty list: airgap means "no tools", anything else means
+    // "use dyson defaults" which renders as every tool enabled.
+    return instance.network_policy?.kind === 'airgap'
+      ? new Set()
+      : new Set(ALL_TOOL_NAMES);
+  }, [instance.tools, instance.network_policy?.kind]);
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">tools</div>
+        <div className="panel-actions">
+          <span className="muted small">
+            {effective.size} / {ALL_TOOL_NAMES.length} enabled
+          </span>
+        </div>
+      </div>
+      <div className="tools-body tools-body-readonly">
+        {TOOL_GROUPS.map(([group, items]) => (
+          <fieldset key={group} className="tools-group">
+            <legend className="tools-group-label muted small">{group}</legend>
+            <div className="tools-grid">
+              {items.map(t => (
+                <span
+                  key={t.name}
+                  className={`tools-cell ${effective.has(t.name) ? 'on' : 'off'}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={effective.has(t.name)}
+                    readOnly
+                    disabled
+                    aria-label={t.name}
+                  />
+                  <span className="tools-cell-name mono-sm">{t.name}</span>
+                </span>
+              ))}
+            </div>
+          </fieldset>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -591,13 +649,7 @@ function NewInstanceForm() {
         </span>
       </section>
 
-      <section className="page-section">
-        <ToolsPicker value={tools} onChange={setTools}/>
-        <span className="hint muted small">
-          Toolbox the dyson registers on boot.  Air-gapped employees
-          start with nothing — pick only what the task actually needs.
-        </span>
-      </section>
+      <ToolsPicker value={tools} onChange={setTools}/>
 
       <section className="page-section">
         <h2 className="section-title">infrastructure</h2>
@@ -1469,6 +1521,7 @@ function InstanceDetail({ id, onNew }) {
 
       <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
       <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
+      <ToolsView instance={row}/>
       <SecretsPanel instanceId={id}/>
       <McpServersPanel instanceId={id} disabled={row.status === 'destroyed'}/>
 
