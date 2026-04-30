@@ -42,6 +42,25 @@ pub fn router(state: AppState) -> Router {
             post(recreate_instance),
         )
         .route(
+            "/v1/instances/:id/reset",
+            post(reset_instance),
+        )
+        .with_state(state)
+}
+
+/// Admin-only routes mounted under `/v1/instances/*`.  Wired into the
+/// admin chain so `require_admin_role` 404s non-admin callers — same
+/// posture as `proxy_admin` and `admin_users`.
+///
+/// `/clone` is admin-gated because it can produce a copy of any
+/// instance under any template (full snapshot or empty), which is
+/// operator-shaped behaviour: tenants who want to rebuild their own
+/// instance from the latest template use the tenant-facing
+/// `/reset` route below, which is locked to clone-empty semantics
+/// and respects ownership.
+pub fn admin_router(state: AppState) -> Router {
+    Router::new()
+        .route(
             "/v1/instances/:id/clone",
             post(clone_instance),
         )
@@ -254,6 +273,44 @@ async fn clone_instance(
             // Same hostname rewrite as create_instance — turn the raw
             // <sandbox>.cube.app URL into <id>.<hostname> so the SPA
             // gets a browser-resolvable open_url back.
+            if let Some(host) = state.hostname.as_deref().filter(|h| !h.is_empty()) {
+                c.url = format!("https://{}.{}/", c.id, host.trim_end_matches('/'));
+            }
+            Ok((StatusCode::CREATED, Json(c)))
+        }
+        Err(e) => Err(swarm_err_to_status(e)),
+    }
+}
+
+/// **Destructive.**  Hire a fresh empty dyson on the latest cube
+/// template with the source's name, task, models, tools, network
+/// policy, per-instance secrets, and MCP servers (with active OAuth
+/// sessions preserved) — but NO workspace state.  SOUL/IDENTITY/
+/// MEMORY, chat history, knowledge base, learned skills, and any
+/// in-flight work are LOST: the new cube boots from the template's
+/// clean rootfs.  Source row is left running so the operator can
+/// manually destroy or keep it as a backup.
+///
+/// Tenant-facing — runs under the same user-identity middleware as
+/// the rest of the instance routes; ownership is enforced inside
+/// `clone_empty`.  No body fields.
+async fn reset_instance(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<CreatedInstance>), StatusCode> {
+    let target = state
+        .auth_config
+        .default_template_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state
+        .instances
+        .clone_empty(&caller.user_id, &id, &target, None)
+        .await
+    {
+        Ok(mut c) => {
             if let Some(host) = state.hostname.as_deref().filter(|h| !h.is_empty()) {
                 c.url = format!("https://{}.{}/", c.id, host.trim_end_matches('/'));
             }

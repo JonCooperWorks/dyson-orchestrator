@@ -68,22 +68,19 @@ export class SwarmClient {
     return this._json(`/v1/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
-  /// Clone an existing instance: snapshot+restore onto a fresh swarm id
-  /// under the operator's default template (or the supplied
-  /// `templateId`).  Carries name, task, models, tools, network policy,
-  /// per-instance secrets, and MCP server records (with active OAuth
-  /// sessions preserved); mints a fresh bearer + proxy token + DNS
-  /// subdomain.  Source row stays running.  Response shape matches
-  /// `createInstance` so callers can share the post-create UX.
-  cloneInstance(id, { templateId, name, empty } = {}) {
-    const body = {};
-    if (typeof templateId === 'string' && templateId) body.template_id = templateId;
-    if (typeof name === 'string') body.name = name;
-    if (empty === true) body.empty = true;
-    return this._json(`/v1/instances/${encodeURIComponent(id)}/clone`, {
+  /// **Destructive.**  Hire a fresh empty dyson on the latest cube
+  /// template with the source's name, task, models, tools, network
+  /// policy, per-instance secrets, and MCP servers (active OAuth
+  /// sessions preserved) — but NO workspace state.  Memory, chats,
+  /// knowledge base, and learned skills do NOT carry over.  Source
+  /// row stays running so it can be inspected or kept as a backup
+  /// and destroyed manually.  Response shape matches `createInstance`
+  /// so callers can share the post-create UX.
+  resetInstance(id) {
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/reset`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: '{}',
     });
   }
 

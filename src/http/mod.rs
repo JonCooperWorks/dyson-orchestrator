@@ -140,8 +140,9 @@ pub fn router(
     // require_admin_role's pass-through branch then stamps the
     // X-Swarm-Insecure header.  Otherwise local-dev would 401 on
     // every admin endpoint and the marker header would never fire.
-    let admin_handlers =
-        proxy_admin::router(state.clone()).merge(crate::http::admin_users::router(state.clone()));
+    let admin_handlers = proxy_admin::router(state.clone())
+        .merge(crate::http::admin_users::router(state.clone()))
+        .merge(instances::admin_router(state.clone()));
     let admin = if auth.dangerous_no_auth {
         admin_handlers
             .layer(middleware::from_fn_with_state(auth.clone(), require_admin_role))

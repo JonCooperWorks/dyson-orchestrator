@@ -1534,23 +1534,30 @@ function InstanceDetail({ id, onNew }) {
     }
   };
 
-  // Hire a fresh dyson on the latest cube template with the source's
-  // name, task, models, tools, network policy, per-instance secrets,
-  // and MCP servers (active OAuth sessions preserved).  Source row
-  // keeps running.  Two modes:
-  //   empty=false: snapshot+restore — workspace files come along too
-  //                (SOUL/IDENTITY/MEMORY, chats, kb, skills).
-  //   empty=true:  clean rootfs — config + secrets + MCP only.  Use
-  //                when the cube snapshot path is unavailable.
-  const clone = async (empty = false) => {
+  // DESTRUCTIVE.  Hire a fresh empty dyson on the latest cube
+  // template with the same config (name, task, models, tools, network
+  // policy), per-instance secrets, and MCP servers (active OAuth
+  // sessions preserved) — but NO workspace state.  Memory, chats,
+  // knowledge base, learned skills, and any in-flight work do NOT
+  // carry over; the new cube boots from the template's clean rootfs.
+  // Source row stays running so the operator can keep it as a backup
+  // and destroy it manually once they've confirmed the rebuild is
+  // healthy.
+  const reset = async () => {
     const label = row.name && row.name.trim() ? row.name : id;
-    const blurb = empty
-      ? `clone ${label} as an empty dyson? hires a fresh one on the latest template with the same config, secrets, and MCP servers — workspace files (memory, chats, kb, skills) DO NOT come along.`
-      : `clone ${label}? snapshots this dyson and hires a fresh one on the latest template with the same config, files, secrets, and MCP servers.`;
-    if (!confirm(blurb)) return;
+    const warning =
+      `RESET ${label} on the latest template?\n\n` +
+      `This is DESTRUCTIVE.  A fresh dyson will be hired with the same ` +
+      `name, task, models, tools, network policy, secrets, and MCP ` +
+      `servers — but its workspace will be EMPTY.  The current dyson's ` +
+      `memory, chats, knowledge base, and learned skills will NOT come ` +
+      `along.  This cannot be undone.\n\n` +
+      `The current dyson stays running; destroy it yourself when you've ` +
+      `verified the new one is healthy.`;
+    if (!confirm(warning)) return;
     setBusy(true); setErr(null);
     try {
-      const created = await client.cloneInstance(id, empty ? { empty: true } : undefined);
+      const created = await client.resetInstance(id);
       try {
         const detail = await client.getInstance(created.id);
         if (detail) upsertInstance(detail);
@@ -1560,7 +1567,7 @@ function InstanceDetail({ id, onNew }) {
       }
       window.location.hash = `#/i/${encodeURIComponent(created.id)}`;
     } catch (e) {
-      setErr(e?.message || 'clone failed');
+      setErr(e?.message || 'reset failed');
     } finally {
       setBusy(false);
     }
@@ -1642,20 +1649,12 @@ function InstanceDetail({ id, onNew }) {
               : null}
           </a>
           <button
-            className="btn btn-ghost"
-            onClick={() => clone(false)}
-            disabled={busy || row.status === 'destroyed' || !row.cube_sandbox_id}
-            title="snapshot this dyson and hire a fresh one on the latest template with the same config, files, secrets, and MCP servers"
-          >
-            clone
-          </button>
-          <button
-            className="btn btn-ghost"
-            onClick={() => clone(true)}
+            className="btn btn-danger"
+            onClick={reset}
             disabled={busy || row.status === 'destroyed'}
-            title="hire a fresh empty dyson on the latest template with the same config, secrets, and MCP servers — workspace files do NOT come along"
+            title="DESTRUCTIVE: hire a fresh dyson on the latest template with this one's config — but workspace data (memory, chats, kb, skills) is NOT carried over"
           >
-            clone (empty)
+            reset
           </button>
           <button className="btn btn-danger" onClick={destroy} disabled={busy || row.status === 'destroyed'}>
             destroy
