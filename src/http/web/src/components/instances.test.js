@@ -207,6 +207,13 @@ describe('NETWORK_REQUIRED_TOOL_NAMES', () => {
       'web_search',
       'image_generate',
       'dependency_scan',
+      // Subagents whose prompts/tools assume reachable upstream:
+      // researcher uses web_search; dependency_review hits OSV;
+      // coder pulls deps mid-fix.  planner / verifier /
+      // security_engineer are offline-capable so they're absent.
+      'researcher',
+      'dependency_review',
+      'coder',
     ]);
   });
 });
@@ -244,5 +251,21 @@ describe('toolBlockedByNetwork', () => {
     // Forward-compat: a future dyson tool the SPA doesn't know
     // about shouldn't get spuriously greyed out — opt-in only.
     expect(toolBlockedByNetwork('future_tool', 'airgap')).toBe(false);
+  });
+
+  test('offline-capable subagents are not blocked under airgap', () => {
+    // planner / verifier / security_engineer all run from local
+    // file inputs and don't pull upstream.  Greying them out
+    // would mislead an operator who explicitly wants an offline
+    // hardened review under airgap.
+    expect(toolBlockedByNetwork('planner', 'airgap')).toBe(false);
+    expect(toolBlockedByNetwork('verifier', 'airgap')).toBe(false);
+    expect(toolBlockedByNetwork('security_engineer', 'airgap')).toBe(false);
+  });
+
+  test('subagents that need upstream are blocked under airgap', () => {
+    expect(toolBlockedByNetwork('researcher', 'airgap')).toBe(true);
+    expect(toolBlockedByNetwork('dependency_review', 'airgap')).toBe(true);
+    expect(toolBlockedByNetwork('coder', 'airgap')).toBe(true);
   });
 });

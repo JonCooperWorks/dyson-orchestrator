@@ -265,6 +265,15 @@ async function waitUntilHealthy(client, id) {
 // dyson's job: filesystem first (the muscle), then web (the
 // outside world), then KB / memory / observability, then security
 // scanners, then admin/comm/skills.
+// Subagents are dispatched as tools — they look like regular
+// builtins to the parent agent (callable by name), but each one
+// boots a child agent with its own constrained toolbox.  We list
+// them in their own group so operators can see + toggle them
+// alongside the leaf tools.
+//
+// `requiresNetwork` is set when the subagent's prompt expects
+// reachable upstreams — `researcher` reads the web, `coder`
+// pulls dependencies — so the airgap visual cue still applies.
 const TOOL_CATALOGUE = [
   { name: 'bash',                       group: 'filesystem' },
   { name: 'read_file',                  group: 'filesystem' },
@@ -290,6 +299,12 @@ const TOOL_CATALOGUE = [
   { name: 'skill_create',               group: 'skills' },
   { name: 'send_file',                  group: 'comm' },
   { name: 'export_conversation',        group: 'comm' },
+  { name: 'planner',                    group: 'subagents' },
+  { name: 'researcher',                 group: 'subagents', requiresNetwork: true },
+  { name: 'verifier',                   group: 'subagents' },
+  { name: 'dependency_review',          group: 'subagents', requiresNetwork: true },
+  { name: 'coder',                      group: 'subagents', requiresNetwork: true },
+  { name: 'security_engineer',          group: 'subagents' },
 ];
 const ALL_TOOL_NAMES = TOOL_CATALOGUE.map(t => t.name);
 export const NETWORK_REQUIRED_TOOL_NAMES = TOOL_CATALOGUE
