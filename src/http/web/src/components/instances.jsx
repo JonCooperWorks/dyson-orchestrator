@@ -2494,19 +2494,17 @@ function NetworkPolicyBadge({ instance }) {
 
 function NetworkPolicyPanel({ instance, disabled }) {
   const { client } = useApi();
-  const [editing, setEditing] = React.useState(false);
   const [policy, setPolicy] = React.useState(() => normaliseInstancePolicy(instance.network_policy));
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
   // Re-sync the working copy when the user navigates between
   // instances (parent's `instance.id` changes).  Do NOT depend on
-  // `instance.network_policy` — the 30s instance-list poll upserts
-  // a fresh object reference on every tick, and including it here
-  // closed the editor a few seconds after the operator opened it.
+  // `instance.network_policy` itself — the 30s instance-list poll
+  // upserts a fresh object reference on every tick and that would
+  // wipe in-progress edits.
   React.useEffect(() => {
     setPolicy(normaliseInstancePolicy(instance.network_policy));
-    setEditing(false);
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instance.id]);
@@ -2533,78 +2531,58 @@ function NetworkPolicyPanel({ instance, disabled }) {
     }
   };
 
-  const currentLabel =
-    POLICY_OPTIONS.find(o => o.kind === (instance.network_policy?.kind || 'nolocalnet'))?.label
-    || 'open';
+  const dirty = !samePolicy(
+    normaliseInstancePolicy(instance.network_policy),
+    policy,
+  );
   return (
     <section className="panel">
       <div className="panel-header">
         <div className="panel-title">network access</div>
-        <div className="panel-actions">
-          {!editing ? (
-            <button
-              className="btn btn-ghost btn-sm"
-              disabled={disabled}
-              onClick={() => setEditing(true)}
-            >
-              change
-            </button>
-          ) : null}
-        </div>
       </div>
-      {!editing ? (
-        <div className="panel-body">
-          <p>
-            <strong>{currentLabel}</strong>
-          </p>
-          {(instance.network_policy?.entries?.length || 0) > 0 ? (
-            <p className="muted small">
-              entries: {(instance.network_policy.entries || []).map(e => (
-                <code key={e} className="mono-sm" style={{ marginRight: 6 }}>{e}</code>
-              ))}
-            </p>
-          ) : null}
-          {(instance.network_policy_cidrs?.length || 0) > 0 ? (
-            <p className="muted small">
-              cube-enforced cidrs: {(instance.network_policy_cidrs || []).map(c => (
-                <code key={c} className="mono-sm" style={{ marginRight: 6 }}>{c}</code>
-              ))}
-            </p>
-          ) : null}
+      <p className="muted small">
+        Egress profile enforced by the cube's eBPF map. Changing it
+        snapshots and re-hires this dyson under a new id (workspace
+        state survives, URL changes).
+      </p>
+      <NetworkPolicyPicker value={policy} onChange={setPolicy}/>
+      {error ? <div className="error">{error}</div> : null}
+      {dirty ? (
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={submit}
+            disabled={submitting || disabled}
+          >
+            {submitting ? 'changing…' : 'snapshot, re-hire, destroy old'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              setPolicy(normaliseInstancePolicy(instance.network_policy));
+              setError(null);
+            }}
+            disabled={submitting}
+          >
+            revert
+          </button>
         </div>
-      ) : (
-        <div className="panel-body">
-          <NetworkPolicyPicker value={policy} onChange={setPolicy}/>
-          <p className="hint muted small">
-            <strong>Heads up:</strong> the cube can't update its eBPF egress
-            map at runtime, so changing the policy snapshots this dyson and
-            re-hires it under a new id (workspace state survives via the
-            snapshot). The current URL will 404 after the change — bookmark
-            the new one from the rail.
-          </p>
-          {error ? <div className="error">{error}</div> : null}
-          <div className="modal-actions">
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={submit}
-              disabled={submitting}
-            >
-              {submitting ? 'changing…' : 'snapshot, re-hire, destroy old'}
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => { setEditing(false); setError(null); }}
-              disabled={submitting}
-            >
-              cancel
-            </button>
-          </div>
-        </div>
-      )}
+      ) : null}
     </section>
   );
+}
+
+function samePolicy(a, b) {
+  if (a.kind !== b.kind) return false;
+  const ae = a.entries || [];
+  const be = b.entries || [];
+  if (ae.length !== be.length) return false;
+  for (let i = 0; i < ae.length; i++) {
+    if (ae[i] !== be[i]) return false;
+  }
+  return true;
 }
 
 function normaliseInstancePolicy(p) {
