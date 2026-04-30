@@ -85,14 +85,18 @@ export class SwarmClient {
   }
 
   /// PATCH the employee profile.  Body fields are optional — pass only
-  /// what you want changed.  When `models` is supplied (non-empty
-  /// array), swarm also pushes the new list into the running dyson
-  /// via /api/admin/configure (Stage 8.3 runtime reconfigure).
-  updateInstance(id, { name, task, models } = {}) {
+  /// what you want changed.  When `models` or `tools` is supplied,
+  /// swarm pushes the new value into the running agent via
+  /// /api/admin/configure (Stage 8.3 runtime reconfigure).  An empty
+  /// `tools` array is meaningful — it resets the row to "use agent
+  /// defaults" — so we forward `[]` through to the backend instead
+  /// of dropping it like the empty-models case.
+  updateInstance(id, { name, task, models, tools } = {}) {
     const body = {};
     if (typeof name === 'string') body.name = name;
     if (typeof task === 'string') body.task = task;
     if (Array.isArray(models) && models.length > 0) body.models = models;
+    if (Array.isArray(tools)) body.tools = tools;
     return this._json(`/v1/instances/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
