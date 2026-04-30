@@ -105,6 +105,47 @@ async fn main() -> ExitCode {
             .await
         }
         Command::DysonSkills { id } => run_dyson_skills(&cfg, id).await,
+        Command::MintApiKey { user_id, label } => run_mint_api_key(&cfg, user_id, label).await,
+    }
+}
+
+/// Mint an opaque user api-key without going through the HTTP admin
+/// surface.  Mirrors `secrets system-set` in posture: direct DB +
+/// cipher access on the swarm host, suitable for first-time setup
+/// or unblocking debug flows when no admin bearer is already
+/// minted.  Prints plaintext to stdout (capture immediately).
+async fn run_mint_api_key(
+    cfg: &config::Config,
+    user_id: String,
+    label: Option<String>,
+) -> ExitCode {
+    let pool = match dyson_swarm::db::open(&cfg.db_path).await {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("db open: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let cipher_dir = match dyson_swarm::envelope::AgeCipherDirectory::new(
+        cfg.keys_dir.clone().unwrap_or_default(),
+    ) {
+        Ok(d) => std::sync::Arc::new(d) as std::sync::Arc<dyn dyson_swarm::envelope::CipherDirectory>,
+        Err(err) => {
+            eprintln!("keys_dir open: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let users = dyson_swarm::db::users::SqlxUserStore::new(pool, cipher_dir);
+    use dyson_swarm::traits::UserStore;
+    match users.mint_api_key(&user_id, label.as_deref()).await {
+        Ok(token) => {
+            println!("{token}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("mint_api_key: {err}");
+            ExitCode::from(2)
+        }
     }
 }
 

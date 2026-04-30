@@ -95,6 +95,19 @@ pub enum Command {
     /// actually loaded (handshake errors otherwise log silently).
     DysonSkills { id: String },
 
+    /// Mint an opaque user API key directly via the DB + cipher,
+    /// bypassing the HTTP admin surface.  Same posture as
+    /// `secrets system-set`: meant for the swarm host operator
+    /// when no admin bearer is already minted.  Prints the
+    /// plaintext token to stdout — capture immediately, never log.
+    MintApiKey {
+        /// The `users.id` (32-hex) to mint the key under.
+        user_id: String,
+        /// Optional human-readable label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+
     /// Restore a new instance from a snapshot id.
     Restore {
         /// Source instance id (informational; the snapshot id below decides the bytes).
