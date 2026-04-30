@@ -136,14 +136,19 @@ function StatusBadge({ status }) {
 // Compact id presentation: shortened by default, click-to-copy.  The
 // raw UUID is bulky and steals horizontal space on mobile; the chip
 // keeps the affordance ("yes this row has an id") without dominating
-// the layout, and a tap copies the full value to the clipboard.
-function IdChip({ id }) {
+// the layout, and a tap copies the agent's public URL (so the
+// operator can paste it into a curl, browser tab, or webhook
+// integration).  Falls back to the raw id when no `openUrl` is
+// supplied — same behaviour as before for callers that don't have
+// the URL handy.
+function IdChip({ id, openUrl }) {
   const [copied, setCopied] = React.useState(false);
   if (!id) return null;
+  const value = openUrl || id;
   const onClick = async (e) => {
     e.preventDefault();
     try {
-      await navigator.clipboard.writeText(id);
+      await navigator.clipboard.writeText(value);
       setCopied(true);
       setTimeout(() => setCopied(false), 1100);
     } catch { /* ignore */ }
@@ -153,7 +158,7 @@ function IdChip({ id }) {
       type="button"
       className="id-chip"
       onClick={onClick}
-      title={copied ? 'copied!' : `${id} — tap to copy`}
+      title={copied ? 'copied!' : `${value} — tap to copy`}
     >
       <code className="mono-sm">{shortId(id)}</code>
       <span className="id-chip-action muted small">{copied ? '✓' : 'copy'}</span>
@@ -1585,7 +1590,7 @@ function InstanceDetail({ id, onNew }) {
             <StatusBadge status={row.status}/>
             <NetworkPolicyBadge instance={row}/>
             {row.pinned ? <span className="badge badge-info">pinned</span> : null}
-            <IdChip id={row.id}/>
+            <IdChip id={row.id} openUrl={row.open_url}/>
           </div>
         </div>
         <div className="detail-actions">

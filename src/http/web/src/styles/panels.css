@@ -406,13 +406,15 @@
   text-align: left;
 }
 
-/* Rail row: name on top, id underneath */
+/* Rail row: name on top, id underneath.  Names get the full width
+ * and can wrap onto a second line — operators frequently set long,
+ * descriptive names ("PR reviewer for foo/bar") and the previous
+ * single-line ellipsis ate the meaningful suffix. */
 .rail-row-name {
   font-weight: 500;
   font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* Disabled-looking link (the "open" button when sandbox isn't ready) */
