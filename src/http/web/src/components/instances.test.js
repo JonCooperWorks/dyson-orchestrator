@@ -12,6 +12,10 @@ import {
   isAirgap,
   toolBlockedByNetwork,
   NETWORK_REQUIRED_TOOL_NAMES,
+  initialTools,
+  nextToolsForPolicyChange,
+  DEFAULT_POLICY_KIND,
+  POLICY_OPTIONS,
 } from './instances.jsx';
 
 describe('profileLabel', () => {
@@ -267,5 +271,128 @@ describe('toolBlockedByNetwork', () => {
     expect(toolBlockedByNetwork('researcher', 'airgap')).toBe(true);
     expect(toolBlockedByNetwork('dependency_review', 'airgap')).toBe(true);
     expect(toolBlockedByNetwork('coder', 'airgap')).toBe(true);
+  });
+});
+
+describe('initialTools', () => {
+  test('uses the row\'s persisted positive list verbatim', () => {
+    const row = { tools: ['bash', 'read_file'] };
+    expect(initialTools(row, 'open')).toEqual(['bash', 'read_file']);
+  });
+
+  test('empty list on a non-airgap row defaults to every tool ticked', () => {
+    // "Use dyson defaults" — operator hasn't trimmed the toolbox,
+    // so the picker shows all builtins as enabled.
+    const row = { tools: [] };
+    const got = initialTools(row, 'nolocalnet');
+    expect(got).toContain('bash');
+    expect(got).toContain('web_fetch');
+    expect(got).toContain('researcher');
+    expect(got.length).toBeGreaterThan(20);
+  });
+
+  test('empty list on an airgap row stays empty', () => {
+    // Airgap default is "opt in tool by tool" — pre-filling all
+    // would give the operator a worse starting point than what
+    // the row already represents.
+    const row = { tools: [] };
+    expect(initialTools(row, 'airgap')).toEqual([]);
+  });
+
+  test('null row + airgap kind starts empty (new-instance airgap path)', () => {
+    expect(initialTools(null, 'airgap')).toEqual([]);
+  });
+
+  test('null row + non-airgap kind starts with every tool ticked', () => {
+    const got = initialTools(null, 'open');
+    expect(got.length).toBeGreaterThan(20);
+    expect(got).toContain('bash');
+  });
+});
+
+describe('nextToolsForPolicyChange', () => {
+  test('clears the picker on transition INTO airgap', () => {
+    // The ergonomic guard from the hire form, ported to edit.
+    // Operator picks airgap, every tool drops — they opt back in.
+    expect(nextToolsForPolicyChange(
+      'open', 'airgap', ['bash', 'read_file'],
+    )).toEqual([]);
+    expect(nextToolsForPolicyChange(
+      'nolocalnet', 'airgap', ['web_fetch'],
+    )).toEqual([]);
+    expect(nextToolsForPolicyChange(
+      'allowlist', 'airgap', ['kb_search'],
+    )).toEqual([]);
+  });
+
+  test('does NOT clear when staying on airgap (e.g. initial mount)', () => {
+    // Critical for edit: a row that's already airgap with a
+    // pre-fill of opted-in tools must NOT lose them on form
+    // mount.  prev === next so the helper is a no-op.
+    const tools = ['ast_query', 'workspace'];
+    expect(nextToolsForPolicyChange('airgap', 'airgap', tools))
+      .toBe(tools);
+  });
+
+  test('preserves a non-empty selection on transition OUT of airgap', () => {
+    // The operator hand-picked a couple of tools under airgap;
+    // moving to open shouldn't silently re-tick the world.
+    const tools = ['ast_query'];
+    expect(nextToolsForPolicyChange('airgap', 'open', tools))
+      .toBe(tools);
+    expect(nextToolsForPolicyChange('airgap', 'nolocalnet', tools))
+      .toBe(tools);
+  });
+
+  test('re-ticks every tool on airgap → other when picker is empty', () => {
+    // The other half of the user-requested rule: an airgap row
+    // with no tools enabled becomes useless when network opens
+    // up unless we re-fill the toolbox.  Empty + leaving airgap
+    // = full set.
+    const got = nextToolsForPolicyChange('airgap', 'open', []);
+    expect(got).toContain('bash');
+    expect(got).toContain('web_fetch');
+    expect(got).toContain('researcher');
+    expect(got.length).toBeGreaterThan(20);
+    // Every other non-airgap target gets the same treatment.
+    expect(nextToolsForPolicyChange('airgap', 'nolocalnet', []).length)
+      .toBe(got.length);
+    expect(nextToolsForPolicyChange('airgap', 'allowlist', []).length)
+      .toBe(got.length);
+    expect(nextToolsForPolicyChange('airgap', 'denylist', []).length)
+      .toBe(got.length);
+  });
+
+  test('does NOT clear on non-airgap-to-non-airgap transitions', () => {
+    // Allowlist ↔ denylist ↔ open all let traffic through, so
+    // there's no reason to wipe the picker.
+    const tools = ['bash', 'web_fetch'];
+    expect(nextToolsForPolicyChange('open', 'allowlist', tools))
+      .toBe(tools);
+    expect(nextToolsForPolicyChange('allowlist', 'denylist', tools))
+      .toBe(tools);
+    expect(nextToolsForPolicyChange('nolocalnet', 'open', tools))
+      .toBe(tools);
+  });
+});
+
+describe('default network policy', () => {
+  test('hire form defaults to airgap', () => {
+    // The operator-asked-for default: airgap.  A hire that
+    // doesn't override gets the smallest blast radius.  Going
+    // with anything wider should be a deliberate pick.
+    expect(DEFAULT_POLICY_KIND).toBe('airgap');
+  });
+
+  test('policy radio order is airgap → allowlist → denylist → open → open+lan', () => {
+    // The brief order; matters because the picker renders in
+    // POLICY_OPTIONS order and operators read top-down.
+    expect(POLICY_OPTIONS.map(o => o.kind)).toEqual([
+      'airgap',
+      'allowlist',
+      'denylist',
+      'nolocalnet',
+      'open',
+    ]);
   });
 });

@@ -337,11 +337,35 @@ const MCP_KEEP_TOKEN = '••••••••';
 ///   - Otherwise: airgap rows start with NOTHING ticked (the
 ///     operator opts in tool by tool), every other policy starts
 ///     with EVERY tool ticked (legacy + new-row default).
-function initialTools(row, kind) {
+export function initialTools(row, kind) {
   if (row && Array.isArray(row.tools) && row.tools.length > 0) {
     return [...row.tools];
   }
   return kind === 'airgap' ? [] : [...ALL_TOOL_NAMES];
+}
+
+/// Pure helper: given a network-policy kind transition, return the
+/// new tools state.  Used by both the hire and edit forms.
+///
+/// - Going INTO airgap (from anything else) clears the picker so
+///   the operator opts in tool by tool — matches the "no network,
+///   minimal surface" spirit of airgap.
+/// - Going OUT of airgap (to anything else) re-ticks every tool
+///   IFF the picker is currently empty.  An operator who moved
+///   away from airgap typically wants the full toolbox available
+///   again; preserving an empty picker would leave them with a
+///   useless dyson.  When they had a non-empty selection (e.g.
+///   they hand-picked a couple of tools under airgap), we
+///   preserve it untouched.
+/// - Every other transition (allowlist↔denylist, etc., or staying
+///   on the same kind on initial mount) leaves the picker alone.
+export function nextToolsForPolicyChange(prevKind, nextKind, currentTools) {
+  if (prevKind !== 'airgap' && nextKind === 'airgap') return [];
+  if (prevKind === 'airgap' && nextKind !== 'airgap'
+      && Array.isArray(currentTools) && currentTools.length === 0) {
+    return [...ALL_TOOL_NAMES];
+  }
+  return currentTools;
 }
 
 /// Group the catalogue once for the picker / display.
@@ -528,12 +552,13 @@ function NewInstanceForm() {
   );
   const [ttlSeconds, setTtlSeconds] = React.useState('');
   // Network policy state.  Default `nolocalnet` matches the row-side
-  // default (NetworkPolicy::default() in src/network_policy.rs) — full
-  // internet minus RFC1918/link-local/cloud-meta.  Operators don't
-  // have to pick anything.  See src/network_policy.rs for the five
-  // profiles.
+  // SPA-side default is airgap — pick a wider profile only when
+  // the task actually needs it.  This intentionally diverges from
+  // the Rust NetworkPolicy::default() (NoLocalNet); existing
+  // instance rows still load with whatever they were hired with,
+  // only the hire form's initial radio is biased toward airgap.
   const [networkPolicy, setNetworkPolicy] = React.useState({
-    kind: 'nolocalnet',
+    kind: DEFAULT_POLICY_KIND,
     entries: [],
   });
   // MCP servers attached at hire time.  Each row is
@@ -541,22 +566,30 @@ function NewInstanceForm() {
   // identifier for React keys; the server-side wire shape (without
   // `id`) is built in `submit`.
   const [mcpServers, setMcpServers] = React.useState([]);
-  // Built-in tool include list.  Default is "every tool ticked"
-  // for non-airgap; airgap starts empty and the operator opts in.
-  const [tools, setTools] = React.useState(() => initialTools(null, 'nolocalnet'));
+  // Built-in tool include list.  Airgap default → empty picker,
+  // operator opts in tool-by-tool.  initialTools handles both
+  // halves (airgap = [], everything else = ALL).
+  const [tools, setTools] = React.useState(() => initialTools(null, DEFAULT_POLICY_KIND));
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
-  // Airgap rule: when the user picks the airgap profile, the tool
-  // picker drops to zero — operators have to opt in tool by tool,
-  // matching the spirit of "no network, minimal surface".  Switching
-  // away from airgap leaves the user's selection alone (don't undo
-  // their work for them).
+  // Airgap rule: when the user transitions INTO airgap, drop the
+  // tool picker to zero — operators have to opt in tool by tool,
+  // matching the spirit of "no network, minimal surface".  Going
+  // OUT of airgap with an empty picker re-ticks every tool (no
+  // working dyson otherwise); going OUT with a hand-picked
+  // selection preserves it.  Transition-aware so initial mount on
+  // an already-airgap row doesn't clobber a pre-fill.
+  //
+  // The ref must be captured BEFORE the setTools updater runs, or
+  // the closure reads the post-update value and the transition
+  // never fires.  We snapshot to a local, update the ref, then
+  // queue the state update.
+  const prevPolicyKindRef = React.useRef(networkPolicy.kind);
   React.useEffect(() => {
-    if (networkPolicy.kind === 'airgap') setTools([]);
-    // Intentionally not depending on `tools` — we only fire on a
-    // policy change, not every checkbox toggle.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const prevKind = prevPolicyKindRef.current;
+    prevPolicyKindRef.current = networkPolicy.kind;
+    setTools(curr => nextToolsForPolicyChange(prevKind, networkPolicy.kind, curr));
   }, [networkPolicy.kind]);
 
   // Two-phase flow: 'form' (fill in) → 'provisioning' (POSTed; waiting
@@ -794,21 +827,11 @@ function NewInstanceForm() {
 // the brief — empty Allowlist is functionally Airgap, and the Rust
 // API rejects Allowlist with no entries anyway).
 
-const POLICY_OPTIONS = [
-  {
-    kind: 'nolocalnet',
-    label: 'Open (full internet)',
-    help: 'Everything the dyson asks for is allowed, except RFC1918 + link-local + cloud-metadata (169.254.169.254). The swarm default — pick this when the agent needs to research, fetch dependencies, or call external APIs but should never touch your LAN or the host.',
-  },
-  {
-    kind: 'open',
-    label: 'Open + internal LAN',
-    help: 'Same as Open, but ALSO permits access to private ranges (RFC1918, link-local, cloud-metadata). Pick this only when the dyson legitimately needs to reach a service on your LAN or the host. Do NOT use on cloud VMs — exposes the cloud-metadata service.',
-  },
+export const POLICY_OPTIONS = [
   {
     kind: 'airgap',
     label: 'Air-gapped (LLM + MCP only)',
-    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The dyson can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed.',
+    help: 'No outbound traffic at all, except to the swarm /llm and /mcp proxies. The dyson can still call its model and any attached MCP servers (swarm forwards on its behalf), but the public internet is closed. The default — pick a wider profile only when the task actually needs it.',
   },
   {
     kind: 'allowlist',
@@ -820,7 +843,23 @@ const POLICY_OPTIONS = [
     label: 'Denylist (block these networks)',
     help: 'Full internet minus the networks you list. Same accept rules as allowlist for entries.',
   },
+  {
+    kind: 'nolocalnet',
+    label: 'Open (full internet)',
+    help: 'Everything the dyson asks for is allowed, except RFC1918 + link-local + cloud-metadata (169.254.169.254). Pick this when the agent needs to research, fetch dependencies, or call external APIs but should never touch your LAN or the host.',
+  },
+  {
+    kind: 'open',
+    label: 'Open + internal LAN',
+    help: 'Same as Open, but ALSO permits access to private ranges (RFC1918, link-local, cloud-metadata). Pick this only when the dyson legitimately needs to reach a service on your LAN or the host. Do NOT use on cloud VMs — exposes the cloud-metadata service.',
+  },
 ];
+
+/// SPA-side default network policy.  Picked here (not in the Rust
+/// row default) so existing rows still load with whatever they
+/// were originally hired with; only the hire form's initial state
+/// uses this value.
+export const DEFAULT_POLICY_KIND = 'airgap';
 
 function NetworkPolicyPicker({ value, onChange }) {
   const setKind = (kind) => {
@@ -1637,43 +1676,18 @@ export function EditInstancePage({ instanceId }) {
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
         <h1 className="page-title">edit dyson</h1>
         <p className="page-sub muted">
-          Change the dyson's name, mission, or model list.  Saving
-          rewrites IDENTITY.md via /api/admin/configure — the agent
-          picks it up on the next turn (no restart).
+          Change the dyson's identity, model, toolbox, or network access.
+          Identity / model / tools save in place; flipping network
+          access snapshots and re-hires the dyson under a new id.
         </p>
       </header>
       {err ? <div className="error">{err}</div> : null}
       {row ? (
-        <div className="edit-stack">
-          {/* Identity / models live in a real <form>.  Network policy
-              and MCP servers sit outside it as siblings — each panel
-              owns its own POST/PUT lifecycle; bundling them all under
-              one submit would conflate independent state machines.
-              Form id ties the bottom save button (which lives below
-              the sibling panels for readability) back to this form
-              via the `form="edit-instance-form"` attribute. */}
-          <EditInstanceForm
-            instance={row}
-            backHref={backHref}
-            formId="edit-instance-form"
-          />
-          {/* Network isolation lives on the same page so operators
-              get one stop for editing.  Shown for live rows only —
-              destroyed rows can't be re-policied (the cube is gone)
-              and the panel's "change" button gates on the same
-              `disabled` prop. */}
-          <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
-          {/* MCP servers — same panel as the detail view.  Add /
-              edit / connect-OAuth / disconnect / remove all push
-              live to the running dyson via /api/admin/configure, so
-              the agent picks up tool-set changes on the next turn
-              without a re-hire. */}
-          <McpServersPanel instanceId={row.id} disabled={row.status === 'destroyed'}/>
-          <EditInstanceActionBar
-            formId="edit-instance-form"
-            backHref={backHref}
-          />
-        </div>
+        <EditInstanceForm
+          instance={row}
+          backHref={backHref}
+          formId="edit-instance-form"
+        />
       ) : (
         <div className="muted">loading…</div>
       )}
@@ -1683,12 +1697,11 @@ export function EditInstancePage({ instanceId }) {
 
 /// Bottom action bar for the edit page.  Lives at the END of the
 /// page so the user sees every editable surface first; the submit
-/// button is wired to the identity form via `form="<id>"` so a click
-/// here triggers the same handler as a hypothetical button-inside-
-/// form submit.  Only the identity form has a server-side save flow
-/// — network policy and MCP changes save through their own panel
-/// buttons, so this bar is exclusively for name/task/models.
-function EditInstanceActionBar({ formId, backHref }) {
+/// button is wired to the form via `form="<id>"` so a click here
+/// triggers the same handler as a button-inside-form submit.
+/// MCP changes save through their own panel buttons; identity /
+/// model / tools / network all flow through this single save.
+function EditInstanceActionBar({ formId, backHref, policyChanged }) {
   // The submit-state lives inside EditInstanceForm; we mirror busy
   // state via a custom event so the bottom button can disable while
   // the underlying form is in-flight.  Tiny, dependency-free, and
@@ -1701,6 +1714,9 @@ function EditInstanceActionBar({ formId, backHref }) {
     window.addEventListener('edit-form-state', onState);
     return () => window.removeEventListener('edit-form-state', onState);
   }, [formId]);
+  const label = submitting
+    ? (policyChanged ? 'snapshotting + re-hiring…' : 'saving…')
+    : (policyChanged ? 'save (snapshot + re-hire)' : 'save');
   return (
     <div className="edit-action-bar">
       <button
@@ -1709,7 +1725,7 @@ function EditInstanceActionBar({ formId, backHref }) {
         className="btn btn-primary btn-lg"
         disabled={submitting}
       >
-        {submitting ? 'saving…' : 'save'}
+        {label}
       </button>
       <a className="btn btn-ghost" href={backHref}>cancel</a>
     </div>
@@ -1718,18 +1734,18 @@ function EditInstanceActionBar({ formId, backHref }) {
 
 function EditInstanceForm({ instance, backHref, formId }) {
   const { client, auth } = useApi();
+  const disabled = instance.status === 'destroyed';
   const [name, setName] = React.useState(instance.name || '');
   const [task, setTask] = React.useState(instance.task || '');
-  // Models picker reuses the same component as the create form,
-  // sourced from operator-curated `default_models` plus the live
-  // /v1/models upstream catalogue.  Pre-fills with the current
-  // primary model when available; the agent will also accept any
-  // other model id the user types.
+  // Models picker reuses the same component as the create form.
+  // Pre-fills with the current primary model when available; the
+  // agent will also accept any other model id the user types.
   const initialModelsList = (instance.models && instance.models.length)
     ? instance.models
     : (instance.model ? [instance.model] : []);
   const [models, setModels] = React.useState(initialModelsList);
   const defaultModels = auth?.config?.default_models || [];
+
   // Tool include list — pre-fill with the row's persisted positive
   // list when present.  Empty `instance.tools` means "use defaults"
   // which the picker renders as everything ticked, except on
@@ -1739,6 +1755,29 @@ function EditInstanceForm({ instance, backHref, formId }) {
   );
   const [toolsDirty, setToolsDirty] = React.useState(false);
   const setToolsTracked = (next) => { setToolsDirty(true); setTools(next); };
+
+  // Network policy state shared with the picker so transitioning
+  // INTO airgap immediately clears the tool checkboxes — same
+  // ergonomic guard the hire form has.  Initialised from the row.
+  const [networkPolicy, setNetworkPolicy] = React.useState(
+    () => normaliseInstancePolicy(instance.network_policy),
+  );
+  // Same transition rule as the hire form (snapshot ref BEFORE
+  // queuing setTools so the closure sees the right `prev`).
+  const prevPolicyKindRef = React.useRef(networkPolicy.kind);
+  React.useEffect(() => {
+    const prevKind = prevPolicyKindRef.current;
+    prevPolicyKindRef.current = networkPolicy.kind;
+    setTools(curr => {
+      const next = nextToolsForPolicyChange(prevKind, networkPolicy.kind, curr);
+      // Mark dirty if the rule mutated the picker, so the new
+      // selection flows through on save (otherwise we'd silently
+      // keep the row's pre-fill in the patch payload).
+      if (next !== curr) setToolsDirty(true);
+      return next;
+    });
+  }, [networkPolicy.kind]);
+
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState(null);
 
@@ -1752,20 +1791,49 @@ function EditInstanceForm({ instance, backHref, formId }) {
     }));
   }, [formId, submitting]);
 
+  const policyChanged = !samePolicy(
+    normaliseInstancePolicy(instance.network_policy),
+    networkPolicy,
+  );
+
   const submit = async (e) => {
     e.preventDefault();
     setSubmitting(true); setError(null);
     try {
-      const payload = { name, task };
-      // Only include models if the user actually picked any —
-      // backend treats missing/empty as "leave unchanged".
-      if (models.length > 0) payload.models = models;
-      // Tools: only send when the operator touched the picker.
-      // Empty `[]` IS meaningful (zero tools), so we use the dirty
-      // flag rather than length to decide whether to include.
-      if (toolsDirty) payload.tools = tools;
-      const updated = await client.updateInstance(instance.id, payload);
-      upsertInstance(updated);
+      // Step 1: identity / models / tools — live PATCH on the
+      // existing id (no sandbox churn).  Skip the request entirely
+      // when nothing in this group changed.
+      const patch = {};
+      if (name !== (instance.name || '')) patch.name = name;
+      if (task !== (instance.task || '')) patch.task = task;
+      if (models.length > 0
+          && JSON.stringify(models) !== JSON.stringify(initialModelsList)) {
+        patch.models = models;
+      }
+      if (toolsDirty) patch.tools = tools;
+      if (Object.keys(patch).length > 0) {
+        // Backend rejects an empty PATCH; only send when there's a
+        // delta.  Always include name + task when sending so the
+        // backend's "missing means unchanged" semantic still
+        // produces an updated row in the response.
+        const payload = { name, task, ...patch };
+        const updated = await client.updateInstance(instance.id, payload);
+        upsertInstance(updated);
+      }
+
+      // Step 2: network policy — snapshot + restore + new id.  Done
+      // last because it navigates the URL to the successor.  Skipped
+      // when the policy is untouched.
+      if (policyChanged) {
+        const result = await client.changeInstanceNetwork(
+          instance.id,
+          serializeNetworkPolicy(networkPolicy),
+        );
+        if (result?.id) {
+          window.location.hash = `#/i/${encodeURIComponent(result.id)}`;
+          return;
+        }
+      }
       window.location.hash = backHref;
     } catch (err) {
       setError(err?.detail || err?.message || 'save failed');
@@ -1775,37 +1843,77 @@ function EditInstanceForm({ instance, backHref, formId }) {
   };
 
   return (
-    <form id={formId} onSubmit={submit} className="form edit-form">
-      <label className="field">
-        <span>name</span>
-        <input
-          value={name}
-          onChange={e => setName(e.target.value)}
-          placeholder="PR reviewer for foo/bar"
-          autoFocus
+    <div className="edit-stack">
+      <form id={formId} onSubmit={submit} className="form page-form">
+        <section className="page-section">
+          <h2 className="section-title">identity</h2>
+          <label className="field">
+            <span>name</span>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="PR reviewer for foo/bar"
+              autoFocus
+            />
+          </label>
+          <label className="field">
+            <span>task</span>
+            <textarea
+              className="textarea"
+              value={task}
+              onChange={e => setTask(e.target.value)}
+              rows={6}
+            />
+            <span className="hint muted small">
+              Saving rewrites IDENTITY.md via /api/admin/configure —
+              the running dyson picks it up on its next turn
+              (no restart).
+            </span>
+          </label>
+        </section>
+
+        <section className="page-section">
+          <h2 className="section-title">model</h2>
+          <ModelMultiPicker
+            defaultModels={defaultModels}
+            selected={models}
+            onChange={setModels}
+          />
+        </section>
+
+        <ToolsPicker
+          value={tools}
+          onChange={setToolsTracked}
+          policyKind={networkPolicy.kind}
         />
-      </label>
-      <label className="field">
-        <span>task</span>
-        <textarea
-          className="textarea"
-          value={task}
-          onChange={e => setTask(e.target.value)}
-          rows={6}
-        />
-      </label>
-      <ModelMultiPicker
-        defaultModels={defaultModels}
-        selected={models}
-        onChange={setModels}
+
+        <section className="page-section">
+          <h2 className="section-title">network access</h2>
+          <NetworkPolicyPicker value={networkPolicy} onChange={setNetworkPolicy}/>
+          {policyChanged ? (
+            <p className="hint muted small">
+              <strong>Heads up:</strong> changing network access snapshots this
+              dyson and re-hires it under a new id.  Workspace state survives
+              via the snapshot; the URL changes.
+            </p>
+          ) : null}
+        </section>
+
+        {error ? <div className="error">{error}</div> : null}
+      </form>
+
+      {/* MCP servers — separate panel because each row commits
+          independently (add / connect-OAuth / disconnect / remove).
+          Lives outside the form so its buttons don't trigger the
+          identity submit. */}
+      <McpServersPanel instanceId={instance.id} disabled={disabled}/>
+
+      <EditInstanceActionBar
+        formId={formId}
+        backHref={backHref}
+        policyChanged={policyChanged}
       />
-      <ToolsPicker
-        value={tools}
-        onChange={setToolsTracked}
-        policyKind={instance.network_policy?.kind}
-      />
-      {error ? <div className="error">{error}</div> : null}
-    </form>
+    </div>
   );
 }
 
