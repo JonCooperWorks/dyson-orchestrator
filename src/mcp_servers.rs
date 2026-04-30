@@ -33,6 +33,12 @@ pub struct McpServerSpec {
     /// Upstream MCP endpoint URL.
     pub url: String,
     pub auth: McpAuthSpec,
+    /// Admin-selected tool allowlist for this server.  Mirrors the
+    /// built-in tools picker semantics: `None` ⇒ "use default" (proxy
+    /// passes tools/list through unfiltered, SPA renders the airgap
+    /// rule when prefilling).  `Some(vec)` ⇒ explicit allowlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -72,6 +78,37 @@ pub struct McpServerEntry {
     /// proxy when an access token is near or past its expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_tokens: Option<McpOAuthTokens>,
+    /// Catalog of tools advertised by the upstream, populated by the
+    /// `check` endpoint after a successful tools/list.  None ⇒ admin
+    /// hasn't run a check yet (UI shows "not connected").  The proxy
+    /// doesn't depend on this for filtering — it only steers the SPA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_catalog: Option<McpToolsCatalog>,
+    /// Admin-selected subset of tool names.  Mirrors the built-in
+    /// tools allowlist: `None` ⇒ "use default" (proxy passes tools/list
+    /// through unfiltered — the SPA applies the airgap rule when
+    /// computing the effective default).  `Some(vec)` ⇒ explicit
+    /// allowlist; tools/list responses are filtered and tools/call
+    /// requests for names outside the set are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<String>>,
+}
+
+/// Cached `tools/list` result for one MCP server.  Persisted on the
+/// `McpServerEntry` so the SPA can render the per-tool checklist
+/// without round-tripping the upstream on every page load.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpToolsCatalog {
+    pub tools: Vec<McpToolSummary>,
+    /// Unix seconds when the catalog was last refreshed.
+    pub last_checked_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpToolSummary {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,13 +142,15 @@ impl McpOAuthTokens {
 
 impl McpServerEntry {
     pub fn from_spec(spec: McpServerSpec) -> (String, Self) {
-        let McpServerSpec { name, url, auth } = spec;
+        let McpServerSpec { name, url, auth, enabled_tools } = spec;
         (
             name,
             Self {
                 url,
                 auth,
                 oauth_tokens: None,
+                tools_catalog: None,
+                enabled_tools,
             },
         )
     }
@@ -842,6 +881,7 @@ mod tests {
                 name: "linear".into(),
                 url: "https://api.linear.app/mcp".into(),
                 auth: McpAuthSpec::Bearer { token: "lin_xxx".into() },
+                enabled_tools: None,
             }],
         )
         .await
@@ -872,11 +912,13 @@ mod tests {
                     name: "a".into(),
                     url: "https://a/mcp".into(),
                     auth: McpAuthSpec::None,
+                    enabled_tools: None,
                 },
                 McpServerSpec {
                     name: "b".into(),
                     url: "https://b/mcp".into(),
                     auth: McpAuthSpec::Bearer { token: "t".into() },
+                    enabled_tools: None,
                 },
             ],
         )

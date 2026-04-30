@@ -383,37 +383,62 @@ const TOOL_GROUPS = (() => {
   return [...m.entries()];
 })();
 
-/// Editable tool picker — every built-in grouped by category with a
-/// checkbox.  Open by default; same panel chrome as snapshots /
-/// secrets / mcp / network so the detail-page rhythm holds.
+/// Generic checkbox-list tool picker.  Used twice with the same
+/// chrome to honour "exact same behaviour as tools" — once for
+/// built-in tools (grouped by category) and once for each attached
+/// MCP server's catalogue (flat, ungrouped).
 ///
-/// `policyKind` greys out network-required tools when the operator
-/// picks airgap — the checkbox stays interactive so they can still
-/// enable e.g. `web_fetch` if they intend to lift airgap, but the
-/// row is visually marked "won't work right now".
-function ToolsPicker({ value, onChange, policyKind }) {
+/// Props:
+///   - `title`        panel header text
+///   - `hint`         optional ReactNode rendered under the header
+///   - `allNames`     full universe of names (drives the count + "all" button)
+///   - `groups`       `[[label, [{name}]]]` ⇒ render fieldsets per group;
+///                    `null` ⇒ flat grid sourced from `allNames`
+///   - `value`        currently-enabled name array
+///   - `onChange`     `(string[]) => void` — fired with the new selection
+///   - `cellMeta`     `(name) => ({ blocked, title })` — optional row-level
+///                    decoration (used by the built-in picker for the
+///                    network-required airgap cue)
+///   - `wrap`         `'section'` ⇒ wrap in `<section className="panel">`
+///                    (default; used by the standalone built-in picker);
+///                    `'bare'` ⇒ skip the outer panel wrapper (used when
+///                    nesting under another card, e.g. MCP server rows)
+///   - `actions`      optional ReactNode appended to `panel-actions`
+function ToolPicker({
+  title,
+  hint,
+  allNames,
+  groups = null,
+  value,
+  onChange,
+  cellMeta,
+  wrap = 'section',
+  actions,
+}) {
   const enabled = React.useMemo(() => new Set(value), [value]);
+  const total = allNames.length;
   const toggle = (name) => {
     const next = new Set(enabled);
     if (next.has(name)) next.delete(name);
     else next.add(name);
-    onChange(ALL_TOOL_NAMES.filter(n => next.has(n)));
+    onChange(allNames.filter(n => next.has(n)));
   };
-  const setAll = (on) => onChange(on ? [...ALL_TOOL_NAMES] : []);
+  const setAll = (on) => onChange(on ? [...allNames] : []);
+  const flat = groups || [[null, allNames.map(n => ({ name: n }))]];
 
-  return (
-    <section className="panel">
+  const body = (
+    <>
       <div className="panel-header">
-        <div className="panel-title">tools</div>
+        <div className="panel-title">{title}</div>
         <div className="panel-actions">
           <span className="muted small" style={{ marginRight: 8 }}>
-            {enabled.size} / {ALL_TOOL_NAMES.length} enabled
+            {enabled.size} / {total} enabled
           </span>
           <button
             type="button"
             className="btn btn-ghost btn-sm"
             onClick={() => setAll(true)}
-            disabled={enabled.size === ALL_TOOL_NAMES.length}
+            disabled={total === 0 || enabled.size === total}
           >
             enable all
           </button>
@@ -425,25 +450,25 @@ function ToolsPicker({ value, onChange, policyKind }) {
           >
             disable all
           </button>
+          {actions || null}
         </div>
       </div>
-      <p className="muted small">
-        Built-in tools the agent registers on boot.  Air-gapped
-        employees start with nothing — pick only what the task
-        actually needs.
-      </p>
+      {hint ? <p className="muted small">{hint}</p> : null}
       <div className="tools-body">
-        {TOOL_GROUPS.map(([group, items]) => (
-          <fieldset key={group} className="tools-group">
-            <legend className="tools-group-label muted small">{group}</legend>
+        {flat.map(([group, items]) => (
+          <fieldset key={group || '_'} className="tools-group">
+            {group ? (
+              <legend className="tools-group-label muted small">{group}</legend>
+            ) : null}
             <div className="tools-grid">
               {items.map(t => {
-                const blocked = toolBlockedByNetwork(t.name, policyKind);
+                const meta = cellMeta ? cellMeta(t.name) : null;
+                const blocked = meta?.blocked || false;
                 return (
                   <label
                     key={t.name}
                     className={`tools-cell ${blocked ? 'blocked' : ''}`}
-                    title={blocked ? 'requires network — air-gapped instances can\'t reach upstream' : undefined}
+                    title={meta?.title || undefined}
                   >
                     <input
                       type="checkbox"
@@ -458,7 +483,35 @@ function ToolsPicker({ value, onChange, policyKind }) {
           </fieldset>
         ))}
       </div>
-    </section>
+    </>
+  );
+
+  if (wrap === 'bare') return <div className="tool-picker">{body}</div>;
+  return <section className="panel">{body}</section>;
+}
+
+/// Built-in tools picker — thin wrapper over the generic ToolPicker
+/// that supplies the static catalogue + the airgap "blocked" cue.
+function ToolsPicker({ value, onChange, policyKind }) {
+  const cellMeta = React.useCallback((name) => {
+    const blocked = toolBlockedByNetwork(name, policyKind);
+    return {
+      blocked,
+      title: blocked
+        ? "requires network — air-gapped instances can't reach upstream"
+        : undefined,
+    };
+  }, [policyKind]);
+  return (
+    <ToolPicker
+      title="tools"
+      allNames={ALL_TOOL_NAMES}
+      groups={TOOL_GROUPS}
+      value={value}
+      onChange={onChange}
+      cellMeta={cellMeta}
+      hint="Built-in tools the agent registers on boot.  Air-gapped employees start with nothing — pick only what the task actually needs."
+    />
   );
 }
 
@@ -1675,7 +1728,11 @@ function InstanceDetail({ id, onNew }) {
       <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
       <ToolsView instance={row}/>
       <SecretsPanel instanceId={id}/>
-      <McpServersPanel instanceId={id} disabled={row.status === 'destroyed'}/>
+      <McpServersPanel
+        instanceId={id}
+        policyKind={row.network_policy?.kind}
+        disabled={row.status === 'destroyed'}
+      />
 
       {/* IDENTITY.md prose lives at the very bottom — operators reach
           for actions / runtime / snapshots / policy first; the agent's
@@ -1967,7 +2024,11 @@ function EditInstanceForm({ instance, backHref, formId }) {
           independently (add / connect-OAuth / disconnect / remove).
           Lives outside the form so its buttons don't trigger the
           identity submit. */}
-      <McpServersPanel instanceId={instance.id} disabled={disabled}/>
+      <McpServersPanel
+        instanceId={instance.id}
+        policyKind={networkPolicy.kind}
+        disabled={disabled}
+      />
 
       <EditInstanceActionBar
         formId={formId}
@@ -2338,7 +2399,7 @@ function probeLabel(p) {
 // the entry in user_secrets and pushes the new `mcp_servers` block to
 // the running dyson via the configure endpoint.
 
-function McpServersPanel({ instanceId, disabled }) {
+function McpServersPanel({ instanceId, policyKind, disabled }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
   const [err, setErr] = React.useState(null);
@@ -2462,11 +2523,14 @@ function McpServersPanel({ instanceId, disabled }) {
             <McpServerRow
               key={r.name}
               row={r}
+              instanceId={instanceId}
+              policyKind={policyKind}
               busy={busy || disabled}
               onEdit={() => openEdit(r)}
               onConnect={() => connect(r.name)}
               onDisconnect={() => disconnect(r.name)}
               onRemove={() => remove(r.name)}
+              onCatalogUpdated={() => refresh()}
             />
           ))}
         </ul>
@@ -2484,11 +2548,109 @@ function McpServersPanel({ instanceId, disabled }) {
   );
 }
 
-function McpServerRow({ row, busy, onEdit, onConnect, onDisconnect, onRemove }) {
+function McpServerRow({
+  row,
+  instanceId,
+  policyKind,
+  busy,
+  onEdit,
+  onConnect,
+  onDisconnect,
+  onRemove,
+  onCatalogUpdated,
+}) {
+  const { client } = useApi();
   const isOauth = row.auth_kind === 'oauth';
   // OAuth-not-connected is the only state that surfaces a "connect"
   // CTA; bearer / none / oauth-connected all just show the auth pill.
   const needsConnect = isOauth && !row.connected;
+
+  // ── Tools-list connection state ────────────────────────────────
+  // Status is derived: a non-null catalog ⇒ "connected" until the user
+  // re-runs the check.  Errors come from the most recent check attempt
+  // and clear on the next successful one.
+  const initialCatalog = row.tools_catalog || null;
+  const [catalog, setCatalog] = React.useState(initialCatalog);
+  const [checking, setChecking] = React.useState(false);
+  const [checkErr, setCheckErr] = React.useState(null);
+  // Reset state when the row's identity changes (e.g. parent refresh).
+  React.useEffect(() => {
+    setCatalog(row.tools_catalog || null);
+    setCheckErr(null);
+  }, [row.name, row.tools_catalog]);
+
+  // Selection state.  `null` ⇒ "use default" — the airgap rule then
+  // determines what the picker shows ticked (mirrors the built-in
+  // tools section's `initialTools` semantics: airgap → none, else
+  // every tool in the catalogue).
+  const initialSelection = Array.isArray(row.enabled_tools) ? row.enabled_tools : null;
+  const [selection, setSelection] = React.useState(initialSelection);
+  React.useEffect(() => {
+    setSelection(Array.isArray(row.enabled_tools) ? row.enabled_tools : null);
+  }, [row.name, row.enabled_tools]);
+
+  const allToolNames = React.useMemo(
+    () => (catalog?.tools || []).map(t => t.name),
+    [catalog],
+  );
+  // Effective selection used to drive the picker.  Null ⇒ apply the
+  // airgap rule against the catalogue.
+  const effective = React.useMemo(() => {
+    if (Array.isArray(selection)) return selection;
+    if (allToolNames.length === 0) return [];
+    return policyKind === 'airgap' ? [] : [...allToolNames];
+  }, [selection, allToolNames, policyKind]);
+
+  const runCheck = async () => {
+    setChecking(true); setCheckErr(null);
+    try {
+      const result = await client.checkMcpServer(instanceId, row.name);
+      const next = {
+        tools: result.tools || [],
+        last_checked_at: result.last_checked_at,
+      };
+      setCatalog(next);
+      // Don't pre-write a selection — the next render computes the
+      // effective default from the catalogue + airgap rule.  The user
+      // sees ticks immediately and saves only by toggling.
+      onCatalogUpdated && onCatalogUpdated();
+    } catch (e) {
+      setCheckErr(e?.detail || e?.message || 'check failed');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const persistSelection = async (next) => {
+    // Mirror the built-in picker's "implicit-all" semantics: when the
+    // user re-ticks every tool on a non-airgap row, drop back to null
+    // so the proxy stops filtering and the row tracks the catalogue
+    // as it grows.  Airgap rows always get an explicit list.
+    const allOn = next.length === allToolNames.length
+      && next.every(n => allToolNames.includes(n));
+    const wireValue = (allOn && policyKind !== 'airgap') ? null : next;
+    setSelection(wireValue);
+    try {
+      await client.setMcpEnabledTools(instanceId, row.name, wireValue);
+    } catch (e) {
+      // Roll back local state on failure so the picker reflects what
+      // the server actually has.
+      setSelection(initialSelection);
+      console.warn('[swarm] mcp setEnabledTools failed', e);
+    }
+  };
+
+  const statusBadge = (() => {
+    if (checking) return <span className="mcp-row-status small muted">checking…</span>;
+    if (checkErr) return <span className="mcp-row-status small mcp-row-warning">check failed</span>;
+    if (catalog) return (
+      <span className="mcp-row-status small muted">
+        connected · {catalog.tools.length} tools
+      </span>
+    );
+    return <span className="mcp-row-status small muted">not connected</span>;
+  })();
+
   return (
     <li className="mcp-row">
       <div className="mcp-row-head">
@@ -2497,8 +2659,9 @@ function McpServerRow({ row, busy, onEdit, onConnect, onDisconnect, onRemove }) 
           {row.auth_kind}
         </span>
         {needsConnect ? (
-          <span className="mcp-row-warning small">not connected</span>
+          <span className="mcp-row-warning small">oauth not authorised</span>
         ) : null}
+        {statusBadge}
       </div>
       <div className="mcp-row-url muted small" title={row.url}>{row.url}</div>
       <div className="mcp-row-actions">
@@ -2517,6 +2680,14 @@ function McpServerRow({ row, busy, onEdit, onConnect, onDisconnect, onRemove }) 
             disconnect
           </button>
         ) : null}
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={runCheck}
+          disabled={busy || checking || (isOauth && !row.connected)}
+          title={isOauth && !row.connected ? 'authenticate before checking' : undefined}
+        >
+          {catalog ? 're-check' : 'check'}
+        </button>
         <button className="btn btn-ghost btn-sm" onClick={onEdit} disabled={busy}>
           edit
         </button>
@@ -2524,6 +2695,21 @@ function McpServerRow({ row, busy, onEdit, onConnect, onDisconnect, onRemove }) 
           remove
         </button>
       </div>
+      {checkErr ? <div className="error" style={{ marginTop: 8 }}>{checkErr}</div> : null}
+      {catalog ? (
+        <ToolPicker
+          title="tools"
+          allNames={allToolNames}
+          value={effective}
+          onChange={persistSelection}
+          wrap="bare"
+          hint={
+            allToolNames.length === 0
+              ? 'Upstream advertises no tools.'
+              : `Tools advertised by ${row.name}.  Air-gapped instances start with nothing — pick only what the task actually needs.`
+          }
+        />
+      ) : null}
     </li>
   );
 }

@@ -477,13 +477,45 @@ export class SwarmClient {
 
   /// PUT one server.  Body matches the hire-form serializer minus
   /// `name` (carried in the URL).  Idempotent — replaces existing rows.
-  putMcpServer(instanceId, name, { url, auth }) {
+  /// `enabled_tools` mirrors the built-in tools allowlist semantics:
+  /// `null` ⇒ "use default" (proxy passes tools/list through unfiltered);
+  /// an array ⇒ explicit allowlist (proxy filters tools/list responses
+  /// and rejects tools/call for names outside the set).
+  putMcpServer(instanceId, name, { url, auth, enabled_tools = null }) {
     return this._json(
       `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers/${encodeURIComponent(name)}`,
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, auth }),
+        body: JSON.stringify({ url, auth, enabled_tools }),
+      },
+    );
+  }
+
+  /// Run a connection check: swarm opens an MCP session against the
+  /// upstream (initialize + tools/list) and returns the catalog.  The
+  /// catalog is also persisted on the entry so subsequent listMcpServers
+  /// calls render it without round-tripping the upstream.
+  /// Returns `{ ok: true, tools: [{name, description?}], last_checked_at }`
+  /// on success.  Throws on transport / auth / upstream failure.
+  checkMcpServer(instanceId, name) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers/${encodeURIComponent(name)}/check`,
+      { method: 'POST' },
+    );
+  }
+
+  /// Update only the `enabled_tools` allowlist on a server (URL + auth
+  /// untouched).  `null` ⇒ "use default" (proxy stops filtering);
+  /// array ⇒ explicit allowlist.  Used by the inline tool picker so
+  /// toggling a checkbox doesn't have to round-trip the credential.
+  setMcpEnabledTools(instanceId, name, enabled_tools) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/mcp/servers/${encodeURIComponent(name)}/enabled-tools`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled_tools }),
       },
     );
   }

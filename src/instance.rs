@@ -1921,7 +1921,7 @@ impl InstanceService {
         let secrets = self.mcp_secrets.as_ref().ok_or_else(|| {
             SwarmError::PolicyDenied("mcp secrets store not configured".into())
         })?;
-        let McpServerSpec { name, url, mut auth } = spec;
+        let McpServerSpec { name, url, mut auth, enabled_tools } = spec;
         if name.trim().is_empty() {
             return Err(SwarmError::BadRequest("server name is required".into()));
         }
@@ -1930,7 +1930,10 @@ impl InstanceService {
         }
         // Read-modify-write the entry under its current oauth_tokens
         // (if any) so an OAuth-already-connected server doesn't lose
-        // its tokens just because the user edited the URL.
+        // its tokens just because the user edited the URL.  We also
+        // preserve `tools_catalog` across edits — the cached list of
+        // tools doesn't get invalidated by URL/auth tweaks (the
+        // /check endpoint is the only writer for that field).
         let mut entry = mcp_servers::get(secrets, owner_id, id, &name)
             .await
             .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?
@@ -1938,6 +1941,8 @@ impl InstanceService {
                 url: url.clone(),
                 auth: auth.clone(),
                 oauth_tokens: None,
+                tools_catalog: None,
+                enabled_tools: enabled_tools.clone(),
             });
         // Keep-existing semantics: the SPA never reads back sealed
         // credentials, so its edit form pre-fills secret-bearing
@@ -1955,6 +1960,9 @@ impl InstanceService {
         }
         entry.url = url;
         entry.auth = auth;
+        // The SPA always submits the current selection on save; mirror
+        // it onto the entry (None ⇒ "use default", Some(vec) ⇒ explicit).
+        entry.enabled_tools = enabled_tools;
         mcp_servers::put(secrets, owner_id, id, &name, &entry)
             .await
             .map_err(|e| SwarmError::Internal(format!("mcp put: {e}")))?;
@@ -3055,11 +3063,13 @@ mod tests {
                         name: "linear".into(),
                         url: "https://api.linear.app/mcp".into(),
                         auth: crate::mcp_servers::McpAuthSpec::Bearer { token: "lin_secret".into() },
+                        enabled_tools: None,
                     },
                     crate::mcp_servers::McpServerSpec {
                         name: "no_auth".into(),
                         url: "https://example/mcp".into(),
                         auth: crate::mcp_servers::McpAuthSpec::None,
+                        enabled_tools: None,
                     },
                 ],
             })
@@ -3133,6 +3143,7 @@ mod tests {
             name: "linear".into(),
             url: "https://api.linear.app/mcp".into(),
             auth: crate::mcp_servers::McpAuthSpec::Bearer { token: "lin_xxx".into() },
+            enabled_tools: None,
         })
         .await
         .unwrap();
@@ -3179,6 +3190,7 @@ mod tests {
                 client_id: None, client_secret: None,
                 authorization_url: None, token_url: None, registration_url: None,
             },
+            enabled_tools: None,
         }).await.unwrap();
 
         // Stamp tokens directly (simulates a completed OAuth callback).
@@ -3203,6 +3215,7 @@ mod tests {
                 client_id: None, client_secret: None,
                 authorization_url: None, token_url: None, registration_url: None,
             },
+            enabled_tools: None,
         }).await.unwrap();
         let after = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "gh")
             .await.unwrap().unwrap();
@@ -3228,6 +3241,7 @@ mod tests {
                 client_id: None, client_secret: None,
                 authorization_url: None, token_url: None, registration_url: None,
             },
+            enabled_tools: None,
         }).await.unwrap();
         let mut e = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "x")
             .await.unwrap().unwrap();
@@ -3245,6 +3259,7 @@ mod tests {
                 client_id: None, client_secret: None,
                 authorization_url: None, token_url: None, registration_url: None,
             },
+            enabled_tools: None,
         }).await.unwrap();
         let after = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "x")
             .await.unwrap().unwrap();
@@ -3264,6 +3279,7 @@ mod tests {
             name: "only".into(),
             url: "https://only/mcp".into(),
             auth: crate::mcp_servers::McpAuthSpec::None,
+            enabled_tools: None,
         }).await.unwrap();
         svc.delete_mcp_server(&owner, &created.id, "only").await.unwrap();
 
@@ -3289,6 +3305,7 @@ mod tests {
             name: "x".into(),
             url: "https://x/mcp".into(),
             auth: crate::mcp_servers::McpAuthSpec::None,
+            enabled_tools: None,
         }).await.unwrap_err();
         assert!(matches!(err, SwarmError::NotFound),
             "cross-owner put must surface as NotFound, got {err:?}");
@@ -4483,6 +4500,7 @@ mod tests {
                     auth: crate::mcp_servers::McpAuthSpec::Bearer {
                         token: "lin_secret".into(),
                     },
+                    enabled_tools: None,
                 }],
             })
             .await
@@ -4512,6 +4530,8 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: None,
             }),
+            tools_catalog: None,
+            enabled_tools: None,
         };
         crate::mcp_servers::put(&user_secrets, &owner, &src.id, "linear", &entry)
             .await
@@ -4654,6 +4674,7 @@ mod tests {
                     auth: crate::mcp_servers::McpAuthSpec::Bearer {
                         token: "lin_secret".into(),
                     },
+                    enabled_tools: None,
                 }],
             })
             .await
@@ -4675,6 +4696,8 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: None,
             }),
+            tools_catalog: None,
+            enabled_tools: None,
         };
         crate::mcp_servers::put(&user_secrets, &owner, &src.id, "linear", &mcp_entry)
             .await

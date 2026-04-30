@@ -27,7 +27,7 @@ use crate::error::SwarmError;
 use crate::instance::InstanceService;
 use crate::mcp_servers::{
     self, AuthMetadata, DcrRequest, McpAuthSpec, McpOAuthTokens, McpServerEntry, McpServerSpec,
-    OAuthFlowCache, PendingFlow,
+    McpToolSummary, McpToolsCatalog, OAuthFlowCache, PendingFlow,
 };
 use crate::secrets::UserSecretsService;
 use crate::traits::{InstanceStore, TokenStore};
@@ -109,6 +109,14 @@ pub fn user_router(svc: Arc<McpService>) -> Router {
             "/v1/instances/:id/mcp/servers/:name/disconnect",
             post(disconnect_server),
         )
+        .route(
+            "/v1/instances/:id/mcp/servers/:name/check",
+            post(check_server),
+        )
+        .route(
+            "/v1/instances/:id/mcp/servers/:name/enabled-tools",
+            axum::routing::put(put_enabled_tools),
+        )
         .route("/v1/instances/:id/mcp/oauth/start", post(oauth_start))
         .with_state(svc)
 }
@@ -171,6 +179,31 @@ async fn forward(
         Err(_) => return error_resp(StatusCode::BAD_REQUEST, "body too large"),
     };
 
+    // Peek at the JSON-RPC envelope so we can enforce the per-tool
+    // allowlist (`entry.enabled_tools`).  We only look — the body
+    // forwarded upstream is unchanged.  Batched JSON-RPC arrays and
+    // unparseable bodies skip filtering entirely (passes through).
+    let peek = peek_jsonrpc(&body_bytes);
+
+    // Gate: when the call is `tools/call` for a name the admin has
+    // disabled, refuse without forwarding.  Returns a JSON-RPC error
+    // envelope so the agent's MCP client surfaces the failure cleanly.
+    if let (Some(allowed), Some((method, id, params))) =
+        (entry.enabled_tools.as_deref(), peek.as_ref())
+    {
+        if method == "tools/call" {
+            if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+                if !allowed.iter().any(|t| t == name) {
+                    return jsonrpc_error_resp(
+                        id.clone(),
+                        -32601,
+                        &format!("tool '{name}' is disabled by admin"),
+                    );
+                }
+            }
+        }
+    }
+
     let mut outbound = svc.http.post(&entry.url);
     // Pass through Content-Type and Accept verbatim so streamable HTTP
     // MCP servers see the SSE-or-JSON negotiation the agent intended.
@@ -213,8 +246,59 @@ async fn forward(
     //    SSE envelope MCP streamable HTTP servers use.
     let status = StatusCode::from_u16(resp.status().as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut builder = Response::builder().status(status);
     let upstream_headers = resp.headers().clone();
+    let upstream_ct = upstream_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    // Filter: when the call is `tools/list` and the admin has narrowed
+    // the allowlist, parse the JSON response and drop any tools not in
+    // the set so the agent never sees them.  Only the JSON content type
+    // is filtered — `text/event-stream` responses pass through (the
+    // tools/call gate above still rejects calls to dropped tools, so
+    // SSE-flavoured tools/list responses are a UX concession, not a
+    // security gap).
+    let should_filter_list = matches!(peek.as_ref(), Some((m, _, _)) if m == "tools/list")
+        && entry.enabled_tools.is_some()
+        && upstream_ct.starts_with("application/json")
+        && status.is_success();
+
+    if should_filter_list {
+        let body_bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!(error = %err, "mcp: tools/list response read failed");
+                return error_resp(StatusCode::BAD_GATEWAY, "upstream read failed");
+            }
+        };
+        let allowed = entry.enabled_tools.as_deref().unwrap_or(&[]);
+        let filtered = match filter_tools_list_body(&body_bytes, allowed) {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!(error = %err, "mcp: tools/list filter failed; passing through");
+                body_bytes.to_vec()
+            }
+        };
+
+        let mut builder = Response::builder().status(status);
+        for (k, v) in upstream_headers.iter() {
+            if is_hop_by_hop(k.as_str()) || k == axum::http::header::CONTENT_LENGTH {
+                continue;
+            }
+            builder = builder.header(k, v);
+        }
+        return builder
+            .header(
+                axum::http::header::CONTENT_LENGTH,
+                HeaderValue::from(filtered.len()),
+            )
+            .body(Body::from(filtered))
+            .unwrap_or_else(|_| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "build resp"));
+    }
+
+    let mut builder = Response::builder().status(status);
     for (k, v) in upstream_headers.iter() {
         if is_hop_by_hop(k.as_str()) {
             continue;
@@ -551,6 +635,15 @@ struct ServerSummary {
     /// True when an OAuth flow has completed — surfaced so the UI can
     /// render a "connect" vs. "reconnect" button.
     connected: bool,
+    /// Cached `tools/list` result from the most recent /check call.
+    /// `None` ⇒ admin hasn't run a check yet (UI shows "not connected").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools_catalog: Option<McpToolsCatalog>,
+    /// Admin-selected tool allowlist.  Mirrors the built-in tools
+    /// section: `None` ⇒ "use default" (SPA applies airgap rule on
+    /// prefill); `Some(vec)` ⇒ explicit allowlist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled_tools: Option<Vec<String>>,
 }
 
 async fn list_servers(
@@ -590,7 +683,14 @@ async fn list_servers(
             // URL stays sealed in user_secrets and the proxy decrypts it
             // per request — only the *display* is trimmed.
             let url = strip_url_query(&e.url);
-            out.push(ServerSummary { name, url, auth_kind, connected });
+            out.push(ServerSummary {
+                name,
+                url,
+                auth_kind,
+                connected,
+                tools_catalog: e.tools_catalog,
+                enabled_tools: e.enabled_tools,
+            });
         }
     }
     Ok(Json(out))
@@ -647,6 +747,8 @@ async fn get_server(
         url: entry.url,
         auth_kind,
         connected,
+        tools_catalog: entry.tools_catalog,
+        enabled_tools: entry.enabled_tools,
     }))
 }
 
@@ -668,6 +770,11 @@ async fn owner_owns_instance(svc: &McpService, owner_id: &str, instance_id: &str
 struct PutServerBody {
     pub url: String,
     pub auth: McpAuthSpec,
+    /// Admin-selected tool allowlist (`None` ⇒ "use default", treated
+    /// as pass-through; `Some(vec)` ⇒ explicit allowlist).  Mirrors
+    /// the built-in tools section's behaviour.
+    #[serde(default)]
+    pub enabled_tools: Option<Vec<String>>,
 }
 
 async fn put_server(
@@ -682,7 +789,12 @@ async fn put_server(
             "mcp management not configured",
         )
     })?;
-    let spec = McpServerSpec { name, url: body.url, auth: body.auth };
+    let spec = McpServerSpec {
+        name,
+        url: body.url,
+        auth: body.auth,
+        enabled_tools: body.enabled_tools,
+    };
     isvc.put_mcp_server(&caller.user_id, &instance_id, spec)
         .await
         .map_err(swarm_err_to_resp)?;
@@ -706,6 +818,40 @@ async fn delete_server(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Body for the dedicated enabled-tools update endpoint.  `null` (or
+/// an absent field) means "use default" — the proxy stops filtering;
+/// an array is an explicit allowlist.
+#[derive(Deserialize)]
+struct EnabledToolsBody {
+    #[serde(default)]
+    enabled_tools: Option<Vec<String>>,
+}
+
+async fn put_enabled_tools(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, name)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+    Json(body): Json<EnabledToolsBody>,
+) -> Result<Json<serde_json::Value>, Response<Body>> {
+    let owner_id = caller.user_id.clone();
+    if !owner_owns_instance(&svc, &owner_id, &instance_id).await {
+        return Err(error_resp(StatusCode::NOT_FOUND, "no such instance"));
+    }
+    let mut entry = mcp_servers::get(&svc.user_secrets, &owner_id, &instance_id, &name)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "mcp: enabled-tools secret read failed");
+            error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error")
+        })?
+        .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "no such mcp server"))?;
+    entry.enabled_tools = body.enabled_tools;
+    if let Err(e) = mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await {
+        tracing::warn!(error = %e, "mcp: enabled-tools write failed");
+        return Err(error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error"));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 async fn disconnect_server(
     State(svc): State<Arc<McpService>>,
     Path((instance_id, name)): Path<(String, String)>,
@@ -721,6 +867,269 @@ async fn disconnect_server(
         .await
         .map_err(swarm_err_to_resp)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ───────────────────────────────────────────────────────────────────
+// On-demand connection check.  Runs `initialize` + `tools/list` against
+// the upstream MCP server, persists the resulting catalog on the entry,
+// and returns it to the SPA.  This is the only writer for
+// `entry.tools_catalog` — admin-only, on-demand, never auto-fired so an
+// idle SPA never wakes the upstream.
+// ───────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct CheckResponse {
+    ok: bool,
+    tools: Vec<McpToolSummary>,
+    last_checked_at: i64,
+}
+
+async fn check_server(
+    State(svc): State<Arc<McpService>>,
+    Path((instance_id, name)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<CallerIdentity>,
+) -> Result<Json<CheckResponse>, Response<Body>> {
+    let owner_id = caller.user_id.clone();
+    if !owner_owns_instance(&svc, &owner_id, &instance_id).await {
+        return Err(error_resp(StatusCode::NOT_FOUND, "no such instance"));
+    }
+    let mut entry = mcp_servers::get(&svc.user_secrets, &owner_id, &instance_id, &name)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "mcp: check secret read failed");
+            error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error")
+        })?
+        .ok_or_else(|| error_resp(StatusCode::NOT_FOUND, "no such mcp server"))?;
+
+    // Refresh OAuth tokens if needed — same as the forward path so the
+    // check button doesn't flake right after a token's refresh window.
+    if let Err(err) = ensure_fresh_oauth(&svc, &owner_id, &instance_id, &name, &mut entry).await {
+        tracing::warn!(error = %err, "mcp: check oauth refresh failed");
+        return Err(error_resp(StatusCode::BAD_GATEWAY, "oauth refresh failed"));
+    }
+
+    let catalog = match run_tools_list(&svc.http, &entry).await {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                domain = %crate::mcp_servers::domain_of(&entry.url),
+                server = %name,
+                "mcp: check failed",
+            );
+            return Err(error_resp(StatusCode::BAD_GATEWAY, &format!("upstream check failed: {err}")));
+        }
+    };
+
+    entry.tools_catalog = Some(catalog.clone());
+    if let Err(e) = mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await {
+        tracing::warn!(error = %e, "mcp: check write-back failed");
+        return Err(error_resp(StatusCode::INTERNAL_SERVER_ERROR, "secret store error"));
+    }
+
+    Ok(Json(CheckResponse {
+        ok: true,
+        tools: catalog.tools,
+        last_checked_at: catalog.last_checked_at,
+    }))
+}
+
+/// Run the MCP streamable-HTTP handshake against `entry.url`:
+///   1. POST `initialize`.  Capture any `Mcp-Session-Id` response header.
+///   2. POST `notifications/initialized` (fire-and-forget).
+///   3. POST `tools/list` and parse `result.tools[]`.
+///
+/// Handles both `application/json` and `text/event-stream` responses
+/// (streamable HTTP servers may pick either based on Accept; we send
+/// both).  Bearer/None auth are sent via the existing `entry.auth`;
+/// OAuth callers must have refreshed tokens before invoking this.
+async fn run_tools_list(
+    http: &reqwest::Client,
+    entry: &McpServerEntry,
+) -> Result<McpToolsCatalog, String> {
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "dyson-swarm",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        },
+    });
+    let init_resp = post_jsonrpc(http, entry, &init_req, None).await
+        .map_err(|e| format!("initialize: {e}"))?;
+    let session_id = init_resp.session_id.clone();
+
+    // Spec: client must send notifications/initialized after initialize
+    // succeeds.  Notifications carry no `id` and the server SHOULD reply
+    // 202 Accepted with empty body.  Treat any failure here as
+    // non-fatal — some servers tolerate skipping it.
+    let initialized_notif = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    });
+    let _ = post_jsonrpc(http, entry, &initialized_notif, session_id.as_deref()).await;
+
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {},
+    });
+    let list_resp = post_jsonrpc(http, entry, &list_req, session_id.as_deref()).await
+        .map_err(|e| format!("tools/list: {e}"))?;
+
+    if let Some(err) = list_resp.body.get("error") {
+        return Err(format!("upstream tools/list error: {err}"));
+    }
+    let tools_value = list_resp.body
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(|t| t.as_array())
+        .ok_or("missing result.tools in tools/list response")?;
+
+    let tools: Vec<McpToolSummary> = tools_value
+        .iter()
+        .filter_map(|t| {
+            let name = t.get("name").and_then(|n| n.as_str())?.to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let description = t.get("description").and_then(|d| d.as_str()).map(String::from);
+            Some(McpToolSummary { name, description })
+        })
+        .collect();
+
+    Ok(McpToolsCatalog {
+        tools,
+        last_checked_at: crate::now_secs(),
+    })
+}
+
+struct JsonRpcResponse {
+    body: serde_json::Value,
+    session_id: Option<String>,
+}
+
+/// Single round-trip helper: POST a JSON-RPC envelope, parse whichever
+/// of `application/json` or `text/event-stream` the server returns.
+async fn post_jsonrpc(
+    http: &reqwest::Client,
+    entry: &McpServerEntry,
+    body: &serde_json::Value,
+    session_id: Option<&str>,
+) -> Result<JsonRpcResponse, String> {
+    let mut req = http
+        .post(&entry.url)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        // MCP streamable-HTTP servers split on Accept: ask for both so
+        // single-shot responses come back as JSON when the server
+        // chooses, and SSE-streamed responses still arrive when it
+        // doesn't.
+        .header(axum::http::header::ACCEPT, "application/json, text/event-stream");
+    if let Some(s) = session_id {
+        req = req.header("Mcp-Session-Id", s);
+    }
+    match &entry.auth {
+        McpAuthSpec::None => {}
+        McpAuthSpec::Bearer { token } => req = req.bearer_auth(token),
+        McpAuthSpec::Oauth { .. } => match entry.oauth_tokens.as_ref() {
+            Some(tk) => req = req.bearer_auth(&tk.access_token),
+            None => return Err("oauth not authorised yet".into()),
+        },
+    }
+
+    let resp = req.json(body).send().await.map_err(|e| {
+        format!("send: {}", crate::mcp_servers::redact_reqwest_err(&e, &entry.url))
+    })?;
+    let status = resp.status();
+    let session_id = resp
+        .headers()
+        .get("Mcp-Session-Id")
+        .or_else(|| resp.headers().get("mcp-session-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let ct = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read body: {e}"))?;
+
+    if !status.is_success() {
+        // Echo a short body excerpt so a 4xx with detail is debuggable
+        // — but cap the length so we don't log a megabyte error page.
+        let snippet = String::from_utf8_lossy(&bytes);
+        let snippet = snippet.chars().take(200).collect::<String>();
+        return Err(format!("HTTP {status}: {snippet}"));
+    }
+
+    if bytes.is_empty() {
+        return Ok(JsonRpcResponse {
+            body: serde_json::Value::Null,
+            session_id,
+        });
+    }
+
+    let body = if ct.starts_with("text/event-stream") {
+        parse_sse_jsonrpc(&bytes)?
+    } else {
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))?
+    };
+    Ok(JsonRpcResponse { body, session_id })
+}
+
+/// Minimal SSE parser scoped to our use case: scan `data:` lines and
+/// return the first one that looks like a JSON-RPC response (carries
+/// `jsonrpc` and either `result` or `error`).  Multi-line `data:`
+/// continuations are concatenated per the SSE spec.
+fn parse_sse_jsonrpc(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("sse utf8: {e}"))?;
+    let mut buf = String::new();
+    let flush = |buf: &mut String| -> Option<serde_json::Value> {
+        if buf.is_empty() {
+            return None;
+        }
+        let payload = std::mem::take(buf);
+        let value = serde_json::from_str::<serde_json::Value>(payload.trim()).ok()?;
+        if value.get("jsonrpc").is_some()
+            && (value.get("result").is_some() || value.get("error").is_some())
+        {
+            Some(value)
+        } else {
+            None
+        }
+    };
+    for line in text.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            // Blank line ⇒ event boundary.
+            if let Some(v) = flush(&mut buf) {
+                return Ok(v);
+            }
+            buf.clear();
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("data:") {
+            if !buf.is_empty() {
+                buf.push('\n');
+            }
+            buf.push_str(rest.trim_start());
+        }
+        // Any other field (id:, event:, retry:) is ignored.
+    }
+    if let Some(v) = flush(&mut buf) {
+        return Ok(v);
+    }
+    Err("no JSON-RPC response in SSE stream".into())
 }
 
 fn swarm_err_to_resp(err: SwarmError) -> Response<Body> {
@@ -739,6 +1148,69 @@ fn swarm_err_to_resp(err: SwarmError) -> Response<Body> {
 // ───────────────────────────────────────────────────────────────────
 // Helpers
 // ───────────────────────────────────────────────────────────────────
+
+/// Peek at a JSON-RPC envelope to extract `(method, id, params)`.
+/// Returns `None` for batches, parse failures, or non-object roots —
+/// the proxy passes those through untouched.  We deliberately don't
+/// validate the JSON-RPC envelope strictly; this is a *gate*, not
+/// validation.  The upstream MCP server will catch malformed bodies.
+fn peek_jsonrpc(bytes: &[u8]) -> Option<(String, serde_json::Value, serde_json::Value)> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let obj = value.as_object()?;
+    let method = obj.get("method")?.as_str()?.to_string();
+    let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let params = obj.get("params").cloned().unwrap_or(serde_json::Value::Null);
+    Some((method, id, params))
+}
+
+/// JSON-RPC error envelope as a 200-OK HTTP response.  The agent's
+/// MCP client reads `error.message` to surface the failure; using a
+/// proper JSON-RPC error (rather than HTTP 4xx) keeps the agent's
+/// error path consistent with what an upstream rejection looks like.
+fn jsonrpc_error_resp(id: serde_json::Value, code: i64, message: &str) -> Response<Body> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    });
+    let bytes = body.to_string().into_bytes();
+    let mut resp = Response::new(Body::from(bytes.clone()));
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_LENGTH,
+        HeaderValue::from(bytes.len()),
+    );
+    resp
+}
+
+/// Filter the `result.tools[]` array of a `tools/list` JSON response
+/// down to names in `allowed`.  Returns the re-serialised body.  A
+/// parse failure or unexpected shape returns Err so the caller can
+/// fall back to passing the upstream body through.
+fn filter_tools_list_body(bytes: &[u8], allowed: &[String]) -> Result<Vec<u8>, String> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| format!("parse: {e}"))?;
+    let allowed_set: std::collections::HashSet<&str> =
+        allowed.iter().map(String::as_str).collect();
+    let Some(tools) = value
+        .get_mut("result")
+        .and_then(|r| r.get_mut("tools"))
+        .and_then(|t| t.as_array_mut())
+    else {
+        return Err("response shape mismatch (no result.tools)".into());
+    };
+    tools.retain(|t| {
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .map(|n| allowed_set.contains(n))
+            .unwrap_or(false)
+    });
+    serde_json::to_vec(&value).map_err(|e| format!("re-serialise: {e}"))
+}
 
 fn error_resp(status: StatusCode, msg: &str) -> Response<Body> {
     let body = serde_json::json!({ "error": msg }).to_string();
@@ -836,6 +1308,79 @@ mod tests {
     fn strip_url_query_passes_through_clean_url() {
         let clean = "https://mcp.context7.com/mcp";
         assert_eq!(strip_url_query(clean), clean);
+    }
+
+    #[test]
+    fn peek_jsonrpc_extracts_method_id_params() {
+        let body = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"foo"}}"#;
+        let (m, id, p) = peek_jsonrpc(body).expect("parses");
+        assert_eq!(m, "tools/call");
+        assert_eq!(id, serde_json::json!(7));
+        assert_eq!(p["name"], "foo");
+    }
+
+    #[test]
+    fn peek_jsonrpc_returns_none_for_batches_and_garbage() {
+        // Batched JSON-RPC: array root.  Pass through unfiltered.
+        assert!(peek_jsonrpc(b"[]").is_none());
+        // Non-JSON.
+        assert!(peek_jsonrpc(b"not json").is_none());
+        // Object without method (a JSON-RPC response, not request).
+        assert!(peek_jsonrpc(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#).is_none());
+    }
+
+    #[test]
+    fn filter_tools_list_keeps_only_allowed() {
+        let body = br#"{"jsonrpc":"2.0","id":2,"result":{"tools":[
+            {"name":"a","description":"x"},
+            {"name":"b"},
+            {"name":"c","description":"z"}
+        ]}}"#;
+        let allowed = vec!["a".to_string(), "c".to_string()];
+        let out = filter_tools_list_body(body, &allowed).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let names: Vec<&str> = v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn filter_tools_list_empties_when_nothing_allowed() {
+        let body = br#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"a"}]}}"#;
+        let out = filter_tools_list_body(body, &[]).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(v["result"]["tools"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn filter_tools_list_errors_on_unexpected_shape() {
+        // No result.tools — caller should fall back to passing the
+        // upstream body through unchanged rather than rewriting it.
+        let body = br#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601}}"#;
+        assert!(filter_tools_list_body(body, &["a".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_sse_jsonrpc_picks_first_response_event() {
+        // Two events: a server-side "ping" (no jsonrpc.result/error)
+        // followed by the actual response.  Parser must skip the first.
+        let sse = b"event: ping\ndata: {\"hello\":1}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n";
+        let v = parse_sse_jsonrpc(sse).unwrap();
+        assert_eq!(v["id"], 2);
+        assert!(v["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn parse_sse_jsonrpc_handles_multi_line_data() {
+        // SSE allows multiple `data:` lines per event; they concatenate
+        // with newlines.  Make sure the parser glues them correctly.
+        let sse = b"data: {\"jsonrpc\":\"2.0\",\ndata: \"id\":2,\"result\":{}}\n\n";
+        let v = parse_sse_jsonrpc(sse).unwrap();
+        assert_eq!(v["id"], 2);
     }
 
     #[test]
