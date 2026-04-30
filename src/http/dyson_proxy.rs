@@ -230,6 +230,29 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "sandbox not yet ready"),
     };
 
+    // 2.5. Same-origin escape routes for swarm-side actions a sandbox
+    //      SPA legitimately needs but can't trigger via cross-origin
+    //      fetch (SameSite=Strict on the swarm session cookie blocks
+    //      it; the access token only lives in the apex's
+    //      sessionStorage).  We intercept BEFORE forwarding to the
+    //      cube so the dyson SPA can call same-origin
+    //      `<id>.<apex>/_swarm/share-mint` to mint anonymous artefact
+    //      share URLs.  Limited surface — just the share-mint
+    //      endpoint — extended carefully if more swarm flows ever
+    //      need this shape.
+    let req_path = req.uri().path();
+    if req_path == "/_swarm/share-mint" && req.method() == axum::http::Method::POST {
+        // anonymous_probe is the /healthz carve-out; it never has a
+        // resolved user.  Reject share-mint there because the action
+        // is user-attributed.
+        let caller = if anonymous_probe {
+            return error_response(StatusCode::UNAUTHORIZED, "auth required");
+        } else {
+            row.owner_id.clone()
+        };
+        return swarm_share_mint(&state, &caller, &instance_id, req).await;
+    }
+
     // 3. Build upstream URL.  No path manipulation needed — host-based
     //    routing means the request path IS the path the sandbox sees.
     //    CubeProxy expects the e2b-style hostname `<port>-<sandbox_id>.<domain>`
@@ -320,6 +343,86 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Body> {
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Body::from(msg.to_owned()))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn json_response(status: StatusCode, body: &str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+/// Same-origin share-mint endpoint exposed at
+/// `<id>.<apex>/_swarm/share-mint`.  Body shape mirrors the
+/// authenticated `POST /v1/instances/:id/artefacts/:aid/shares`:
+/// `{ artefact_id, chat_id, ttl, label? }`.  The user identity is
+/// already resolved by `dyson_proxy::dispatch` (cookie or bearer →
+/// CallerIdentity); we trust that and skip the regular OIDC layer.
+async fn swarm_share_mint(
+    state: &DispatchState,
+    caller_user_id: &str,
+    instance_id: &str,
+    req: Request,
+) -> Response<Body> {
+    use crate::shares::ShareTtl;
+
+    #[derive(serde::Deserialize)]
+    struct Body0 {
+        artefact_id: String,
+        chat_id: String,
+        ttl: String,
+        #[serde(default)]
+        label: Option<String>,
+    }
+
+    let (parts, body) = req.into_parts();
+    if !origin_is_allowed(&parts.headers, state.hostname.as_deref()) {
+        return cross_origin_rejected();
+    }
+    let bytes = match axum::body::to_bytes(body, 8 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "body too large"),
+    };
+    let parsed: Body0 = match serde_json::from_slice(&bytes) {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "bad json"),
+    };
+    let Some(ttl) = ShareTtl::parse(&parsed.ttl) else {
+        return error_response(StatusCode::BAD_REQUEST, "ttl must be 1d, 7d, or 30d");
+    };
+    if parsed.artefact_id.is_empty() || parsed.chat_id.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "artefact_id and chat_id required");
+    }
+    let label = parsed.label.filter(|s| !s.trim().is_empty());
+    match state
+        .app
+        .shares
+        .mint(
+            caller_user_id,
+            instance_id,
+            &parsed.chat_id,
+            &parsed.artefact_id,
+            ttl,
+            label,
+        )
+        .await
+    {
+        Ok(minted) => match serde_json::to_string(&minted) {
+            Ok(s) => json_response(StatusCode::CREATED, &s),
+            Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode failed"),
+        },
+        Err(crate::shares::service::ShareServiceError::NotFound) => {
+            error_response(StatusCode::NOT_FOUND, "no such instance")
+        }
+        Err(crate::shares::service::ShareServiceError::BadRequest(m)) => {
+            error_response(StatusCode::BAD_REQUEST, &m)
+        }
+        Err(e) => {
+            tracing::warn!(instance = %instance_id, error = %e, "share-mint via _swarm escape route failed");
+            error_response(StatusCode::BAD_GATEWAY, "mint failed")
+        }
+    }
 }
 
 /// 403 Forbidden with the canonical JSON shape the SPA's fetch layer

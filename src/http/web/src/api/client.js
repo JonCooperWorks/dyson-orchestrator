@@ -315,6 +315,14 @@ export class SwarmClient {
     return this._json(`/v1/shares/${encodeURIComponent(jti)}`, { method: 'DELETE' });
   }
 
+  /// Re-derive the URL for an active share.  The signature is
+  /// deterministic (postcard payload + per-user signing key), so the
+  /// server hands the URL back on demand without ever storing
+  /// plaintext.  Throws on revoked / expired shares (HTTP 410).
+  getShareUrl(jti) {
+    return this._json(`/v1/shares/${encodeURIComponent(jti)}/url`);
+  }
+
   reissueShare(jti, ttl) {
     return this._json(`/v1/shares/${encodeURIComponent(jti)}/reissue`, {
       method: 'POST',

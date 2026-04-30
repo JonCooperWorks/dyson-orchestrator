@@ -327,6 +327,48 @@ impl ShareService {
         }
     }
 
+    /// Re-derive the public URL for a still-active share owned by
+    /// `caller_user_id`.  The HMAC signature is deterministic
+    /// (postcard payload bytes are byte-identical for the same row,
+    /// the key is the caller's sealed signing key) — so we can hand
+    /// the URL back to the SPA on demand without ever having stored
+    /// it.  Revoked / expired rows return `Ok(None)` so the caller
+    /// can render a disabled affordance instead of a 4xx.
+    pub async fn url_for(
+        &self,
+        caller_user_id: &str,
+        jti: &str,
+    ) -> Result<Option<String>, ShareServiceError> {
+        let row = shares::find_by_jti(&self.pool, jti)
+            .await?
+            .ok_or(ShareServiceError::NotFound)?;
+        if row.created_by != caller_user_id {
+            return Err(ShareServiceError::NotFound);
+        }
+        if row.revoked_at.is_some() || row.expires_at <= now_secs() {
+            return Ok(None);
+        }
+        // jti string column is hex of payload.jti — reverse to bytes.
+        let mut jti_bytes = [0u8; 16];
+        if hex::decode_to_slice(&row.jti, &mut jti_bytes).is_err() {
+            return Err(ShareServiceError::Upstream("malformed jti".into()));
+        }
+        let key = ensure_signing_key(&self.user_secrets, caller_user_id).await?;
+        let payload = super::SharePayload {
+            v: 1,
+            user_id: row.created_by.clone(),
+            instance_id: row.instance_id.clone(),
+            chat_id: row.chat_id.clone(),
+            artefact_id: row.artefact_id.clone(),
+            exp: row.expires_at,
+            jti: jti_bytes,
+        };
+        let token = sign_token(&payload, &key).map_err(|_| {
+            ShareServiceError::Upstream("payload encode failed".into())
+        })?;
+        Ok(Some(super::build_url(self.apex.as_deref(), &token)))
+    }
+
     /// Recent accesses for the SPA's audit detail view.
     pub async fn list_accesses(
         &self,

@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/instances/:id/shares", get(list_shares))
         .route("/v1/shares/:jti", delete(revoke_share))
+        .route("/v1/shares/:jti/url", get(get_share_url))
         .route("/v1/shares/:jti/accesses", get(list_accesses))
         .route("/v1/shares/:jti/reissue", post(reissue_share))
         .route("/v1/shares/rotate-key", post(rotate_key))
@@ -168,6 +169,22 @@ async fn revoke_share(
     match state.shares.revoke(&caller.user_id, &jti).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => err_to_status(&e),
+    }
+}
+
+/// Re-derive the URL for a still-active share owned by the caller.
+/// Returns `{ url }` on success, 410 Gone when the row is revoked or
+/// past expiry (the SPA distinguishes that from "not yours" so the
+/// copy button can render disabled).
+async fn get_share_url(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(jti): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.shares.url_for(&caller.user_id, &jti).await {
+        Ok(Some(url)) => Ok(Json(serde_json::json!({ "url": url }))),
+        Ok(None) => Err(StatusCode::GONE),
+        Err(e) => Err(err_to_status(&e)),
     }
 }
 

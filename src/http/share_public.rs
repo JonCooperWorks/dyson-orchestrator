@@ -153,8 +153,26 @@ async fn serve_token(
 
     // Branch on render mode.  Raw streams the upstream body straight
     // through; HTML buffers (markdown is small) and renders a page.
+    //
+    // For image (and other "send_file") artefacts the dyson agent
+    // stores the raw artefact body as the relative URL `/api/files/<id>`
+    // — the `metadata.file_url` shape — rather than the bytes
+    // themselves.  Streaming that through to the viewer's browser
+    // would land them on a broken-image placeholder; we have to
+    // double-hop through the instance to fetch the actual bytes.
     let response = match mode {
-        ServeMode::Raw => stream_raw(body_resp, upstream_ct.as_deref()),
+        ServeMode::Raw => {
+            match resolve_raw_body(&state, &verified, body_resp, upstream_ct.as_deref()).await {
+                Some(r) => r,
+                None => {
+                    state
+                        .shares
+                        .record_access(&verified.row.jti, remote_addr.as_deref(), user_agent.as_deref(), 502)
+                        .await;
+                    return not_found();
+                }
+            }
+        }
         ServeMode::Html => {
             let mime = upstream_ct.as_deref();
             // Title + kind come from a sibling list endpoint.  Best
@@ -189,6 +207,116 @@ async fn serve_token(
         )
         .await;
     response
+}
+
+/// Resolve the bytes that should be streamed back from `/raw`.
+///
+/// Most artefacts (markdown reviews, plain text) store the body
+/// inline, so the upstream response is what the viewer wants.  But
+/// dyson's `send_file` path — used for images and any other
+/// agent-emitted file — stores the body as the relative URL
+/// `/api/files/<id>` and stamps the same path on `metadata.file_url`.
+/// In that case we double-hop: fetch the file id from dyson and
+/// stream those real bytes back, with the file's actual content-type.
+///
+/// Returns `None` on upstream error so the caller can record an
+/// audit row and 404.
+async fn resolve_raw_body(
+    state: &AppState,
+    verified: &crate::shares::service::VerifiedShare,
+    body_resp: reqwest::Response,
+    upstream_ct: Option<&str>,
+) -> Option<Response<Body>> {
+    // Only inspect the body when it could plausibly be a redirect-style
+    // pointer — small text bodies.  Anything large (>2 KiB) is
+    // definitely not a `/api/files/<id>` path; stream it directly to
+    // avoid buffering the artefact in memory.
+    let ct_lower = upstream_ct.unwrap_or("").to_ascii_lowercase();
+    let probably_pointer = ct_lower.starts_with("text/")
+        || ct_lower.is_empty()
+        || ct_lower.starts_with("image/")
+        || ct_lower.starts_with("application/octet-stream");
+    if !probably_pointer {
+        return Some(stream_raw(body_resp, upstream_ct));
+    }
+    // Read up to 2 KiB to inspect.  If the body is bigger, we know
+    // it's not a pointer — fall back to streaming.
+    let limit = 2048;
+    let bytes = match body_resp.bytes().await {
+        Ok(b) => b,
+        Err(_) => return None,
+    };
+    if bytes.len() > limit {
+        // Large body that "looked" like text — probably an inline
+        // text/markdown artefact.  Reconstitute as a single-shot
+        // response since we can't restream a consumed reqwest body.
+        return Some(inline_response(bytes, upstream_ct));
+    }
+    let trimmed = std::str::from_utf8(&bytes).map(str::trim).unwrap_or("");
+    if let Some(file_path) = parse_files_pointer(trimmed) {
+        // Refetch the underlying file via the same per-instance bearer.
+        let resp = match crate::instance_client::fetch_artefact(
+            &state.dyson_http,
+            &state.sandbox_domain,
+            &verified.instance,
+            &file_path,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+        if !resp.status().is_success() {
+            return None;
+        }
+        let inner_ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        return Some(stream_raw(resp, inner_ct.as_deref()));
+    }
+    // Plain inline body — stream it back as-is.
+    Some(inline_response(bytes, upstream_ct))
+}
+
+/// Recognise dyson's `send_file` pointer shape: an ASCII string
+/// starting with `/api/files/` and continuing with safe characters.
+/// Anything else is treated as opaque artefact body.
+fn parse_files_pointer(s: &str) -> Option<String> {
+    if !s.starts_with("/api/files/") {
+        return None;
+    }
+    // Reject CR/LF and other shenanigans — the dyson stamp is a
+    // single-line URL with bounded charset.
+    if s.contains(|c: char| c == '\n' || c == '\r' || c == ' ') {
+        return None;
+    }
+    if s.len() > 256 {
+        return None;
+    }
+    Some(s.to_owned())
+}
+
+/// Build a one-shot response carrying already-consumed bytes (we
+/// drained the upstream reqwest body to inspect for a pointer; can't
+/// restream).  Headers mirror `stream_raw`.
+fn inline_response(bytes: axum::body::Bytes, content_type: Option<&str>) -> Response<Body> {
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; img-src 'self' data:",
+        )
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Referrer-Policy", "no-referrer");
+    if let Some(ct) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, ct);
+    }
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 async fn lookup_title_and_kind(

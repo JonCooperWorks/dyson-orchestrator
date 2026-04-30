@@ -165,6 +165,9 @@ export function SharesPanel({ instanceId, disabled }) {
                 <td className="muted small">{fmtTime(r.expires_at)}</td>
                 <td className="row-actions">
                   {!r.revoked_at && r.active ? (
+                    <CopyUrlButton jti={r.jti} client={client}/>
+                  ) : null}
+                  {!r.revoked_at && r.active ? (
                     <button className="btn btn-ghost btn-sm" onClick={() => revoke(r.jti)} disabled={busy}>
                       revoke
                     </button>
@@ -193,6 +196,38 @@ export function SharesPanel({ instanceId, disabled }) {
         />
       ) : null}
     </section>
+  );
+}
+
+function CopyUrlButton({ jti, client }) {
+  const [busy, setBusy] = React.useState(false);
+  const [copied, setCopied] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const onClick = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await client.getShareUrl(jti);
+      const url = r && r.url;
+      if (!url) throw new Error('no url returned');
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'copy failed');
+      setTimeout(() => setErr(null), 2500);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      className="btn btn-ghost btn-sm"
+      onClick={onClick}
+      disabled={busy}
+      title="copy the share URL to the clipboard"
+    >
+      {err ? err : copied ? 'copied' : busy ? '…' : 'copy url'}
+    </button>
   );
 }
 
