@@ -381,6 +381,29 @@ export class SwarmClient {
     return objectUrl;
   }
 
+  /// Fetch raw artefact bytes + mime for in-SPA rendering (the
+  /// reader pane uses this to render markdown, images, etc inline
+  /// rather than dumping the body into a fresh tab).  Returns
+  /// `{ blob, mime, text }` — text is the UTF-8 decode for the
+  /// markdown render path; blob is for image / download paths.
+  /// The caller is responsible for revoking any objectURL it
+  /// creates from `blob`.
+  async fetchInstanceArtefactBytes(instanceId, artefactId) {
+    const url = this.instanceArtefactRawUrl(instanceId, artefactId);
+    const r = await this._authedFetch(url, { method: 'GET' });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => '');
+      throw httpError(`GET ${url}`, r.status, detail);
+    }
+    const mime = r.headers.get('content-type') || '';
+    const blob = await r.blob();
+    let text = null;
+    if (mime.startsWith('text/') || /json|xml|markdown/.test(mime)) {
+      try { text = await blob.text(); } catch { /* binary fallback */ }
+    }
+    return { blob, mime, text };
+  }
+
   /// Drop a row + its on-disk body.  Idempotent — 204 even when no
   /// row existed or the row wasn't owned by the caller.
   deleteInstanceArtefact(instanceId, artefactId) {
