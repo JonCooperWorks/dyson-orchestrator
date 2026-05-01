@@ -2391,9 +2391,17 @@ impl InstanceService {
         let r = self.reconfigurer.as_ref().ok_or_else(|| {
             SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
         })?;
+        // Empty list = "use dyson defaults" (per PatchInstanceBody
+        // docstring).  Map it to `reset_skills: true, tools: None` so
+        // the loader's no-skills-block branch fires and every builtin
+        // registers — same shape the create + recreate paths use.
+        // Sending `tools: Some([])` hits dyson's allowlist branch and
+        // registers ZERO builtins, which silently breaks bash on
+        // every tools-defaulted instance.
         let body = ReconfigureBody {
             instance_id: Some(id.to_owned()),
-            tools: Some(tools.clone()),
+            reset_skills: tools.is_empty(),
+            tools: (!tools.is_empty()).then(|| tools.clone()),
             ..Default::default()
         };
         push_with_retry(&**r, id, sandbox_id, &body)
@@ -5192,6 +5200,52 @@ mod tests {
         drop(pushed);
         let row = _instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.tools, trimmed);
+    }
+
+    #[tokio::test]
+    async fn update_tools_empty_list_resets_to_dyson_defaults() {
+        // PatchInstanceBody promises `tools: []` resets to defaults.
+        // Implementation must translate that to `reset_skills: true,
+        // tools: None` — sending `tools: Some([])` instead would hit
+        // dyson's allowlist branch and register zero builtins (the
+        // bash-stops-working bug).  Mirrors the create + recreate
+        // paths that already do this correctly.
+        let (svc, _cube, _tokens, _instances, recorder, _user_secrets, owner) =
+            build_with_mcp_secrets().await;
+
+        let created = svc
+            .create(&owner, CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("tars".into()),
+                task: Some("triage".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        let pushes_before = recorder.pushed.lock().unwrap().len();
+
+        svc.update_tools(&owner, &created.id, Vec::new())
+            .await
+            .unwrap();
+
+        let pushed = recorder.pushed.lock().unwrap();
+        assert!(
+            pushed.len() > pushes_before,
+            "update_tools must fire a configure push even on the empty-list path"
+        );
+        let (_, _, body) = pushed.last().unwrap();
+        assert!(
+            body.reset_skills,
+            "empty tools must set reset_skills=true so dyson re-registers all builtins"
+        );
+        assert!(
+            body.tools.is_none(),
+            "empty tools must NOT send tools=Some([]) — that registers zero builtins on dyson"
+        );
     }
 
     #[tokio::test]
