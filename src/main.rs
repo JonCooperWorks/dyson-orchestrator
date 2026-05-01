@@ -872,7 +872,8 @@ async fn run_secrets(
     // host already has filesystem access to both pieces.
     if let SecretsAction::SystemSet { .. }
     | SecretsAction::SystemClear { .. }
-    | SecretsAction::SystemList = action
+    | SecretsAction::SystemList
+    | SecretsAction::SystemGet { .. } = action
     {
         return run_system_secret(cfg, action).await;
     }
@@ -896,10 +897,11 @@ async fn run_secrets(
             let path = format!("/v1/instances/{instance}/secrets/{name}");
             client.send_no_body(Method::DELETE, &path).await
         }
-        // The Set/Clear/List system variants returned above.
+        // The Set/Clear/List/Get system variants returned above.
         SecretsAction::SystemSet { .. }
         | SecretsAction::SystemClear { .. }
-        | SecretsAction::SystemList => unreachable!(),
+        | SecretsAction::SystemList
+        | SecretsAction::SystemGet { .. } => unreachable!(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -971,6 +973,45 @@ async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitC
                 ExitCode::FAILURE
             }
         },
+        SecretsAction::SystemGet { name } => {
+            // Allowlist gate runs BEFORE we touch the store — a
+            // rejected name leaves no audit trail beyond this stderr
+            // line, no envelope decryption, no DB read.
+            if !cli::system_get_allowed(&name) {
+                eprintln!(
+                    "error: system-get refused: '{name}' is not in cli::EXTERNAL_CONSUMER_SECRETS.\n\
+                     If you legitimately need an external tool to consume this secret,\n\
+                     add it to that list in dyson-swarm/src/cli.rs and document the consumer\n\
+                     in the SystemGet docstring.  Provider api_keys and the OR provisioning\n\
+                     key load in-process at startup and must NOT be added."
+                );
+                return ExitCode::FAILURE;
+            }
+            match svc.get_str(&name).await {
+                Ok(Some(value)) => {
+                    use std::io::Write;
+                    // Write raw bytes with no trailing newline so
+                    // `$(swarm secrets system-get ...)` captures exactly
+                    // the stored value.  Flush explicitly — the process
+                    // is about to exit and stdout is fully buffered when
+                    // attached to a pipe.
+                    let mut out = std::io::stdout().lock();
+                    if let Err(err) = out.write_all(value.as_bytes()).and_then(|_| out.flush()) {
+                        eprintln!("error: write failed: {err:#}");
+                        return ExitCode::FAILURE;
+                    }
+                    ExitCode::SUCCESS
+                }
+                Ok(None) => {
+                    eprintln!("error: system secret '{name}' not set");
+                    ExitCode::FAILURE
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => unreachable!(),
     }
 }

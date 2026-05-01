@@ -167,6 +167,41 @@ pub enum SecretsAction {
     /// the store layer doesn't expose them and we wouldn't want to
     /// dump api keys to a terminal anyway).
     SystemList,
+    /// Print a single system-scope secret value to stdout (no trailing
+    /// newline) for an external tool to consume.
+    ///
+    /// SECURITY POSTURE: this command is the explicit, audited
+    /// exception to "system secrets never leave the swarm process."
+    /// The vast majority of system secrets (provider api_keys, the OR
+    /// provisioning key, etc.) are loaded in-process at startup and
+    /// must never be re-emitted.  A handful are needed by external
+    /// tools that swarm shells out to — today, only the Cloudflare
+    /// API token consumed by acme.sh during the `tls` phase of
+    /// bring-up.sh.
+    ///
+    /// To keep that exception narrow, the handler enforces a
+    /// compile-time allowlist (`EXTERNAL_CONSUMER_SECRETS` in this
+    /// file).  Names not on the list are rejected before the store is
+    /// touched.  Adding a new entry requires editing this file in the
+    /// same PR as the new caller — making the security expansion
+    /// visible to reviewers instead of being a silent code path.
+    SystemGet { name: String },
+}
+
+/// Names allowed through `secrets system-get`.  Every entry must
+/// correspond to a documented external consumer; review additions as
+/// you would a new sudoers entry.
+///
+/// Current consumers:
+/// - `cloudflare.api_token` — read by `bring-up.sh tls` and exported
+///   to acme.sh's env as `CF_Token` for DNS-01 issuance of the LE
+///   wildcard cert.
+pub const EXTERNAL_CONSUMER_SECRETS: &[&str] = &["cloudflare.api_token"];
+
+/// Returns true iff `name` may be exported via `secrets system-get`.
+/// Pure function so the allowlist is unit-testable without a DB.
+pub fn system_get_allowed(name: &str) -> bool {
+    EXTERNAL_CONSUMER_SECRETS.contains(&name)
 }
 
 /// Five-line warning emitted when `--dangerous-no-auth` is active.
@@ -207,7 +242,8 @@ fn resolve_stdin_secret(action: &mut SecretsAction) -> Result<(), String> {
         | SecretsAction::SystemSet { value, stdin, name } => resolve_one(value, *stdin, name),
         SecretsAction::Clear { .. }
         | SecretsAction::SystemClear { .. }
-        | SecretsAction::SystemList => Ok(()),
+        | SecretsAction::SystemList
+        | SecretsAction::SystemGet { .. } => Ok(()),
     }
 }
 
@@ -270,5 +306,58 @@ mod tests {
         let mut v = "abc".to_string();
         resolve_one(&mut v, false, "test").unwrap();
         assert_eq!(v, "abc");
+    }
+
+    /// `system-get` must refuse any name not on the compile-time
+    /// allowlist.  Adding a new entry to the allowlist requires
+    /// editing this test in the same diff — making the security
+    /// expansion impossible to land silently.
+    #[test]
+    fn system_get_allowlist_is_exactly_one_entry() {
+        // Exactly the documented external-consumer secrets.  If this
+        // assertion trips, audit cli.rs::EXTERNAL_CONSUMER_SECRETS:
+        // every addition must pair with a real external caller AND
+        // an updated docstring on `SystemGet`.
+        assert_eq!(EXTERNAL_CONSUMER_SECRETS, &["cloudflare.api_token"]);
+    }
+
+    #[test]
+    fn system_get_allows_only_listed_names() {
+        assert!(system_get_allowed("cloudflare.api_token"));
+    }
+
+    #[test]
+    fn system_get_rejects_in_process_secrets() {
+        // These are the secrets currently sealed by
+        // `bring-up.sh secrets-bootstrap` — they load in-process at
+        // swarm startup and MUST NOT be exportable via the CLI.
+        for name in [
+            "provider.openrouter.api_key",
+            "provider.anthropic.api_key",
+            "provider.openai.api_key",
+            "provider.gemini.api_key",
+            "openrouter.provisioning_key",
+        ] {
+            assert!(
+                !system_get_allowed(name),
+                "{name} is in-process only — must not be allowed via system-get",
+            );
+        }
+    }
+
+    #[test]
+    fn system_get_rejects_pathological_names() {
+        // Defensive: even though storage is keyed by the literal
+        // string, ensure nothing weird sneaks past the allowlist.
+        for name in [
+            "",
+            "cloudflare.api_token ",        // trailing space
+            " cloudflare.api_token",        // leading space
+            "CLOUDFLARE.API_TOKEN",         // case variant
+            "cloudflare.api_token\n",       // newline injection
+            "../../../etc/passwd",
+        ] {
+            assert!(!system_get_allowed(name), "must reject: {name:?}");
+        }
     }
 }
