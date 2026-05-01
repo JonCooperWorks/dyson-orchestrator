@@ -259,11 +259,13 @@ mod tests {
 
     #[test]
     fn cube_profiles_surface_with_full_shape() {
-        // A populated profile array round-trips through serde with all
-        // five fields the SPA dropdown needs (name, template_id,
-        // disk_gb, cpu_millicores, memory_mb).  Regression guard for
-        // the SPA dropdown going dark if a future refactor drops a
-        // field on either side of the wire.
+        // A populated profile array round-trips through serde with the
+        // fields the SPA card-radio needs (name, template_id, disk_gb,
+        // cpu_millicores, memory_mb, optional description).  Regression
+        // guard for the SPA picker going dark if a future refactor
+        // drops a field on either side of the wire.  Mixes one
+        // describ-ed and one bare profile to lock in both branches of
+        // the `skip_serializing_if = "Option::is_none"` on description.
         use crate::config::CubeProfile;
         let cfg = AuthConfig::from_toml(
             None,
@@ -276,6 +278,7 @@ mod tests {
                     disk_gb: 5,
                     cpu_millicores: 2000,
                     memory_mb: 2000,
+                    description: Some("Today's default — most agents.".into()),
                 },
                 CubeProfile {
                     name: "large".into(),
@@ -283,6 +286,7 @@ mod tests {
                     disk_gb: 50,
                     cpu_millicores: 4000,
                     memory_mb: 8000,
+                    description: None,
                 },
             ],
         );
@@ -294,7 +298,12 @@ mod tests {
         assert_eq!(arr[0]["disk_gb"], 5);
         assert_eq!(arr[0]["cpu_millicores"], 2000);
         assert_eq!(arr[0]["memory_mb"], 2000);
+        assert_eq!(arr[0]["description"], "Today's default — most agents.");
         assert_eq!(arr[1]["name"], "large");
         assert_eq!(arr[1]["disk_gb"], 50);
+        assert!(
+            arr[1].get("description").is_none(),
+            "absent description must be omitted, not rendered as null"
+        );
     }
 }

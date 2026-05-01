@@ -741,6 +741,64 @@
   accent-color: var(--accent);
 }
 .net-policy-label { font-size: 13px; }
+
+/* Cube-profile picker — same card-radio idiom as the network-policy
+ * picker, but each card shows three lines of detail (name, specs,
+ * description) so it's a CSS grid instead of a flex row.  Reuses the
+ * --border / --accent / --bg-1 / --bg-2 / --radius tokens. */
+.cube-profile-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cube-profile-picker .field-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.cube-profile-radios {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cube-profile-radio {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1, var(--bg-2));
+  cursor: pointer;
+}
+.cube-profile-radio.selected {
+  border-color: var(--accent);
+  background: var(--bg-2);
+}
+.cube-profile-radio input[type="radio"] {
+  margin: 0;
+  accent-color: var(--accent);
+  grid-row: 1;
+  grid-column: 1;
+}
+.cube-profile-name {
+  font-size: 13px;
+  grid-row: 1;
+  grid-column: 2;
+}
+.cube-profile-specs {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-align: right;
+  grid-row: 1;
+  grid-column: 3;
+}
+.cube-profile-desc {
+  grid-row: 2;
+  grid-column: 2 / -1;
+}
 .hint.error { color: var(--err, #c33); }
 
 .form { display: flex; flex-direction: column; gap: 12px; }

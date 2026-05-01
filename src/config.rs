@@ -135,6 +135,12 @@ pub struct CubeProfile {
     /// RAM in MiB baked in at registration (cubemastercli's
     /// `--memory`).
     pub memory_mb: u32,
+    /// Operator-facing one-liner the SPA card-radio renders below the
+    /// specs row ("Read-only researchers, lookups, financial
+    /// researcher.").  Optional — older deployments and operator
+    /// overrides without a description still parse cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// OpenRouter Provisioning configuration.  The provisioning key is a

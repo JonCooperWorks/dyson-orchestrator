@@ -4,7 +4,10 @@
  * stable — the SPA is the only place an operator sees these
  * profiles, and a label change shouldn't sneak in via a refactor.
  */
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, afterEach } from 'vitest';
+import React from 'react';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import '@testing-library/jest-dom/vitest';
 
 import {
   profileLabel,
@@ -16,7 +19,10 @@ import {
   nextToolsForPolicyChange,
   DEFAULT_POLICY_KIND,
   POLICY_OPTIONS,
+  CubeProfilePicker,
 } from './instances.jsx';
+
+afterEach(() => { cleanup(); });
 
 describe('profileLabel', () => {
   test('renders the operator-facing tuple for a whole-cpu, whole-GB profile', () => {
@@ -69,6 +75,85 @@ describe('profileLabel', () => {
     // crashing the whole page.
     expect(profileLabel(null)).toBe('');
     expect(profileLabel(undefined)).toBe('');
+  });
+});
+
+describe('CubeProfilePicker', () => {
+  const PROFILES = [
+    {
+      name: 'small',
+      template_id: 'tpl-small',
+      disk_gb: 5,
+      cpu_millicores: 1000,
+      memory_mb: 512,
+      description: 'General agents, light coding, chat.',
+    },
+    {
+      name: 'default',
+      template_id: 'tpl-default',
+      disk_gb: 5,
+      cpu_millicores: 2000,
+      memory_mb: 2000,
+      description: "Today's default — most agents.",
+    },
+    {
+      // No description — exercises the "skip muted line" branch.
+      name: 'bare',
+      template_id: 'tpl-bare',
+      disk_gb: 10,
+      cpu_millicores: 4000,
+      memory_mb: 4000,
+    },
+  ];
+
+  // The JSX transform doesn't run on .js test files, so build the
+  // element tree with React.createElement.  Avoids renaming this
+  // file (and breaking the import path the snapshot CI happens to
+  // pin in) while keeping the picker covered.
+  const h = React.createElement;
+
+  test('renders one card per profile with name + specs + description', () => {
+    render(h(CubeProfilePicker, { profiles: PROFILES, value: 'tpl-default', onChange: () => {} }));
+    // The user reads the tier name first ("default for the agent")
+    // and the specs line confirms what they're getting.
+    expect(screen.getByText('small')).toBeInTheDocument();
+    expect(screen.getByText('default')).toBeInTheDocument();
+    expect(screen.getByText(/5 GB disk · 2 vCPU · 2 GB RAM/)).toBeInTheDocument();
+    expect(screen.getByText("Today's default — most agents.")).toBeInTheDocument();
+    expect(screen.getByText('General agents, light coding, chat.')).toBeInTheDocument();
+  });
+
+  test('selected card carries the .selected class so the --accent border applies', () => {
+    const { container } = render(
+      h(CubeProfilePicker, { profiles: PROFILES, value: 'tpl-default', onChange: () => {} })
+    );
+    const selected = container.querySelectorAll('.cube-profile-radio.selected');
+    expect(selected.length).toBe(1);
+    expect(selected[0].textContent).toContain('default');
+  });
+
+  test('onChange fires with the new template_id when a card is clicked', () => {
+    const calls = [];
+    render(h(CubeProfilePicker, { profiles: PROFILES, value: 'tpl-default', onChange: (v) => calls.push(v) }));
+    // Click the radio inside the small card.  Hit the input directly
+    // so we don't depend on the label-wrapper's click-forwarding,
+    // which jsdom occasionally fumbles.
+    fireEvent.click(screen.getByDisplayValue('tpl-small'));
+    expect(calls).toEqual(['tpl-small']);
+  });
+
+  test('omits the description line when the profile has no description', () => {
+    const { container } = render(
+      h(CubeProfilePicker, { profiles: [PROFILES[2]], value: 'tpl-bare', onChange: () => {} })
+    );
+    // The .cube-profile-desc span is the only carrier of the
+    // description; absence of the field must not render an empty span.
+    expect(container.querySelector('.cube-profile-desc')).toBeNull();
+  });
+
+  test('renders a single-tier deployment instead of hiding (drops the > 1 guard)', () => {
+    render(h(CubeProfilePicker, { profiles: [PROFILES[1]], value: 'tpl-default', onChange: () => {} }));
+    expect(screen.getByText('default')).toBeInTheDocument();
   });
 });
 

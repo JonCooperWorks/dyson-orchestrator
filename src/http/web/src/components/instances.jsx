@@ -793,29 +793,15 @@ function NewInstanceForm() {
 
       <section className="page-section">
         <h2 className="section-title">infrastructure</h2>
-        {cubeProfiles.length > 1 ? (
-          <label className="field">
-            <span>cube profile</span>
-            <select
-              value={templateId}
-              onChange={e => setTemplateId(e.target.value)}
-              required
-            >
-              {cubeProfiles.map(p => (
-                <option key={p.template_id} value={p.template_id}>
-                  {profileLabel(p)}
-                </option>
-              ))}
-            </select>
-            <span className="hint muted small">
-              Cells in different profiles get different disk / CPU /
-              RAM at boot — pick the size that fits the workload.
-              Profiles are operator-curated in <code>config.env</code>.
-            </span>
-          </label>
-        ) : null /* Single profile or none — the form's templateId
-                    is seeded from default_template_id; the operator
-                    doesn't need to think about the underlying id. */}
+        {cubeProfiles.length >= 1 ? (
+          <CubeProfilePicker
+            profiles={cubeProfiles}
+            value={templateId}
+            onChange={setTemplateId}
+          />
+        ) : null /* No profiles surfaced — the form's templateId is
+                    seeded from default_template_id and the operator
+                    falls back to the legacy ttl-only flow. */}
         <label className="field">
           <span>ttl (seconds, optional)</span>
           <input
@@ -844,6 +830,54 @@ function NewInstanceForm() {
         <a className="btn btn-ghost" href="#/">cancel</a>
       </div>
     </form>
+  );
+}
+
+// ─── Cube-profile picker ──────────────────────────────────────────
+//
+// One card per tier surfaced in /auth/config.cube_profiles.  The card
+// carries the operator-friendly `name`, the specs tuple from
+// profileLabel (right-aligned, monospace), and the optional
+// description as muted small text below.  Mirrors the visual idiom of
+// NetworkPolicyPicker so the hire form reads top-down as a stack of
+// card-radios.
+//
+// Renders even with a single tier on the wire — the operator should
+// see what they're getting, not just a hidden default.
+
+export function CubeProfilePicker({ profiles, value, onChange }) {
+  return (
+    <div className="cube-profile-picker">
+      <span className="field-label">cube profile</span>
+      <div className="cube-profile-radios">
+        {profiles.map(p => {
+          const selected = value === p.template_id;
+          return (
+            <label
+              key={p.template_id}
+              className={`cube-profile-radio ${selected ? 'selected' : ''}`}
+            >
+              <input
+                type="radio"
+                name="cube_profile"
+                value={p.template_id}
+                checked={selected}
+                onChange={() => onChange(p.template_id)}
+              />
+              <span className="cube-profile-name">{p.name}</span>
+              <span className="cube-profile-specs">{profileLabel(p)}</span>
+              {p.description ? (
+                <span className="cube-profile-desc muted small">{p.description}</span>
+              ) : null}
+            </label>
+          );
+        })}
+      </div>
+      <span className="hint muted small">
+        Cells in different profiles get different disk / CPU / RAM at
+        boot — pick the size that fits the workload.
+      </span>
+    </div>
   );
 }
 
