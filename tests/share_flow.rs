@@ -264,6 +264,7 @@ async fn build() -> Fixture {
         openrouter_provisioning: None,
         user_or_keys: None,
         providers: Arc::new(Providers::default()),
+        byo: Arc::new(dyson_swarm::config::ByoConfig::default()),
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

@@ -33,7 +33,7 @@ audience = "swarm"
 # jwks_url override — usually omitted; swarm discovers it from
 # <issuer>/.well-known/openid-configuration.
 # jwks_url = "https://accounts.example.com/.well-known/jwks.json"
-jwks_ttl_seconds = 86400
+jwks_ttl_seconds = 600
 
 # Web-UI (SPA) PKCE client. Register `spa_client_id` at the IdP as a
 # public client with PKCE enabled and the redirect URI set to wherever
@@ -54,6 +54,14 @@ allowed_models = ["*"]
 daily_token_budget = 1_000_000
 monthly_usd_budget = 100.0
 rps_limit = 10
+
+# Optional custom OpenAI-compatible BYO upstreams. Enabled by default.
+# Internal/private targets require explicit operator opt-in. HTTP is
+# allowed for private fabrics such as Tailscale or local model servers.
+#
+# [byo]
+# enabled = true
+# allow_internal = true
 
 [providers.anthropic]
 api_key = "CHANGE_ME"

@@ -633,6 +633,14 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         proxy = proxy.with_user_or_keys(resolver.clone());
     }
     proxy = proxy.with_user_secrets(user_secrets_svc.clone());
+    proxy = proxy.with_byo_config(cfg.byo.clone());
+    if cfg.byo.allow_internal {
+        tracing::warn!(
+            "BYO internal upstreams enabled; tenants can point byo at private/local hosts"
+        );
+    } else if !cfg.byo.enabled {
+        tracing::warn!("BYO upstreams disabled by operator config");
+    }
     let proxy_svc = Arc::new(proxy);
     let llm_router = proxy::http::router(proxy_svc);
 
@@ -770,6 +778,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         openrouter_provisioning: or_provisioning,
         user_or_keys,
         providers: providers_for_app,
+        byo: Arc::new(cfg.byo.clone()),
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

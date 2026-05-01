@@ -53,6 +53,7 @@ pub async fn validate_key(
 ) -> Result<ValidateResult, ValidateError> {
     let http = reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ValidateError::Client(e.to_string()))?;
     let base = upstream.trim_end_matches('/');

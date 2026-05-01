@@ -79,6 +79,8 @@ pub struct Config {
     pub default_policy: DefaultPolicy,
     #[serde(default)]
     pub providers: Providers,
+    #[serde(default)]
+    pub byo: ByoConfig,
     pub backup: BackupConfig,
     #[serde(default)]
     pub oidc: Option<OidcConfigToml>,
@@ -175,7 +177,7 @@ pub struct OidcConfigToml {
     pub audience: String,
     #[serde(default)]
     pub jwks_url: Option<String>,
-    /// Default 1h. Tightened from 24h post-B3: a shorter TTL bounds
+    /// Default 10m. Tightened from 24h post-B3: a shorter TTL bounds
     /// the window in which a key rotated out of the IdP's JWKS doc
     /// can still validate cached-key signatures.
     #[serde(default = "default_jwks_ttl")]
@@ -224,7 +226,7 @@ pub struct OidcRoles {
 }
 
 fn default_jwks_ttl() -> u64 {
-    60 * 60
+    10 * 60
 }
 
 fn default_probe_interval() -> u64 {
@@ -295,6 +297,33 @@ pub struct ProviderConfig {
     pub upstream: String,
     #[serde(default)]
     pub anthropic_version: Option<String>,
+}
+
+/// Operator gate for the per-user `byo` LLM upstream slot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ByoConfig {
+    #[serde(default = "default_byo_enabled")]
+    pub enabled: bool,
+    /// Allow BYO upstreams that resolve to private, loopback,
+    /// link-local, multicast, or otherwise non-public addresses.
+    /// Off by default: BYO remains usable for public/OpenAI-compatible
+    /// endpoints, while Tailscale/DGX/local model hosts require an
+    /// explicit operator opt-in.
+    #[serde(default)]
+    pub allow_internal: bool,
+}
+
+impl Default for ByoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_internal: false,
+        }
+    }
+}
+
+const fn default_byo_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,6 +422,12 @@ impl Config {
         if let Some(v) = env.get("SWARM_HOSTNAME") {
             self.hostname = if v.is_empty() { None } else { Some(v.clone()) };
         }
+        if let Some(v) = env.get("SWARM_BYO_ENABLED") {
+            self.byo.enabled = parse_boolish(v);
+        }
+        if let Some(v) = env.get("SWARM_BYO_ALLOW_INTERNAL") {
+            self.byo.allow_internal = parse_boolish(v);
+        }
         if let Some(v) = env.get("SWARM_CUBE_URL") {
             self.cube.url.clone_from(v);
         }
@@ -477,6 +512,10 @@ impl Config {
         check_db_path_permissions(&self.db_path)?;
         Ok(())
     }
+}
+
+fn parse_boolish(v: &str) -> bool {
+    matches!(v, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
 }
 
 /// Refuse to start if the DB file exists with permissions accessible to
@@ -566,6 +605,27 @@ local_cache_dir = "/tmp/cache"
             cfg.providers.get("anthropic").unwrap().api_key.as_deref(),
             Some("from-env")
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn byo_defaults_enabled_but_internal_blocked() {
+        let path = write_tmp("byo_default.toml", example_toml());
+        let cfg = Config::load(&path, &BTreeMap::new(), false).expect("loads");
+        assert!(cfg.byo.enabled);
+        assert!(!cfg.byo.allow_internal);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn byo_env_overrides() {
+        let path = write_tmp("byo_env.toml", example_toml());
+        let mut env = BTreeMap::new();
+        env.insert("SWARM_BYO_ENABLED".into(), "false".into());
+        env.insert("SWARM_BYO_ALLOW_INTERNAL".into(), "yes".into());
+        let cfg = Config::load(&path, &env, false).expect("loads");
+        assert!(!cfg.byo.enabled);
+        assert!(cfg.byo.allow_internal);
         std::fs::remove_file(&path).ok();
     }
 

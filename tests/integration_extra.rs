@@ -382,6 +382,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         openrouter_provisioning: Some(or_prov.clone() as Arc<dyn Provisioning>),
         user_or_keys: Some(user_or_keys.clone()),
         providers: Arc::new(dyson_swarm::config::Providers::default()),
+        byo: Arc::new(dyson_swarm::config::ByoConfig::default()),
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

@@ -27,6 +27,7 @@ use crate::auth::CallerIdentity;
 use crate::http::AppState;
 use crate::proxy::adapters;
 use crate::proxy::byok::{byok_name, ByoBlob, BYO_BLOB_NAME};
+use crate::proxy::upstream_policy::{validate_byo_upstream, ByoUpstreamError};
 use crate::proxy::validate::{validate_key, ValidateError, ValidateResult};
 
 /// Body for `PUT /v1/byok/:provider`.  `upstream` is required only
@@ -111,7 +112,7 @@ async fn list_providers(
                 .get(name)
                 .and_then(|p| p.api_key.as_ref())
                 .is_some(),
-            supports_byo: *name == "byo",
+            supports_byo: *name == "byo" && state.byo.enabled,
             has_or_minted: *name == "openrouter" && has_or_minted,
         })
         .collect();
@@ -182,7 +183,25 @@ async fn put_byok(
         if u.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, "upstream is empty").into_response();
         }
-        (u.clone(), None, Some(u.clone()))
+        let normalized = match validate_byo_upstream(&state.byo, u).await {
+            Ok(url) => url.to_string(),
+            Err(ByoUpstreamError::Disabled) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "byo_disabled"})),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "byo upstream rejected by operator policy");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "byo_upstream_not_allowed"})),
+                )
+                    .into_response();
+            }
+        };
+        (normalized.clone(), None, Some(normalized))
     } else if let Some(cfg) = state.providers.get(&provider) {
         (
             cfg.upstream.clone(),
@@ -466,6 +485,10 @@ mod tests {
             openrouter_provisioning: None,
             user_or_keys: None,
             providers: Arc::new(providers),
+            byo: Arc::new(crate::config::ByoConfig {
+                enabled: true,
+                allow_internal: true,
+            }),
             webhooks: webhooks_svc,
             shares: shares_svc,
             artefact_cache,

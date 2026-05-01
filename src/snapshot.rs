@@ -233,7 +233,7 @@ impl SnapshotService {
 
         let source = self
             .instances
-            .get(&row.source_instance_id)
+            .get_for_owner(owner_id, &row.source_instance_id)
             .await?
             .ok_or(SwarmError::NotFound)?;
 
@@ -962,5 +962,83 @@ mod tests {
         assert_ne!(new_inst.id, src.id);
         let copied = secrets.list(&new_inst.id).await.unwrap();
         assert_eq!(copied, vec![("K".into(), "carry".into())]);
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_snapshot_row_pointing_at_another_owner_source() {
+        use crate::traits::{UserRow, UserStatus};
+
+        let pool = open_in_memory().await.unwrap();
+        let keys_tmp = tempfile::tempdir().unwrap();
+        let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> = Arc::new(
+            crate::envelope::AgeCipherDirectory::new(keys_tmp.path()).unwrap(),
+        );
+        let users: Arc<dyn crate::traits::UserStore> = Arc::new(
+            crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir),
+        );
+        users
+            .create(UserRow {
+                id: "victim".into(),
+                subject: "victim".into(),
+                email: Some("victim@test".into()),
+                display_name: Some("victim".into()),
+                status: UserStatus::Active,
+                created_at: 0,
+                activated_at: Some(0),
+                last_seen_at: None,
+                openrouter_key_id: None,
+                openrouter_key_limit_usd: 10.0,
+            })
+            .await
+            .unwrap();
+
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+        let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+        let snaps: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool.clone()));
+        let isvc = Arc::new(InstanceService::new(
+            cube.clone(), instances.clone(), secrets.clone(), tokens, "http://t/llm",
+        ));
+        let sink: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
+        let svc = SnapshotService::new(
+            cube, instances, snaps.clone(), sink, isvc.clone(),
+        );
+
+        let victim = isvc
+            .create("victim", CreateRequest {
+                template_id: "victim-template".into(),
+                name: Some("victim-name".into()),
+                task: Some("victim-task".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        secrets.put(&victim.id, "VICTIM_SECRET", "nope").await.unwrap();
+
+        let forged = SnapshotRow {
+            id: "snap-forged-cross-owner".into(),
+            owner_id: "legacy".into(),
+            source_instance_id: victim.id.clone(),
+            parent_snapshot_id: None,
+            kind: SnapshotKind::Manual,
+            path: "/tmp/nonexistent-forged-snapshot".into(),
+            host_ip: "127.0.0.1".into(),
+            remote_uri: None,
+            size_bytes: None,
+            created_at: crate::now_secs(),
+            deleted_at: None,
+            content_hash: None,
+        };
+        snaps.insert(&forged).await.unwrap();
+
+        let err = svc
+            .restore("legacy", &forged.id, Some(60), BTreeMap::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::NotFound));
     }
 }

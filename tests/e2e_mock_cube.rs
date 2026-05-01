@@ -311,6 +311,7 @@ async fn full_walkthrough() {
         openrouter_provisioning: None,
         user_or_keys: None,
         providers: std::sync::Arc::new(dyson_swarm::config::Providers::default()),
+        byo: std::sync::Arc::new(dyson_swarm::config::ByoConfig::default()),
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

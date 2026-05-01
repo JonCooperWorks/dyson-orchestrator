@@ -31,6 +31,7 @@ use crate::proxy::adapters::anthropic as anthropic_adapter;
 use crate::proxy::byok::{self, KeySource};
 use crate::proxy::policy_check::{enforce, EnforceContext};
 use crate::proxy::recording_body::RecordingBody;
+use crate::proxy::upstream_policy::{validate_byo_upstream, ByoUpstreamError};
 use crate::proxy::ProxyService;
 use crate::traits::{AuditEntry, TokenRecord};
 
@@ -183,6 +184,16 @@ async fn handle(
     let key_source_str = resolved.source.as_str().to_owned();
 
     let upstream_base: String = match resolved.upstream_override.as_deref() {
+        Some(u) if provider == "byo" => match validate_byo_upstream(&state.byo, u).await {
+            Ok(url) => url.to_string(),
+            Err(ByoUpstreamError::Disabled) => {
+                return error_response(StatusCode::FORBIDDEN, "byo upstream disabled");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "byo upstream rejected by operator policy");
+                return error_response(StatusCode::FORBIDDEN, "byo upstream not allowed");
+            }
+        },
         Some(u) => u.to_owned(),
         None => adapter.upstream_base_url(&provider_cfg).to_owned(),
     };
@@ -760,6 +771,10 @@ mod tests {
         let svc = Arc::new(
             ProxyService::new(tokens, instances, policies, audit, providers, policy)
                 .expect("build proxy")
+                .with_byo_config(crate::config::ByoConfig {
+                    enabled: true,
+                    allow_internal: true,
+                })
                 .with_user_secrets(user_secrets.clone()),
         );
         (svc, user_secrets, keys_tmp)
@@ -1441,4 +1456,3 @@ mod tests {
         assert_eq!(captured_auth(&captured), "Bearer gsk-byok-test");
     }
 }
-

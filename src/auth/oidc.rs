@@ -35,7 +35,7 @@ pub struct OidcConfig {
     /// `<issuer>/.well-known/openid-configuration`.
     pub jwks_url: Option<String>,
     /// How long to cache the JWKS before re-fetching even without a kid
-    /// miss.  Default 1h — keeps revoked / rotated keys from being
+    /// miss.  Default 10m — keeps revoked / rotated keys from being
     /// honoured for long after an IdP silently drops them from the JWKS
     /// (some IdPs don't bump `kid` for in-place rotations).  Operators
     /// can dial this up via `oidc.jwks_ttl_seconds` if their IdP is
@@ -49,7 +49,7 @@ impl Default for OidcConfig {
             issuer: String::new(),
             audience: String::new(),
             jwks_url: None,
-            jwks_ttl: Duration::from_secs(60 * 60),
+            jwks_ttl: Duration::from_secs(10 * 60),
         }
     }
 }

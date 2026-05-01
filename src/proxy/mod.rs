@@ -14,13 +14,14 @@ pub mod http;
 pub mod mcp;
 pub mod policy_check;
 pub mod recording_body;
+pub mod upstream_policy;
 pub mod validate;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::config::{ProviderConfig, Providers};
+use crate::config::{ByoConfig, ProviderConfig, Providers};
 use crate::proxy::policy_check::{InstancePolicy, UsageSnapshot};
 use crate::traits::{AuditStore, InstanceStore, PolicyStore, ProviderAdapter, TokenStore};
 
@@ -52,6 +53,8 @@ pub struct ProxyService {
     /// preserves the pre-BYOK behaviour for tests that don't seed the
     /// store.
     pub user_secrets: Option<Arc<crate::secrets::UserSecretsService>>,
+    /// Operator startup gate for user-selected `byo` upstream hosts.
+    pub byo: ByoConfig,
     rate: Arc<RateWindow>,
 }
 
@@ -66,6 +69,7 @@ impl ProxyService {
     ) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             tokens,
@@ -78,6 +82,7 @@ impl ProxyService {
             default_policy,
             user_or_keys: None,
             user_secrets: None,
+            byo: ByoConfig::default(),
             rate: Arc::new(RateWindow::default()),
         })
     }
@@ -100,6 +105,11 @@ impl ProxyService {
         secrets: Arc<crate::secrets::UserSecretsService>,
     ) -> Self {
         self.user_secrets = Some(secrets);
+        self
+    }
+
+    pub fn with_byo_config(mut self, byo: ByoConfig) -> Self {
+        self.byo = byo;
         self
     }
 

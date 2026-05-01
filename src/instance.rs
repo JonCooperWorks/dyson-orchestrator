@@ -2583,6 +2583,10 @@ impl InstanceService {
         let expires_at = req.ttl_seconds.map(|ttl| now + ttl);
 
         let existing = if let Some(src) = &req.source_instance_id {
+            self.instances
+                .get_for_owner(owner_id, src)
+                .await?
+                .ok_or(SwarmError::NotFound)?;
             self.secrets.list(src).await?
         } else {
             Vec::new()

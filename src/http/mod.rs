@@ -95,6 +95,8 @@ pub struct AppState {
     /// list configured providers (`GET /v1/providers`) and run the
     /// upstream validator against the right URL on PUT.
     pub providers: Arc<crate::config::Providers>,
+    /// Operator startup gate for user-selected `byo` upstream hosts.
+    pub byo: Arc<crate::config::ByoConfig>,
     /// Per-instance webhook ("tasks") service — backs both the
     /// management routes under `/v1/instances/:id/webhooks` and the
     /// public delivery endpoint `/webhooks/:id/:name`.
@@ -361,6 +363,7 @@ mod tests {
             openrouter_provisioning: None,
             user_or_keys: None,
             providers: Arc::new(crate::config::Providers::default()),
+            byo: Arc::new(crate::config::ByoConfig::default()),
             webhooks: webhooks_svc,
             shares: shares_svc,
             artefact_cache,
