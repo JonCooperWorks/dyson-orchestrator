@@ -233,6 +233,7 @@ async fn build() -> Fixture {
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
         pool.clone(),
         cache_dir.path().to_path_buf(),
+        cipher_dir.clone(),
     ));
     std::mem::forget(cache_dir);
 

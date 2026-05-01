@@ -718,6 +718,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let artefact_cache = std::sync::Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
         pool.clone(),
         cfg.backup.local_cache_dir.clone(),
+        cipher_dir.clone(),
     ));
 
     let app_state = http::AppState {

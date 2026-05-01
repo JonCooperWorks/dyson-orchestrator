@@ -20,6 +20,7 @@ pub mod dyson_proxy;
 pub mod healthz;
 pub mod instance_artefacts;
 pub mod instances;
+pub mod internal_ingest;
 pub mod models;
 pub mod proxy_admin;
 pub mod secrets;
@@ -186,6 +187,7 @@ pub fn router(
         .merge(healthz::router())
         .merge(auth_config::router(state.clone()))
         .merge(instances::internal_router(state.clone()))
+        .merge(internal_ingest::router(state.clone()))
         .merge(webhooks::public_router(state.clone()))
         .merge(admin)
         .merge(tenant)
@@ -331,6 +333,7 @@ mod tests {
         let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
             pool.clone(),
             cache_dir.path().to_path_buf(),
+            cipher_dir.clone(),
         ));
         // Leak the tempdir so the body files outlive the test scope —
         // the test harness exits soon after either way.

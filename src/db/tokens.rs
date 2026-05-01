@@ -18,14 +18,24 @@ impl SqlxTokenStore {
     }
 }
 
-#[async_trait]
-impl TokenStore for SqlxTokenStore {
-    async fn mint(&self, instance_id: &str, provider: &str) -> Result<String, StoreError> {
-        // `pt_` prefix lets operators grep proxy tokens out of access
-        // logs without false matches against bare 32-hex strings (UUIDs,
-        // OR key ids, etc).  128 bits of entropy still come from the
-        // UUID body — the prefix is purely for log distinguishability.
-        let token = format!("pt_{}", Uuid::new_v4().simple());
+/// Provider string stamped on rows minted via `TokenStore::mint_ingest`.
+/// The internal-ingest route filters resolved tokens by prefix (`it_`),
+/// so the provider field is largely a documentation-and-grep handle for
+/// operators inspecting the table directly.
+pub const INGEST_PROVIDER: &str = "ingest";
+
+impl SqlxTokenStore {
+    /// Common mint path — the prefix and provider are the only knobs
+    /// the public surfaces (`mint` / `mint_ingest`) flex.  Both paths
+    /// share the same row layout in `proxy_tokens` so revoke and
+    /// resolve work uniformly across token kinds.
+    async fn mint_with_prefix(
+        &self,
+        prefix: &str,
+        instance_id: &str,
+        provider: &str,
+    ) -> Result<String, StoreError> {
+        let token = format!("{prefix}{}", Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at) \
              VALUES (?, ?, ?, ?, NULL)",
@@ -38,6 +48,26 @@ impl TokenStore for SqlxTokenStore {
         .await
         .map_err(map_sqlx)?;
         Ok(token)
+    }
+}
+
+#[async_trait]
+impl TokenStore for SqlxTokenStore {
+    async fn mint(&self, instance_id: &str, provider: &str) -> Result<String, StoreError> {
+        // `pt_` prefix lets operators grep proxy tokens out of access
+        // logs without false matches against bare 32-hex strings (UUIDs,
+        // OR key ids, etc).  128 bits of entropy still come from the
+        // UUID body — the prefix is purely for log distinguishability.
+        self.mint_with_prefix("pt_", instance_id, provider).await
+    }
+
+    async fn mint_ingest(&self, instance_id: &str) -> Result<String, StoreError> {
+        // `it_` prefix marks ingest tokens (artefact push from dyson →
+        // swarm).  Same row layout as `pt_` proxy tokens; the prefix +
+        // `provider = "ingest"` let the internal-ingest route reject
+        // chat-provider tokens at the door and let operators grep the
+        // table apart.
+        self.mint_with_prefix("it_", instance_id, INGEST_PROVIDER).await
     }
 
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError> {
@@ -92,16 +122,31 @@ impl TokenStore for SqlxTokenStore {
         &self,
         instance_id: &str,
     ) -> Result<Option<String>, StoreError> {
-        // Multiple non-revoked rows for one instance shouldn't happen
-        // (mint is called once per create), but order-by-created_at
-        // makes the choice deterministic if it ever does.  LIMIT 1
-        // keeps the query cheap regardless.
+        // Caller wants the chat-side proxy token specifically — pin
+        // the provider filter to `SHARED_PROVIDER` so an ingest
+        // token (`provider = "ingest"`) minted after the chat one
+        // doesn't shadow it at the rotation paths that were written
+        // before the ingest token existed.
+        self.lookup_by_instance_for_provider(instance_id, crate::instance::SHARED_PROVIDER)
+            .await
+    }
+
+    async fn lookup_by_instance_for_provider(
+        &self,
+        instance_id: &str,
+        provider: &str,
+    ) -> Result<Option<String>, StoreError> {
+        // Multiple non-revoked rows for one instance + provider
+        // shouldn't happen (mint is called once per create), but
+        // order-by-created_at makes the choice deterministic if it
+        // ever does.  LIMIT 1 keeps the query cheap regardless.
         let row = sqlx::query(
             "SELECT token FROM proxy_tokens \
-             WHERE instance_id = ? AND revoked_at IS NULL \
+             WHERE instance_id = ? AND provider = ? AND revoked_at IS NULL \
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(instance_id)
+        .bind(provider)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx)?;
@@ -212,5 +257,54 @@ mod tests {
         // Unknown token: false, no error.
         let unknown = store.revoke_token("not-a-real-token").await.unwrap();
         assert!(!unknown);
+    }
+
+    #[tokio::test]
+    async fn mint_ingest_uses_it_prefix_and_ingest_provider() {
+        // Ingest tokens live in the same `proxy_tokens` table but the
+        // wire-side route filters by prefix and the operator grep path
+        // filters by provider.  Both must be set correctly on mint.
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqlxTokenStore::new(pool);
+        let tok = store.mint_ingest("i1").await.unwrap();
+        assert!(tok.starts_with("it_"), "ingest token must start with `it_`, got {tok:?}");
+        assert_eq!(tok.len(), 35, "it_ + 32 hex chars");
+
+        let resolved = store.resolve(&tok).await.unwrap().expect("present");
+        assert_eq!(resolved.instance_id, "i1");
+        assert_eq!(resolved.provider, INGEST_PROVIDER);
+        assert!(resolved.revoked_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_for_instance_cleans_up_ingest_alongside_chat_token() {
+        // Instance destroy must take the ingest token down with it —
+        // we don't want a destroyed instance's ingest URL accepting
+        // pushes from a still-running cube the destroy didn't catch.
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqlxTokenStore::new(pool);
+        let chat = store.mint("i1", "openai").await.unwrap();
+        let ingest = store.mint_ingest("i1").await.unwrap();
+
+        store.revoke_for_instance("i1").await.unwrap();
+        assert!(store.resolve(&chat).await.unwrap().is_none(), "chat token revoked");
+        assert!(store.resolve(&ingest).await.unwrap().is_none(), "ingest token revoked");
+    }
+
+    #[tokio::test]
+    async fn ingest_and_chat_tokens_are_distinguishable_after_mint() {
+        // Token-prefix discrimination at the route layer relies on the
+        // `pt_` and `it_` prefixes never colliding.  Belt-and-braces
+        // assertion that mint and mint_ingest produce disjoint shapes.
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let store = SqlxTokenStore::new(pool);
+        let pt = store.mint("i1", "openai").await.unwrap();
+        let it = store.mint_ingest("i1").await.unwrap();
+        assert!(pt.starts_with("pt_"));
+        assert!(it.starts_with("it_"));
+        assert_ne!(pt, it);
     }
 }

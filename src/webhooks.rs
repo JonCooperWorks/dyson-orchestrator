@@ -41,7 +41,11 @@ use crate::traits::{
 /// the read side to tell sealed bodies (current writes) apart from
 /// legacy plaintext bodies that pre-date encryption — those open as-is
 /// rather than going through the cipher.
-const AGE_ARMOR_PREFIX: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
+///
+/// `pub(crate)` so the artefact cache can use the same sentinel for
+/// its on-disk legacy-fallback detection — the two stores share the
+/// same age envelope shape and the same legacy-row posture.
+pub(crate) const AGE_ARMOR_PREFIX: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 
 /// Maximum body size accepted at `/webhooks/<id>/<name>`.  Mirrors
 /// dyson's `MAX_TURN_BODY` so we never accept a payload the agent

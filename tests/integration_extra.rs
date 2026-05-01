@@ -356,6 +356,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     let artefact_cache = Arc::new(dyson_swarm::artefacts::ArtefactCacheService::new(
         pool.clone(),
         cache_dir.path().to_path_buf(),
+        cipher_dir.clone(),
     ));
     std::mem::forget(cache_dir);
     let app_state = http::AppState {

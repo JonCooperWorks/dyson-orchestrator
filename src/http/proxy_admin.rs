@@ -197,6 +197,7 @@ mod tests {
         let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
             pool,
             cache_dir.path().to_path_buf(),
+            cipher_dir.clone(),
         ));
         std::mem::forget(cache_dir);
         let state = AppState {

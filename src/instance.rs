@@ -110,6 +110,23 @@ pub const ENV_MODEL: &str = "SWARM_MODEL";
 /// can rewrite `skills.builtin.tools` accordingly.
 pub const ENV_TOOLS: &str = "SWARM_TOOLS";
 
+/// Full URL the dyson agent's `Output::send_artefact` POSTs to when
+/// pushing a finalised artefact back to swarm.  Resolved server-side
+/// by appending `/v1/internal/ingest/artefact` to `self.proxy_base`,
+/// so a single `[hostname]` change at the operator's TOML flips both
+/// the chat proxy and the ingest endpoint together.
+pub const ENV_INGEST_URL: &str = "SWARM_INGEST_URL";
+/// Per-instance bearer the dyson agent stamps on artefact ingest
+/// POSTs.  Distinct prefix (`it_`) and provider (`ingest`) from the
+/// chat-side `pt_` proxy_token; both live in the same `proxy_tokens`
+/// table so `revoke_for_instance` cleans them up together at destroy.
+pub const ENV_INGEST_TOKEN: &str = "SWARM_INGEST_TOKEN";
+
+/// Path the ingest URL appends to `self.proxy_base`.  Kept as a
+/// constant so the route mount in `http::internal_ingest::router`
+/// and the env exposure here can't drift.
+const INGEST_PATH: &str = "/v1/internal/ingest/artefact";
+
 /// Comma-separated ordered fallback list of model ids.  First entry
 /// matches `SWARM_MODEL`; trailing entries let agents that support
 /// failover/rotation try alternate models in order.  Optional —
@@ -315,9 +332,17 @@ pub trait DysonReconfigurer: Send + Sync {
 /// Build the orchestrator-managed env envelope that gets handed to the
 /// sandbox at create + restore time. Centralised so the two paths can't
 /// drift on which keys they inject.
+///
+/// `ingest_token` is the per-instance `it_<32hex>` bearer the dyson
+/// agent stamps on artefact ingest POSTs to swarm — minted at create
+/// (or reused via `lookup_by_instance_for_provider("ingest")` on the
+/// rotate paths).  The URL is derived from `proxy_base` so the route
+/// path stays in lock-step with the swarm's mount in
+/// `http::internal_ingest::router`.
 fn managed_env(
     proxy_base: &str,
     proxy_token: &str,
+    ingest_token: &str,
     instance_id: &str,
     bearer: &str,
     name: &str,
@@ -327,6 +352,8 @@ fn managed_env(
     let mut out = BTreeMap::new();
     out.insert(ENV_PROXY_URL.into(), proxy_base.to_owned());
     out.insert(ENV_PROXY_TOKEN.into(), proxy_token.to_owned());
+    out.insert(ENV_INGEST_URL.into(), build_ingest_url(proxy_base));
+    out.insert(ENV_INGEST_TOKEN.into(), ingest_token.to_owned());
     out.insert(ENV_INSTANCE_ID.into(), instance_id.to_owned());
     out.insert(ENV_BEARER_TOKEN.into(), bearer.to_owned());
     out.insert(ENV_NAME.into(), name.to_owned());
@@ -345,6 +372,25 @@ fn managed_env(
         out.insert(ENV_NO_PROXY_LC.into(), CUBE_NO_PROXY.to_owned());
     }
     out
+}
+
+/// Build the `SWARM_INGEST_URL` value from the operator's `proxy_base`
+/// (the same value already exposed as `SWARM_PROXY_URL`).  An empty
+/// `proxy_base` falls through as an empty URL — dyson reads that as
+/// "ingest disabled" and skips the push, same posture as the
+/// `proxy_url`-empty case in `dyson swarm`'s warmup path.
+fn build_ingest_url(proxy_base: &str) -> String {
+    let trimmed = proxy_base.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // proxy_base is the chat proxy path (`https://<host>/llm`); the
+    // ingest endpoint sits one segment up at the swarm apex, so we
+    // strip a trailing `/llm` if present and append the route path.
+    // Operators can also point `proxy_base` at the apex directly
+    // (`https://<host>`) and the strip is a no-op.
+    let apex = trimmed.strip_suffix("/llm").unwrap_or(trimmed);
+    format!("{apex}{INGEST_PATH}")
 }
 
 /// True when the network policy allows traffic to arbitrary public
@@ -436,6 +482,19 @@ pub struct ReconfigureBody {
     /// for the canonical shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Full URL the dyson agent's `Output::send_artefact` POSTs to.
+    /// Mirrors `SWARM_INGEST_URL` in the env envelope; pushed via
+    /// `/api/admin/configure` because the cube's snapshot/restore
+    /// freezes `/proc/self/environ` at warmup time, same root cause
+    /// as `proxy_token` / `proxy_base` already need a configure-push.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingest_url: Option<String>,
+    /// Per-instance `it_<32hex>` bearer for the ingest endpoint.
+    /// Mirrors `SWARM_INGEST_TOKEN` in the env envelope.  None on a
+    /// configure-push for an instance that pre-dates the ingest token
+    /// (legacy rows: dyson skips the push if the token is unset).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingest_token: Option<String>,
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
@@ -1102,6 +1161,18 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
         };
+        // Same lookup-or-mint posture for the ingest token.  Legacy
+        // rows that pre-date the ingest token get one minted here so
+        // post-rotation the agent's artefact pushes work without an
+        // operator re-hire.
+        let ingest_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_ingest(&source.id).await?,
+        };
         // Existing per-instance secrets pass straight through to the
         // new cube's env envelope — same shape `restore` uses.  Note
         // the SecretStore returns ciphertexts; we don't decrypt here.
@@ -1109,6 +1180,7 @@ impl InstanceService {
         let managed = managed_env(
             &self.proxy_base,
             &proxy_token,
+            &ingest_token,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -1201,6 +1273,11 @@ impl InstanceService {
                     "{}/openrouter",
                     self.proxy_base.trim_end_matches('/')
                 )),
+                ingest_url: {
+                    let u = build_ingest_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                ingest_token: Some(ingest_token.clone()),
                 image_provider_name: self
                     .image_gen_defaults
                     .as_ref()
@@ -1321,10 +1398,19 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
         };
+        let ingest_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_ingest(&source.id).await?,
+        };
         let existing = self.secrets.list(&source.id).await?;
         let managed = managed_env(
             &self.proxy_base,
             &proxy_token,
+            &ingest_token,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -1371,6 +1457,11 @@ impl InstanceService {
                     "{}/openrouter",
                     self.proxy_base.trim_end_matches('/')
                 )),
+                ingest_url: {
+                    let u = build_ingest_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                ingest_token: Some(ingest_token.clone()),
                 image_provider_name: self
                     .image_gen_defaults
                     .as_ref()
@@ -1758,6 +1849,10 @@ impl InstanceService {
         self.instances.create(row).await?;
 
         let proxy_token = self.tokens.mint(&id, SHARED_PROVIDER).await?;
+        // Per-instance ingest token, sibling of the chat proxy token
+        // in `proxy_tokens`.  Same revoke path (`revoke_for_instance`
+        // at destroy) so we don't need a parallel cleanup hook.
+        let ingest_token = self.tokens.mint_ingest(&id).await?;
 
         // Persist MCP server records under the owner's cipher so the
         // proxy path can decrypt them per-request.  We do this BEFORE
@@ -1785,6 +1880,7 @@ impl InstanceService {
         let managed = managed_env(
             &self.proxy_base,
             &proxy_token,
+            &ingest_token,
             &id,
             &bearer,
             &name,
@@ -1861,6 +1957,19 @@ impl InstanceService {
                     "{}/openrouter",
                     self.proxy_base.trim_end_matches('/')
                 )),
+                // Same configure-push posture as proxy_token/proxy_base:
+                // cube's snapshot/restore freezes the agent's env at
+                // warmup, so the SWARM_INGEST_URL / SWARM_INGEST_TOKEN
+                // we just stamped into the env envelope never reaches
+                // the running dyson process.  Pushing them here lands
+                // them in the per-chat HttpState the SseOutput reads
+                // on every send_artefact, completing the wire end-to-
+                // end without an operator-visible re-hire.
+                ingest_url: {
+                    let u = build_ingest_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                ingest_token: Some(ingest_token.clone()),
                 // Image-generation defaults — register the dedicated
                 // image provider entry and point the agent at it.  The
                 // same proxy_token authenticates against swarm's `/llm`
@@ -2515,6 +2624,10 @@ impl InstanceService {
         self.instances.create(row).await?;
 
         let proxy_token = self.tokens.mint(&id, SHARED_PROVIDER).await?;
+        // Mint a fresh ingest token for the restored instance — it has
+        // a brand-new instance id and bearer, so a sibling token here
+        // is a fresh row, not a reused one.
+        let ingest_token = self.tokens.mint_ingest(&id).await?;
 
         // Persist carried-over secrets early so they appear in the new
         // instance's `existing` rows on subsequent restarts. They also feed
@@ -2529,6 +2642,7 @@ impl InstanceService {
         let managed = managed_env(
             &self.proxy_base,
             &proxy_token,
+            &ingest_token,
             &id,
             &bearer,
             &restored_name,
@@ -2917,6 +3031,18 @@ mod tests {
         assert_eq!(resolved.instance_id, created.id);
         assert_eq!(resolved.provider, SHARED_PROVIDER);
 
+        // Phase 2: ingest token + URL must also land on the env envelope
+        // alongside the chat proxy token.  Prefix is `it_` (sibling of
+        // the chat token's `pt_`) and the URL is derived from the
+        // operator's proxy_base (apex + /v1/internal/ingest/artefact).
+        let ingest_token = &captured.env[ENV_INGEST_TOKEN];
+        assert!(ingest_token.starts_with("it_"), "ingest env carries an it_ token");
+        assert_eq!(ingest_token.len(), 35);
+        assert_eq!(captured.env[ENV_INGEST_URL], "http://swarm.test:8080/v1/internal/ingest/artefact");
+        let ingest_resolved = tokens.resolve(ingest_token).await.unwrap().unwrap();
+        assert_eq!(ingest_resolved.instance_id, created.id);
+        assert_eq!(ingest_resolved.provider, crate::db::tokens::INGEST_PROVIDER);
+
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.status, InstanceStatus::Live);
     }
@@ -2938,6 +3064,7 @@ mod tests {
         let env = managed_env(
             "http://swarm:8080/llm",
             "tok",
+            "ingest_tok",
             "id",
             "bear",
             "n",
@@ -2957,6 +3084,7 @@ mod tests {
         let env = managed_env(
             "http://swarm:8080/llm",
             "tok",
+            "ingest_tok",
             "id",
             "bear",
             "n",
@@ -2971,6 +3099,7 @@ mod tests {
         let env = managed_env(
             "http://swarm:8080/llm",
             "tok",
+            "ingest_tok",
             "id",
             "bear",
             "n",
@@ -2990,6 +3119,7 @@ mod tests {
         let env = managed_env(
             "http://swarm:8080/llm",
             "tok",
+            "ingest_tok",
             "id",
             "bear",
             "n",
@@ -3008,6 +3138,7 @@ mod tests {
         let env = managed_env(
             "http://swarm:8080/llm",
             "tok",
+            "ingest_tok",
             "id",
             "bear",
             "n",
@@ -3020,6 +3151,52 @@ mod tests {
             },
         );
         assert!(!env.contains_key(ENV_HTTPS_PROXY));
+    }
+
+    #[test]
+    fn ingest_env_keys_are_stamped_alongside_proxy_keys() {
+        // SWARM_INGEST_URL and SWARM_INGEST_TOKEN must land on every
+        // managed env envelope so the dyson agent's send_artefact has
+        // somewhere to push.  URL is derived by stripping `/llm` from
+        // the chat proxy base and appending the ingest route path.
+        let env = managed_env(
+            "http://swarm.example/llm",
+            "pt_chat",
+            "it_ingest",
+            "id",
+            "bear",
+            "n",
+            "t",
+            &NetworkPolicy::Open,
+        );
+        assert_eq!(env[ENV_INGEST_TOKEN], "it_ingest");
+        assert_eq!(env[ENV_INGEST_URL], "http://swarm.example/v1/internal/ingest/artefact");
+    }
+
+    #[test]
+    fn ingest_url_handles_proxy_base_without_llm_suffix() {
+        // Some deploys point `proxy_base` at the apex directly (no
+        // `/llm` segment).  The strip is a no-op and the path appends
+        // cleanly.
+        assert_eq!(
+            build_ingest_url("https://swarm.example"),
+            "https://swarm.example/v1/internal/ingest/artefact",
+        );
+        // Trailing slash on the apex is tolerated.
+        assert_eq!(
+            build_ingest_url("https://swarm.example/"),
+            "https://swarm.example/v1/internal/ingest/artefact",
+        );
+    }
+
+    #[test]
+    fn ingest_url_empty_when_proxy_base_unset() {
+        // Local dev / tests boot swarm without a hostname, so
+        // proxy_base is empty.  The empty URL signals dyson to skip
+        // ingest pushes — same posture as the proxy_url-empty branch
+        // in `dyson swarm`'s warmup config writer.
+        assert_eq!(build_ingest_url(""), "");
+        assert_eq!(build_ingest_url("/"), "");
     }
 
     #[tokio::test]
@@ -3060,9 +3237,21 @@ mod tests {
             .await
             .unwrap();
         assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_some());
+        // Pull the ingest token sibling that create() also minted
+        // (we don't expose it on CreatedInstance) so we can assert
+        // destroy revokes it alongside the chat token.
+        let ingest_token = tokens
+            .lookup_by_instance_for_provider(&created.id, crate::db::tokens::INGEST_PROVIDER)
+            .await
+            .unwrap()
+            .expect("create must mint an ingest token");
 
         svc.destroy("legacy", &created.id, false).await.unwrap();
         assert!(tokens.resolve(&created.proxy_token).await.unwrap().is_none());
+        assert!(
+            tokens.resolve(&ingest_token).await.unwrap().is_none(),
+            "destroy must revoke ingest token alongside chat token",
+        );
 
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.status, InstanceStatus::Destroyed);

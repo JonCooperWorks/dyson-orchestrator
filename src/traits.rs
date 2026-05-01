@@ -460,6 +460,14 @@ pub trait SystemSecretStore: Send + Sync {
 #[async_trait]
 pub trait TokenStore: Send + Sync {
     async fn mint(&self, instance_id: &str, provider: &str) -> Result<String, StoreError>;
+    /// Mint a per-instance ingest token (the bearer dyson stamps on
+    /// `POST /v1/internal/ingest/artefact`).  Lives in the same
+    /// `proxy_tokens` table as the chat-provider tokens but uses an
+    /// `it_` prefix and `provider = "ingest"` so an operator can grep
+    /// the table apart and the resolver-side route can refuse
+    /// chat-provider tokens against the ingest endpoint by prefix.
+    /// `revoke_for_instance` cleans these up alongside the chat token.
+    async fn mint_ingest(&self, instance_id: &str) -> Result<String, StoreError>;
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError>;
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError>;
     /// Revoke a single proxy_token by its plaintext value (B1).
@@ -477,6 +485,18 @@ pub trait TokenStore: Send + Sync {
     /// proxy_token row exists) so callers can skip them quietly.
     async fn lookup_by_instance(&self, instance_id: &str)
         -> Result<Option<String>, StoreError>;
+
+    /// Same as `lookup_by_instance` but narrowed to a specific
+    /// `provider`.  Required because the ingest token (`provider =
+    /// "ingest"`) lives in the same `proxy_tokens` table as the chat
+    /// proxy token (`provider = "*"`); without a provider filter the
+    /// rotation paths that "look up the chat token" would land on the
+    /// ingest token whenever it happened to be the more recent mint.
+    async fn lookup_by_instance_for_provider(
+        &self,
+        instance_id: &str,
+        provider: &str,
+    ) -> Result<Option<String>, StoreError>;
 }
 
 #[async_trait]
