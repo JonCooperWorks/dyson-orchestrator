@@ -63,6 +63,7 @@ pub fn render_markdown_page(title: &str, kind_label: &str, body: &str) -> String
     let parser = Parser::new_ext(body, opts);
     let mut raw_html = String::with_capacity(body.len() * 2);
     html::push_html(&mut raw_html, parser);
+    let raw_html = render_task_markers(&raw_html);
     let safe = sanitize_markdown_html(&raw_html);
     wrap_page(title, kind_label, &safe, /* is_image = */ false, "")
 }
@@ -118,6 +119,22 @@ fn sanitize_markdown_html(input: &str) -> String {
         ])
         .clean(input)
         .to_string()
+}
+
+/// pulldown-cmark emits disabled checkbox inputs for GFM task
+/// markers.  Keep the visual marker, but replace the input before
+/// sanitization so we do not have to allow form controls in shared
+/// artefacts.
+fn render_task_markers(input: &str) -> String {
+    input
+        .replace(
+            r#"<input disabled="" type="checkbox" checked=""/>"#,
+            r#"<span class="taskbox taskbox-checked"></span>"#,
+        )
+        .replace(
+            r#"<input disabled="" type="checkbox"/>"#,
+            r#"<span class="taskbox"></span>"#,
+        )
 }
 
 fn wrap_page(title: &str, kind_label: &str, body: &str, is_image: bool, raw_path: &str) -> String {
@@ -347,6 +364,30 @@ body {
 .prose p { margin: 0.7em 0; }
 .prose ul, .prose ol { padding-left: 1.4em; margin: 0.7em 0; }
 .prose li { margin: 0.2em 0; }
+.prose li:has(.taskbox) { list-style: none; margin-left: -1.2em; }
+.prose .taskbox {
+  display: inline-block;
+  width: 0.95em; height: 0.95em;
+  margin-right: 0.55em;
+  vertical-align: -0.14em;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--panel);
+  position: relative;
+}
+.prose .taskbox-checked {
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+  border-color: var(--accent);
+}
+.prose .taskbox-checked::after {
+  content: "";
+  position: absolute;
+  left: 0.26em; top: 0.08em;
+  width: 0.28em; height: 0.55em;
+  border: solid var(--accent);
+  border-width: 0 2px 2px 0;
+  transform: rotate(42deg);
+}
 .prose blockquote {
   border-left: 3px solid var(--line-2);
   margin: 0.8em 0; padding: 0.2em 0 0.2em 1em;
@@ -457,6 +498,15 @@ mod tests {
         let html = render_markdown_page("t", "security_review", md);
         assert!(html.contains(r#"href="https://nvd.nist.gov/CVE""#));
         assert!(html.contains("noopener"));
+    }
+
+    #[test]
+    fn render_markdown_keeps_task_list_markers_without_inputs() {
+        let md = "- [ ] triage\n- [x] fixed";
+        let html = render_markdown_page("t", "security_review", md);
+        assert!(html.contains(r#"class="taskbox""#));
+        assert!(html.contains(r#"class="taskbox taskbox-checked""#));
+        assert!(!html.contains("<input"));
     }
 
     #[test]

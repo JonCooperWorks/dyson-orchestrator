@@ -616,6 +616,207 @@
   margin-top: 8px;
 }
 
+/* ── Artefact reader ─────────────────────────────────────────────
+ * Reports need more breathing room than edit forms.  The list view
+ * gets enough width for its table; the reader becomes a document
+ * surface with Markdown typography that matches the Dyson chat reader
+ * instead of looking like unstyled HTML dropped into a panel. */
+.page-artefacts,
+.page-artefact-reader {
+  max-width: 1120px;
+}
+.page-artefact-reader .page-title {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.artefact-body-panel {
+  padding: 0;
+  overflow: hidden;
+}
+.artefact-body-frame {
+  padding: 22px 28px 30px;
+  min-width: 0;
+}
+.md-body {
+  width: min(100%, 920px);
+  margin: 0 auto;
+  color: var(--fg);
+  font-size: 14.5px;
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+}
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+.md-body p { margin: 0 0 12px; }
+.md-body strong { color: var(--fg); font-weight: 650; }
+.md-body em { color: var(--fg-muted); }
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  color: var(--fg);
+  font-weight: 650;
+  line-height: 1.25;
+  margin: 26px 0 10px;
+}
+.md-body h1 {
+  font-size: 28px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.md-body h2 {
+  font-size: 21px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.md-body h3 { font-size: 17px; color: var(--accent); }
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.md-body ul,
+.md-body ol {
+  margin: 8px 0 14px;
+  padding-left: 24px;
+}
+.md-body li { margin: 4px 0; }
+.md-body li > p { margin: 4px 0; }
+.md-body li::marker { color: var(--accent); }
+.md-body input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0 7px 0 -20px;
+  vertical-align: -2px;
+  accent-color: var(--accent);
+}
+.md-body blockquote {
+  margin: 14px 0 18px;
+  padding: 9px 14px;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--fg-muted);
+}
+.md-body a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.md-body a:hover {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.md-body code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  padding: 2px 5px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: color-mix(in srgb, var(--accent) 75%, var(--fg));
+}
+.md-body pre {
+  margin: 14px 0 18px;
+  padding: 14px 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  color: var(--fg);
+  box-shadow: 0 8px 22px -18px rgba(0, 0, 0, 0.7);
+}
+.md-body pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.md-body table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 16px 0 20px;
+  overflow-x: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.md-body thead {
+  background: var(--bg-2);
+}
+.md-body th,
+.md-body td {
+  padding: 9px 11px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.md-body th:last-child,
+.md-body td:last-child { border-right: 0; }
+.md-body tr:last-child td { border-bottom: 0; }
+.md-body th {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.md-body tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--bg-2) 45%, transparent);
+}
+.md-body hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 24px 0;
+}
+.md-body img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 16px auto;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.md-body sup a {
+  border-bottom: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.md-body .footnotes {
+  margin-top: 28px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 12.5px;
+}
+@media (max-width: 720px) {
+  .page-artefacts,
+  .page-artefact-reader {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .artefact-body-frame { padding: 16px 14px 22px; }
+  .md-body {
+    font-size: 14px;
+    line-height: 1.65;
+  }
+  .md-body h1 { font-size: 23px; }
+  .md-body h2 { font-size: 18px; }
+}
+
 /* ── Tools picker / view ─────────────────────────────────────────
    Same panel chrome as snapshots / secrets / mcp / network.  The
    picker (create + edit forms) and the read-only view (instance

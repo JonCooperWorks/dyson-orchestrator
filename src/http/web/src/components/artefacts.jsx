@@ -27,6 +27,7 @@ import { useApi } from '../hooks/useApi.jsx';
 const QUICK_TTL = '7d';
 const PAGE_SIZE = 25;
 const MD_PLUGINS = [remarkGfm, remarkBreaks];
+const MARKDOWNISH_RE = /(^|\n)\s{0,3}(#{1,6}\s+\S|[-*+]\s+\[[ xX]\]\s+\S|[-*+]\s+\S|\d+\.\s+\S|>\s+\S|```|---+\s*$|\|.+\|)|\[[^\]]+\]\([^)]+\)|`[^`\n]+`|\*\*[^*\n]+\*\*/;
 
 export function MyArtefactsPage() {
   const { client } = useApi();
@@ -108,7 +109,7 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance }) {
     : null;
 
   return (
-    <main className="page page-edit">
+    <main className="page page-edit page-artefacts">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
         <h1 className="page-title">artefacts</h1>
@@ -375,7 +376,7 @@ export function ArtefactPage({ instanceId, artefactId }) {
   };
 
   return (
-    <main className="page page-edit">
+    <main className="page page-edit page-artefact-reader">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
         <h1 className="page-title">
@@ -407,8 +408,8 @@ export function ArtefactPage({ instanceId, artefactId }) {
         />
       ) : null}
 
-      <section className="panel">
-        <div style={{ padding: 16 }}>
+      <section className="panel artefact-body-panel">
+        <div className="artefact-body-frame">
           <ArtefactBody row={row || { kind: '', mime: '', title: '' }} state={state} />
         </div>
       </section>
@@ -563,18 +564,22 @@ function ShareMenu({ busy, onMint }) {
   );
 }
 
-function ArtefactBody({ row, state }) {
+export function ArtefactBody({ row, state }) {
   if (state.loading) return <p className="muted small">loading…</p>;
   if (state.err) return <div className="error">{state.err}</div>;
 
   const mime = state.mime || row.mime || '';
+  const baseMime = contentTypeBase(mime);
   const title = row.title || '';
-  const isImage = mime.startsWith('image/') || row.kind === 'image';
-  const isMarkdown = mime === 'text/markdown'
-    || /\.(md|markdown)$/i.test(title)
-    || (row.kind === 'security_review' && state.text);
+  const isImage = baseMime.startsWith('image/') || row.kind === 'image';
+  const isMarkdown = isMarkdownArtefact({
+    kind: row.kind,
+    mime,
+    title,
+    text: state.text,
+  });
   const isPlainText = !isImage && !isMarkdown
-    && (mime.startsWith('text/') || /json|xml/.test(mime))
+    && (baseMime.startsWith('text/') || /json|xml/.test(baseMime))
     && state.text != null;
 
   if (isImage && state.blobUrl) {
@@ -588,9 +593,7 @@ function ArtefactBody({ row, state }) {
   }
   if (isMarkdown && state.text != null) {
     return (
-      <div className="md-body">
-        <ReactMarkdown remarkPlugins={MD_PLUGINS}>{state.text}</ReactMarkdown>
-      </div>
+      <MarkdownBody markdown={state.text} />
     );
   }
   if (isPlainText) {
@@ -608,6 +611,68 @@ function ArtefactBody({ row, state }) {
       Binary artefact ({mime || 'unknown type'}) — use download.
     </div>
   );
+}
+
+export function contentTypeBase(mime) {
+  return String(mime || '').split(';', 1)[0].trim().toLowerCase();
+}
+
+export function isMarkdownArtefact({ kind, mime, title, text }) {
+  const baseMime = contentTypeBase(mime);
+  if (
+    baseMime === 'text/markdown'
+    || baseMime === 'text/x-markdown'
+    || baseMime === 'application/markdown'
+    || /\.(md|markdown)$/i.test(title || '')
+  ) {
+    return true;
+  }
+  if (kind === 'security_review' || kind === 'markdown' || kind === 'report') {
+    return text != null;
+  }
+  if (text == null) return false;
+  if (/json|xml|csv|toml|yaml|yml/.test(baseMime)) return false;
+  if (!baseMime.startsWith('text/') && baseMime !== '') return false;
+  return MARKDOWNISH_RE.test(String(text));
+}
+
+function MarkdownBody({ markdown }) {
+  return (
+    <div className="md-body">
+      <ReactMarkdown
+        remarkPlugins={MD_PLUGINS}
+        components={{
+          a: MarkdownLink,
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function MarkdownLink({ node, href, children, ...props }) {
+  const safeHref = safeMarkdownHref(href);
+  if (!safeHref) return <>{children}</>;
+  const external = /^(https?:|mailto:)/i.test(safeHref);
+  return (
+    <a
+      {...props}
+      href={safeHref}
+      target={external ? '_blank' : undefined}
+      rel={external ? 'noopener noreferrer' : undefined}
+    >
+      {children}
+    </a>
+  );
+}
+
+function safeMarkdownHref(href) {
+  const value = String(href || '').trim();
+  if (!value) return '';
+  if (/^(https?:|mailto:)/i.test(value)) return value;
+  if (/^(#|\/(?!\/)|\.\/|\.\.\/)/.test(value)) return value;
+  return '';
 }
 
 function MintedBanner({ minted, onDismiss }) {
