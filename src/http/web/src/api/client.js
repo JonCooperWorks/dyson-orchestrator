@@ -305,6 +305,61 @@ export class SwarmClient {
     );
   }
 
+  // ─── Swarm-side artefact cache ─────────────────────────────────
+  //
+  // Backs the "all my artefacts" panel and the share-mint affordance.
+  // Cubes are ephemeral; this surface persists past cube reset (bytes
+  // live on swarm under [backup].local_cache_dir).  Each row is
+  // `{id, instance_id, chat_id, kind, title, mime, bytes, created_at,
+  // cached_at}`.
+
+  /// Owner-wide listing across every instance.  Newest cached_at first.
+  listMyArtefacts({ limit } = {}) {
+    const qs = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+    return this._json(`/v1/artefacts${qs}`, { headers: { Accept: 'application/json' } });
+  }
+
+  /// Per-instance listing, optionally narrowed to one chat (mirrors
+  /// dyson's `/api/conversations/:chat/artefacts` shape).
+  listInstanceArtefacts(instanceId, { chatId } = {}) {
+    const qs = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts${qs}`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
+  /// Pre-populate the cache for one chat by walking the cube's listing.
+  /// Bodies are not pulled (memory blast radius); the share mint OR a
+  /// `getInstanceArtefactRaw` call brings bytes in lazily.
+  sweepInstanceArtefacts(instanceId, chatId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/sweep`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId }),
+      },
+    );
+  }
+
+  /// Path to the swarm-served raw bytes — point an `<img>` or
+  /// `<a download>` at this rather than fetching JSON.  Cache-first;
+  /// falls through to the live cube on miss and write-throughs the
+  /// bytes for next time.
+  instanceArtefactRawUrl(instanceId, artefactId) {
+    return `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}/raw`;
+  }
+
+  /// Drop a row + its on-disk body.  Idempotent — 204 even when no
+  /// row existed or the row wasn't owned by the caller.
+  deleteInstanceArtefact(instanceId, artefactId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/artefacts/${encodeURIComponent(artefactId)}`,
+      { method: 'DELETE' },
+    );
+  }
+
   // ─── Anonymous artefact shares ─────────────────────────────────
   //
   // `mintShare` returns `{url, jti, expires_at, label, created_at}`;

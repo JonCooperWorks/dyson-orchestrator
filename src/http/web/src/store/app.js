@@ -230,6 +230,8 @@ export function parseHashView() {
   if (tasks) return { name: 'instance-tasks', id: decodeURIComponent(tasks[1]), taskName: null };
   const shares = h.match(/^#\/i\/([^/?#]+)\/shares/);
   if (shares) return { name: 'instance-shares', id: decodeURIComponent(shares[1]) };
+  const instArtefacts = h.match(/^#\/i\/([^/?#]+)\/artefacts/);
+  if (instArtefacts) return { name: 'instance-artefacts', id: decodeURIComponent(instArtefacts[1]) };
   const edit = h.match(/^#\/i\/([^/?#]+)\/edit/);
   if (edit) return { name: 'instance-edit', id: decodeURIComponent(edit[1]) };
   const m = h.match(/^#\/i\/([^/?#]+)/);
@@ -237,5 +239,6 @@ export function parseHashView() {
   if (h.startsWith('#/new')) return { name: 'instance-new', id: null };
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };
   if (h.startsWith('#/keys')) return { name: 'byok', id: null };
+  if (h.startsWith('#/artefacts')) return { name: 'artefacts', id: null };
   return { name: 'instances', id: null };
 }

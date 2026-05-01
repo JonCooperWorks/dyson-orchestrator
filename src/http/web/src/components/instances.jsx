@@ -1753,6 +1753,15 @@ function InstanceDetail({ id, onNew }) {
           </a>
           <a
             className="btn btn-ghost"
+            href={`#/i/${encodeURIComponent(id)}/artefacts`}
+            aria-disabled={busy}
+            onClick={(e) => { if (busy) e.preventDefault(); }}
+            title="artefacts cached on swarm — survive cube reset"
+          >
+            artefacts
+          </a>
+          <a
+            className="btn btn-ghost"
             href={`#/i/${encodeURIComponent(id)}/shares`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}

@@ -23,13 +23,15 @@ export function TopBar({ view }) {
   // hiding the navigation surface entirely.
   const onAdminRoute = view?.name === 'admin';
   const onByokRoute = view?.name === 'byok';
-  const onInstancesRoute = !onAdminRoute && !onByokRoute;
+  const onArtefactsRoute = view?.name === 'artefacts';
+  const onInstancesRoute = !onAdminRoute && !onByokRoute && !onArtefactsRoute;
   const showAdminLink = auth?.mode === 'oidc' || auth?.mode === 'none';
   return (
     <header className="topbar">
       <div className="topbar-brand">swarm</div>
       <nav className="topbar-nav">
         <a className={onInstancesRoute ? 'active' : ''} href="#/">instances</a>
+        <a className={onArtefactsRoute ? 'active' : ''} href="#/artefacts">artefacts</a>
         <a className={onByokRoute ? 'active' : ''} href="#/keys">keys</a>
         {showAdminLink ? (
           <a className={onAdminRoute ? 'active' : ''} href="#/admin">admin</a>
