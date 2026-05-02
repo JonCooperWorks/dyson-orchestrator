@@ -2581,7 +2581,14 @@ function formatMcpPanelError(raw, context = 'general') {
     return {
       title: 'This provider needs a pre-registered OAuth client',
       body: 'Swarm can reach the provider, but it cannot create an OAuth client automatically for this server.',
-      hint: 'Add a client ID in the server settings, or switch to bearer/PAT auth if the provider supports it.',
+      hint: 'Add a client ID in the server settings, or switch to bearer token auth if the provider supports it.',
+    };
+  }
+  if (trimmed.includes('dynamic client registration failed')) {
+    return {
+      title: 'Swarm could not register an OAuth client',
+      body: 'The provider advertises dynamic registration, but the registration request did not succeed.',
+      hint: 'Try again in a moment, or enter a pre-registered client ID and secret instead.',
     };
   }
   if (trimmed.includes('oauth discovery failed')) {
@@ -2603,6 +2610,34 @@ function formatMcpPanelError(raw, context = 'general') {
       title: 'This MCP server is not using OAuth',
       body: 'The saved server configuration does not include an OAuth auth mode.',
       hint: 'Edit the server and choose OAuth, or switch to bearer auth if that is what the provider expects.',
+    };
+  }
+  if (trimmed.includes('bad authorization endpoint')) {
+    return {
+      title: 'The authorization URL is not valid',
+      body: 'Swarm could not build a working OAuth sign-in URL from this server configuration.',
+      hint: 'Check the authorization URL and client settings, then try again.',
+    };
+  }
+  if (trimmed.includes('oauth refresh failed')) {
+    return {
+      title: 'Stored OAuth credentials could not be refreshed',
+      body: 'This server was connected before, but the provider would not refresh the session.',
+      hint: 'Reconnect the server to get a fresh OAuth session.',
+    };
+  }
+  if (trimmed.includes('oauth not authorised yet')) {
+    return {
+      title: 'Finish OAuth sign-in first',
+      body: 'This MCP server is saved, but it has not been authorised yet.',
+      hint: 'Use connect to complete the provider sign-in flow before checking tools.',
+    };
+  }
+  if (trimmed.includes('unknown mcp server') || trimmed.includes('no such mcp server')) {
+    return {
+      title: 'This MCP server entry is gone',
+      body: 'Swarm could not find the saved server definition anymore.',
+      hint: 'Refresh the page. If it is still missing, add the server again.',
     };
   }
   if (context === 'connect') {
