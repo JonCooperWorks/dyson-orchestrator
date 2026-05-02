@@ -2568,6 +2568,63 @@ function probeLabel(p) {
   return String(p);
 }
 
+function formatMcpPanelError(raw, context = 'general') {
+  const detail = typeof raw === 'string' ? raw : (raw?.detail || raw?.message || String(raw || ''));
+  const trimmed = (detail || '').trim();
+  if (!trimmed) {
+    return {
+      title: 'MCP action failed',
+      body: 'Something went wrong while talking to this MCP server.',
+    };
+  }
+  if (trimmed.includes('no client_id and no registration endpoint')) {
+    return {
+      title: 'This provider needs a pre-registered OAuth client',
+      body: 'Swarm can reach the provider, but it cannot create an OAuth client automatically for this server.',
+      hint: 'Add a client ID in the server settings, or switch to bearer/PAT auth if the provider supports it.',
+    };
+  }
+  if (trimmed.includes('oauth discovery failed')) {
+    return {
+      title: 'Swarm could not discover the provider’s OAuth setup',
+      body: 'The MCP server did not expose OAuth metadata in a way swarm could use.',
+      hint: 'Double-check the server URL, or enter the authorization and token URLs manually.',
+    };
+  }
+  if (trimmed.includes('swarm hostname not configured')) {
+    return {
+      title: 'OAuth redirect is not available yet',
+      body: 'Swarm needs its public hostname configured before it can finish OAuth sign-in.',
+      hint: 'Set the swarm public origin, then try connect again.',
+    };
+  }
+  if (trimmed.includes('server is not oauth-configured')) {
+    return {
+      title: 'This MCP server is not using OAuth',
+      body: 'The saved server configuration does not include an OAuth auth mode.',
+      hint: 'Edit the server and choose OAuth, or switch to bearer auth if that is what the provider expects.',
+    };
+  }
+  if (context === 'connect') {
+    return { title: 'Could not start OAuth sign-in', body: trimmed };
+  }
+  if (context === 'check') {
+    return { title: 'Connection check failed', body: trimmed };
+  }
+  return { title: 'MCP action failed', body: trimmed };
+}
+
+function McpErrorNotice({ notice, compact = false }) {
+  if (!notice) return null;
+  return (
+    <div className={`mcp-error-notice${compact ? ' compact' : ''}`}>
+      <div className="mcp-error-title">{notice.title}</div>
+      <div className="mcp-error-body">{notice.body}</div>
+      {notice.hint ? <div className="mcp-error-hint">{notice.hint}</div> : null}
+    </div>
+  );
+}
+
 // ─── MCP servers panel (instance detail) ──────────────────────────
 //
 // Lives next to SecretsPanel.  Lists the MCP servers attached to one
@@ -2593,7 +2650,7 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
       const list = await client.listMcpServers(instanceId);
       setRows(Array.isArray(list) ? list : []);
     } catch (e) {
-      setErr(e?.detail || e?.message || 'list failed');
+      setErr(formatMcpPanelError(e, 'list'));
     }
   }, [client, instanceId]);
   React.useEffect(() => { refresh(); }, [refresh]);
@@ -2605,7 +2662,7 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
       await client.deleteMcpServer(instanceId, name);
       await refresh();
     } catch (e) {
-      setErr(e?.detail || e?.message || 'delete failed');
+      setErr(formatMcpPanelError(e, 'delete'));
     } finally {
       setBusy(false);
     }
@@ -2618,7 +2675,7 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
       await client.disconnectMcpServer(instanceId, name);
       await refresh();
     } catch (e) {
-      setErr(e?.detail || e?.message || 'disconnect failed');
+      setErr(formatMcpPanelError(e, 'disconnect'));
     } finally {
       setBusy(false);
     }
@@ -2633,7 +2690,7 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
       // page lands them somewhere they can close.
       window.open(authorization_url, '_blank', 'noopener,noreferrer');
     } catch (e) {
-      setErr(e?.detail || e?.message || 'oauth start failed');
+      setErr(formatMcpPanelError(e, 'connect'));
     } finally {
       setBusy(false);
     }
@@ -2646,7 +2703,7 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
       await refresh();
       setEditing(null);
     } catch (e) {
-      setErr(e?.detail || e?.message || 'save failed');
+      setErr(formatMcpPanelError(e, 'save'));
     } finally {
       setBusy(false);
     }
@@ -2685,7 +2742,7 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
           </button>
         </div>
       </div>
-      {err ? <div className="error">{err}</div> : null}
+      {err ? <McpErrorNotice notice={err}/> : null}
       <p className="muted small">
         Swarm proxies every MCP request — the agent only sees a swarm URL,
         never your upstream URL or its credentials. OAuth tokens land in
@@ -2793,7 +2850,7 @@ function McpServerRow({
       // sees ticks immediately and saves only by toggling.
       onCatalogUpdated && onCatalogUpdated();
     } catch (e) {
-      setCheckErr(e?.detail || e?.message || 'check failed');
+      setCheckErr(formatMcpPanelError(e, 'check'));
     } finally {
       setChecking(false);
     }
@@ -2873,7 +2930,7 @@ function McpServerRow({
           remove
         </button>
       </div>
-      {checkErr ? <div className="error" style={{ marginTop: 8 }}>{checkErr}</div> : null}
+      {checkErr ? <McpErrorNotice notice={checkErr} compact/> : null}
       {catalog ? (
         <ToolPicker
           title="tools"

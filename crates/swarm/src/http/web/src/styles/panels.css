@@ -1691,6 +1691,35 @@
   margin-top: 4px;
 }
 
+.mcp-error-notice {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-1));
+}
+
+.mcp-error-notice.compact {
+  margin-top: 8px;
+  padding: 10px 12px;
+}
+
+.mcp-error-title {
+  color: color-mix(in srgb, var(--danger) 92%, white);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mcp-error-body,
+.mcp-error-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.mcp-error-body { color: var(--fg); }
+.mcp-error-hint { color: var(--fg-muted); }
+
 .mcp-modal-header {
   display: flex;
   align-items: center;

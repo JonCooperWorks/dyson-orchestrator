@@ -34,7 +34,7 @@ export class SwarmClient {
   async _json(url, init) {
     const r = await this._authedFetch(url, init);
     if (!r.ok) {
-      const detail = await r.text().catch(() => '');
+      const detail = await readErrorDetail(r);
       throw httpError(`${(init && init.method) || 'GET'} ${url}`, r.status, detail);
     }
     // 204 No Content carries no body — return null rather than choking
@@ -685,6 +685,23 @@ export class SwarmClient {
       },
     );
   }
+}
+
+async function readErrorDetail(response) {
+  const raw = await response.text().catch(() => '');
+  if (!raw) return '';
+  const ct = response.headers.get('content-type') || '';
+  if (!ct.includes('json')) return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.detail === 'string' && parsed.detail) return parsed.detail;
+    if (typeof parsed?.error === 'string' && parsed.error) return parsed.error;
+    if (typeof parsed?.message === 'string' && parsed.message) return parsed.message;
+  } catch {
+    // Fall through to the raw payload when the body claims JSON but
+    // isn't parseable — better than losing the upstream hint.
+  }
+  return raw;
 }
 
 // Surface HTTP status on the thrown error so callers can branch on

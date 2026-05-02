@@ -96,6 +96,26 @@ describe('SwarmClient', () => {
     expect(thrown.detail).toBe('forbidden');
   });
 
+  test('non-2xx unwraps JSON error payloads into .detail', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'no client_id and no registration endpoint' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    let thrown;
+    try {
+      await client.startMcpOAuth('i1', 'github');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown.status).toBe(400);
+    expect(thrown.detail).toBe('no client_id and no registration endpoint');
+    expect(thrown.message).toContain('no client_id and no registration endpoint');
+  });
+
   test('createInstance posts JSON body with Content-Type', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ id: 'new1' }));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => 'tok' });
