@@ -54,7 +54,7 @@ function shortId(id) {
 
 // ─── List page ────────────────────────────────────────────────────
 
-export function TasksListPage({ instanceId }) {
+export function TasksListPage({ instanceId, embedded = false }) {
   const { client } = useApi();
   const slot = useAppState(s => s.webhooks.byInstance[instanceId]);
   const rows = slot?.rows || [];
@@ -105,11 +105,12 @@ export function TasksListPage({ instanceId }) {
     }
   };
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit">
-      <header className="page-header">
-        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">tasks</h1>
+    <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
+        {embedded ? null : <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>}
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>tasks</h1>
         <p className="page-sub muted">
           Webhook-triggered jobs for this agent.  Each task exposes a URL;
           when called and signature-verified, the payload kicks off a
@@ -153,7 +154,7 @@ export function TasksListPage({ instanceId }) {
           </ul>
         )}
       </section>
-    </main>
+    </Shell>
   );
 }
 
@@ -204,7 +205,7 @@ function TaskRow({ row, instanceId, onToggle, onDelete }) {
 
 // ─── Form page (new + edit) ───────────────────────────────────────
 
-export function TaskFormPage({ instanceId, taskName }) {
+export function TaskFormPage({ instanceId, taskName, embedded = false }) {
   const editing = !!taskName;
   const backHref = `#/i/${encodeURIComponent(instanceId)}/tasks`;
 
@@ -214,11 +215,12 @@ export function TaskFormPage({ instanceId, taskName }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [backHref]);
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit">
-      <header className="page-header">
-        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">{editing ? 'edit task' : 'new task'}</h1>
+    <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
+        <a className="btn btn-ghost btn-sm" href={backHref}>← tasks</a>
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>{editing ? 'edit task' : 'new task'}</h1>
         <p className="page-sub muted">
           {editing
             ? 'Update the brief, rotate the signing key, or disable the URL.'
@@ -226,7 +228,7 @@ export function TaskFormPage({ instanceId, taskName }) {
         </p>
       </header>
       <TaskForm instanceId={instanceId} taskName={taskName}/>
-    </main>
+    </Shell>
   );
 }
 
@@ -535,7 +537,7 @@ function DeliveriesPanel({ instanceId, taskName }) {
 
 const AUDIT_PAGE_SIZE = 50;
 
-export function AuditListPage({ instanceId }) {
+export function AuditListPage({ instanceId, embedded = false }) {
   const { client } = useApi();
   const backHref = `#/i/${encodeURIComponent(instanceId)}/tasks`;
   // Pages are tracked as a stack of `before` cursors so the user can
@@ -624,11 +626,12 @@ export function AuditListPage({ instanceId }) {
   const canPrev = cursors.length > 1;
   const canNext = !!rows && rows.length >= AUDIT_PAGE_SIZE;
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit">
-      <header className="page-header">
-        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">audit</h1>
+    <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
+        <a className="btn btn-ghost btn-sm" href={backHref}>← tasks</a>
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>audit</h1>
         <p className="page-sub muted">
           Every webhook fire on this agent, newest first.  Click a row
           to read the request body the agent saw.
@@ -746,11 +749,11 @@ export function AuditListPage({ instanceId }) {
           </button>
         </div>
       </section>
-    </main>
+    </Shell>
   );
 }
 
-export function AuditDetailPage({ instanceId, deliveryId }) {
+export function AuditDetailPage({ instanceId, deliveryId, embedded = false }) {
   const { client } = useApi();
   const backHref = `#/i/${encodeURIComponent(instanceId)}/tasks/audit`;
   const [row, setRow] = React.useState(null);
@@ -777,11 +780,12 @@ export function AuditDetailPage({ instanceId, deliveryId }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [backHref]);
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit">
-      <header className="page-header">
-        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">delivery</h1>
+    <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
+        <a className="btn btn-ghost btn-sm" href={backHref}>← audit</a>
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>delivery</h1>
         <p className="page-sub muted">
           Exact request bytes the agent saw on this fire.
         </p>
@@ -832,7 +836,7 @@ export function AuditDetailPage({ instanceId, deliveryId }) {
           <DeliveryBodyPanel row={row}/>
         </>
       )}
-    </main>
+    </Shell>
   );
 }
 

@@ -9,6 +9,8 @@ import React from 'react';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
+import { ApiProvider } from '../hooks/useApi.jsx';
+import { setInstances, setSharesFor, setWebhooksFor } from '../store/app.js';
 import {
   profileLabel,
   serializeMcpServers,
@@ -21,9 +23,67 @@ import {
   POLICY_OPTIONS,
   CubeProfilePicker,
   findCubeProfile,
+  InstancesView,
+  instanceRailHref,
+  instanceSectionFromView,
 } from './instances.jsx';
 
-afterEach(() => { cleanup(); });
+afterEach(() => {
+  cleanup();
+  setInstances([]);
+  setWebhooksFor('a', []);
+  setSharesFor('a', []);
+});
+
+describe('instance subpage rail routing', () => {
+  test('keeps sibling instance links on the active section', () => {
+    expect(instanceRailHref('next-id', { name: 'instance-edit', id: 'current' }))
+      .toBe('#/i/next-id/edit');
+    expect(instanceRailHref('next-id', { name: 'instance-tasks', id: 'current' }))
+      .toBe('#/i/next-id/tasks');
+    expect(instanceRailHref('next-id', { name: 'share-access-log', id: 'current', jti: 'jti' }))
+      .toBe('#/i/next-id/artefacts');
+  });
+
+  test('treats deep task and artefact pages as their parent section', () => {
+    expect(instanceSectionFromView({ name: 'instance-task-edit', id: 'current', taskName: 'deploy' }))
+      .toBe('tasks');
+    expect(instanceSectionFromView({ name: 'instance-artefact', id: 'current', artefactId: 'a1' }))
+      .toBe('artefacts');
+  });
+
+  test('renders an instance subpage inside the two-pane instance shell', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    setInstances([row, { ...row, id: 'b', name: 'Beta' }]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+    };
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance-tasks', id: 'a' } }),
+      ),
+    );
+
+    expect(screen.getAllByText('Alpha').length).toBeGreaterThan(0);
+    expect(screen.getByText('Beta')).toBeInTheDocument();
+    expect(screen.getByText(/no tasks yet/)).toBeInTheDocument();
+    expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
+  });
+});
 
 describe('profileLabel', () => {
   test('renders the operator-facing tuple for a whole-cpu, whole-GB profile', () => {

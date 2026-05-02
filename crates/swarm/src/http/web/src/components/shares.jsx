@@ -276,7 +276,7 @@ export function SharesPanel({ instanceId, artefactRows = [] }) {
   );
 }
 
-export function ShareAccessLogPage({ instanceId, jti }) {
+export function ShareAccessLogPage({ instanceId, jti, embedded = false }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
   const [share, setShare] = React.useState(null);
@@ -307,11 +307,12 @@ export function ShareAccessLogPage({ instanceId, jti }) {
   const namesByArtefactId = React.useMemo(() => artefactFilenameMap(artefacts), [artefacts]);
   const filename = share ? shareFilename(share, namesByArtefactId) : `share ${jti.slice(0, 12)}…`;
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit page-share-log">
-      <header className="page-header">
+    <Shell className={embedded ? 'instance-subpage page-share-log' : 'page page-edit page-share-log'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
         <a className="btn btn-ghost btn-sm" href={backHref}>← all artefacts</a>
-        <h1 className="page-title">access log</h1>
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>access log</h1>
         <p className="page-sub muted">
           <span>{filename}</span>
           {share?.artefact_id ? <> · <code className="mono-sm">{share.artefact_id}</code></> : null}
@@ -333,7 +334,7 @@ export function ShareAccessLogPage({ instanceId, jti }) {
         {rows && rows.length === 0 ? <ShareLogEmpty/> : null}
         {rows && rows.length > 0 ? <ShareAccessTable rows={rows}/> : null}
       </section>
-    </main>
+    </Shell>
   );
 }
 

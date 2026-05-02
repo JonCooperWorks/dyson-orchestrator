@@ -20,6 +20,9 @@ import {
   upsertInstance, removeInstance, selectInstance, setLoadError, setInstances,
   setWebhooksFor, setSharesFor,
 } from '../store/app.js';
+import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './tasks.jsx';
+import { InstanceArtefactsPage, ArtefactPage } from './artefacts.jsx';
+import { ShareAccessLogPage } from './shares.jsx';
 
 // Links inside task markdown open in a new tab — the task pane is a
 // scratchpad, not a navigation target, and following a link in-place
@@ -32,7 +35,7 @@ const TASK_MARKDOWN_COMPONENTS = {
 };
 
 export function InstancesView({ view }) {
-  const selectedId = view.name === 'instance' ? view.id : null;
+  const selectedId = instanceIdFromView(view);
   React.useEffect(() => {
     selectInstance(selectedId);
   }, [selectedId]);
@@ -56,15 +59,45 @@ export function InstancesView({ view }) {
 
   return (
     <div className={`instances-pane mobile-${mobileMode}`}>
-      <InstanceList selectedId={selectedId} onNew={goNew}/>
-      <InstanceDetail id={selectedId} onNew={goNew}/>
+      <InstanceList selectedId={selectedId} onNew={goNew} view={view}/>
+      <InstanceDetail id={selectedId} onNew={goNew} view={view}/>
     </div>
   );
 }
 
+export function instanceIdFromView(view) {
+  return view && typeof view.id === 'string' && view.id ? view.id : null;
+}
+
+export function instanceSectionFromView(view) {
+  if (!view) return 'overview';
+  if (view.name === 'instance-edit') return 'edit';
+  if (view.name && view.name.startsWith('instance-task')) return 'tasks';
+  if (view.name === 'instance-tasks') return 'tasks';
+  if (view.name === 'share-access-log') return 'artefacts';
+  if (view.name === 'instance-shares') return 'artefacts';
+  if (view.name === 'instance-artefacts') return 'artefacts';
+  if (view.name === 'instance-artefact') return 'artefacts';
+  return 'overview';
+}
+
+export function instanceRailHref(id, view) {
+  const enc = encodeURIComponent(id);
+  switch (instanceSectionFromView(view)) {
+    case 'edit':
+      return `#/i/${enc}/edit`;
+    case 'tasks':
+      return `#/i/${enc}/tasks`;
+    case 'artefacts':
+      return `#/i/${enc}/artefacts`;
+    default:
+      return `#/i/${enc}`;
+  }
+}
+
 // ─── List ─────────────────────────────────────────────────────────
 
-function InstanceList({ selectedId, onNew }) {
+function InstanceList({ selectedId, onNew, view }) {
   const { client, auth } = useApi();
   const cubeProfiles = auth?.config?.cube_profiles || [];
   const { byId, order } = useAppState(s => s.instances);
@@ -111,7 +144,7 @@ function InstanceList({ selectedId, onNew }) {
           const label = row.name && row.name.trim() ? row.name : '(unnamed)';
           return (
             <li key={id} className={`rail-row ${selectedId === id ? 'selected' : ''}`}>
-              <a href={`#/i/${encodeURIComponent(id)}`}>
+              <a href={instanceRailHref(id, view)}>
                 <div className="rail-row-name">{label}</div>
                 <div className="rail-row-id muted small">{shortId(id)}</div>
                 <div className="rail-row-meta">
@@ -1540,7 +1573,7 @@ function KvField({ label, value }) {
 
 // ─── Detail ───────────────────────────────────────────────────────
 
-function InstanceDetail({ id, onNew }) {
+function InstanceDetail({ id, onNew, view }) {
   const { client, auth } = useApi();
   const cubeProfiles = auth?.config?.cube_profiles || [];
   const row = useAppState(s => (id ? s.instances.byId[id] : null));
@@ -1687,6 +1720,7 @@ function InstanceDetail({ id, onNew }) {
   };
 
   const displayName = row.name && row.name.trim() ? row.name : '(unnamed)';
+  const activeSection = instanceSectionFromView(view);
   // open_url is computed by the backend from `[server] hostname` + the
   // instance id.  Null when swarm has no hostname configured (the
   // host-based proxy is a no-op in that case) — that's the only case
@@ -1731,7 +1765,7 @@ function InstanceDetail({ id, onNew }) {
             open ↗
           </a>
           <a
-            className="btn btn-ghost"
+            className={`btn btn-ghost ${activeSection === 'edit' ? 'btn-active' : ''}`}
             href={`#/i/${encodeURIComponent(id)}/edit`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
@@ -1739,7 +1773,7 @@ function InstanceDetail({ id, onNew }) {
             edit
           </a>
           <a
-            className="btn btn-ghost"
+            className={`btn btn-ghost ${activeSection === 'tasks' ? 'btn-active' : ''}`}
             href={`#/i/${encodeURIComponent(id)}/tasks`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
@@ -1751,7 +1785,7 @@ function InstanceDetail({ id, onNew }) {
               : null}
           </a>
           <a
-            className={`btn btn-ghost ${activeShareCount > 0 ? 'btn-shared-active' : ''}`}
+            className={`btn btn-ghost ${activeShareCount > 0 ? 'btn-shared-active' : ''} ${activeSection === 'artefacts' ? 'btn-active' : ''}`}
             href={`#/i/${encodeURIComponent(id)}/artefacts`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
@@ -1776,53 +1810,84 @@ function InstanceDetail({ id, onNew }) {
         </div>
       </header>
 
-      <section className="panel">
-        <div className="panel-title">runtime</div>
-        {(() => {
-          const profile = findCubeProfile(row.template_id, cubeProfiles);
-          if (!profile) return null;
-          return <KvRow label="size" value={profileLabel(profile)}/>;
-        })()}
-        <KvRow label="created" value={fmtTime(row.created_at)}/>
-        <KvRow label="last active" value={fmtTime(row.last_active_at)}/>
-        <KvRow label="last probe" value={
-          row.last_probe_at
-            ? `${fmtTime(row.last_probe_at)} · ${probeLabel(row.last_probe_status)}`
-            : 'never'
-        }/>
-        {row.destroyed_at ? <KvRow label="destroyed" value={fmtTime(row.destroyed_at)}/> : null}
-      </section>
+      {activeSection !== 'overview' ? (
+        <>
+          {err ? <div className="error">{err}</div> : null}
+          <InstanceSubpage view={view} instanceId={id}/>
+        </>
+      ) : (
+        <>
+          <section className="panel">
+            <div className="panel-title">runtime</div>
+            {(() => {
+              const profile = findCubeProfile(row.template_id, cubeProfiles);
+              if (!profile) return null;
+              return <KvRow label="size" value={profileLabel(profile)}/>;
+            })()}
+            <KvRow label="created" value={fmtTime(row.created_at)}/>
+            <KvRow label="last active" value={fmtTime(row.last_active_at)}/>
+            <KvRow label="last probe" value={
+              row.last_probe_at
+                ? `${fmtTime(row.last_probe_at)} · ${probeLabel(row.last_probe_status)}`
+                : 'never'
+            }/>
+            {row.destroyed_at ? <KvRow label="destroyed" value={fmtTime(row.destroyed_at)}/> : null}
+          </section>
 
-      {err ? <div className="error">{err}</div> : null}
+          {err ? <div className="error">{err}</div> : null}
 
-      <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
-      <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
-      <ToolsView instance={row}/>
-      <SecretsPanel instanceId={id}/>
-      <McpServersPanel
-        instanceId={id}
-        policyKind={row.network_policy?.kind}
-        disabled={row.status === 'destroyed'}
-      />
+          <SnapshotsPanel instanceId={id} disabled={row.status === 'destroyed'}/>
+          <NetworkPolicyPanel instance={row} disabled={row.status === 'destroyed'}/>
+          <ToolsView instance={row}/>
+          <SecretsPanel instanceId={id}/>
+          <McpServersPanel
+            instanceId={id}
+            policyKind={row.network_policy?.kind}
+            disabled={row.status === 'destroyed'}
+          />
 
-      {/* IDENTITY.md prose lives at the very bottom — operators reach
-          for actions / runtime / snapshots / policy first; the agent's
-          own self-description is reference material, not something
-          you scan to act on. */}
-      <section className="panel">
-        <div className="panel-title">instructions</div>
-        <div className="employee-task">
-          {row.task && row.task.trim() ? (
-            <TaskProse markdown={row.task}/>
-          ) : (
-            <p className="muted small">
-              no task description — tap <em>edit</em> to write one.
-            </p>
-          )}
-        </div>
-      </section>
+          <section className="panel">
+            <div className="panel-title">instructions</div>
+            <div className="employee-task">
+              {row.task && row.task.trim() ? (
+                <TaskProse markdown={row.task}/>
+              ) : (
+                <p className="muted small">
+                  no task description — tap <em>edit</em> to write one.
+                </p>
+              )}
+            </div>
+          </section>
+        </>
+      )}
     </main>
   );
+}
+
+function InstanceSubpage({ view, instanceId }) {
+  switch (view?.name) {
+    case 'instance-edit':
+      return <EditInstancePage instanceId={instanceId} embedded/>;
+    case 'instance-tasks':
+      return <TasksListPage instanceId={instanceId} embedded/>;
+    case 'instance-task-new':
+      return <TaskFormPage instanceId={instanceId} taskName={null} embedded/>;
+    case 'instance-task-edit':
+      return <TaskFormPage instanceId={instanceId} taskName={view.taskName} embedded/>;
+    case 'instance-task-audit':
+      return <AuditListPage instanceId={instanceId} embedded/>;
+    case 'instance-task-audit-detail':
+      return <AuditDetailPage instanceId={instanceId} deliveryId={view.deliveryId} embedded/>;
+    case 'share-access-log':
+      return <ShareAccessLogPage instanceId={instanceId} jti={view.jti} embedded/>;
+    case 'instance-shares':
+    case 'instance-artefacts':
+      return <InstanceArtefactsPage instanceId={instanceId} embedded/>;
+    case 'instance-artefact':
+      return <ArtefactPage instanceId={instanceId} artefactId={view.artefactId} embedded/>;
+    default:
+      return null;
+  }
 }
 
 // ─── Edit instance — dedicated page ───────────────────────────────
@@ -1832,7 +1897,7 @@ function InstanceDetail({ id, onNew }) {
 // network-policy editor) and gets the user a direct-linkable URL
 // for the edit screen.
 
-export function EditInstancePage({ instanceId }) {
+export function EditInstancePage({ instanceId, embedded = false }) {
   const { client } = useApi();
   const row = useAppState(s => (instanceId ? s.instances.byId[instanceId] : null));
   const [err, setErr] = React.useState(null);
@@ -1862,11 +1927,12 @@ export function EditInstancePage({ instanceId }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [backHref]);
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit">
-      <header className="page-header">
-        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">edit agent</h1>
+    <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
+        {embedded ? null : <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>}
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>edit agent</h1>
         <p className="page-sub muted">
           Change the agent's identity, model, toolbox, or network access.
           Network changes restart the sandbox briefly; everything else
@@ -1883,7 +1949,7 @@ export function EditInstancePage({ instanceId }) {
       ) : (
         <div className="muted">loading…</div>
       )}
-    </main>
+    </Shell>
   );
 }
 

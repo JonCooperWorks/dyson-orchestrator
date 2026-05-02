@@ -48,7 +48,7 @@ export function MyArtefactsPage() {
   );
 }
 
-export function InstanceArtefactsPage({ instanceId }) {
+export function InstanceArtefactsPage({ instanceId, embedded = false }) {
   const { client } = useApi();
   const load = React.useCallback(
     () => client.listInstanceArtefacts(instanceId),
@@ -67,6 +67,7 @@ export function InstanceArtefactsPage({ instanceId }) {
       load={load}
       onSweep={sweep}
       instanceId={instanceId}
+      embedded={embedded}
     />
   );
 }
@@ -76,7 +77,7 @@ export function InstanceArtefactsPage({ instanceId }) {
 /// variant.  Pagination is client-side over the loaded rows; the
 /// underlying list endpoints already cap at 1000 (cross-instance) /
 /// per-instance listings are short by construction.
-function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instanceId }) {
+function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instanceId, embedded = false }) {
   const { client } = useApi();
   const shareRows = useAppState(s => (
     instanceId ? (s.shares.byInstance[instanceId]?.rows || null) : null
@@ -115,11 +116,12 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instan
       }
     : null;
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit page-artefacts">
-      <header className="page-header">
-        <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">all artefacts</h1>
+    <Shell className={embedded ? 'instance-subpage instance-subpage-artefacts' : 'page page-edit page-artefacts'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
+        {embedded ? null : <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>}
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>all artefacts</h1>
         <p className="page-sub muted">{subtitle}</p>
       </header>
 
@@ -141,7 +143,7 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instan
         shareRows={shareRows}
       />
       {instanceId ? <SharesPanel instanceId={instanceId} artefactRows={rows || []}/> : null}
-    </main>
+    </Shell>
   );
 }
 
@@ -349,7 +351,7 @@ function Pagination({ page, pageCount, total, start, shown, onPage }) {
 ///
 /// Header parity with dyson: title chip, kind badge, anonymous-share
 /// dropdown (1d / 7d / 30d / never), copy-bytes / copy-url, download.
-export function ArtefactPage({ instanceId, artefactId }) {
+export function ArtefactPage({ instanceId, artefactId, embedded = false }) {
   const { client } = useApi();
   const [row, setRow] = React.useState(null);
   const [rowErr, setRowErr] = React.useState(null);
@@ -408,11 +410,12 @@ export function ArtefactPage({ instanceId, artefactId }) {
     if (!state.blobUrl) setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
+  const Shell = embedded ? 'div' : 'main';
   return (
-    <main className="page page-edit page-artefact-reader">
-      <header className="page-header">
+    <Shell className={embedded ? 'instance-subpage instance-subpage-reader' : 'page page-edit page-artefact-reader'}>
+      <header className={embedded ? 'subpage-header' : 'page-header'}>
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>
           {row?.title || artefactId}
         </h1>
         <p className="page-sub muted">
@@ -446,7 +449,7 @@ export function ArtefactPage({ instanceId, artefactId }) {
           <ArtefactBody row={row || { kind: '', mime: '', title: '' }} state={state} />
         </div>
       </section>
-    </main>
+    </Shell>
   );
 }
 

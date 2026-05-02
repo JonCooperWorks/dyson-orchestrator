@@ -10,12 +10,10 @@ import React from 'react';
 import { useAppState } from '../hooks/useAppState.js';
 import { setView, parseHashView } from '../store/app.js';
 import { TopBar } from './topbar.jsx';
-import { InstancesView, NewInstancePage, EditInstancePage } from './instances.jsx';
-import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './tasks.jsx';
-import { ShareAccessLogPage } from './shares.jsx';
+import { InstancesView, NewInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
 import { ByokView } from './byok.jsx';
-import { MyArtefactsPage, InstanceArtefactsPage, ArtefactPage } from './artefacts.jsx';
+import { MyArtefactsPage } from './artefacts.jsx';
 
 export function App() {
   const view = useAppState(s => s.meta.view);
@@ -43,29 +41,19 @@ function renderView(view) {
   switch (view.name) {
     case 'instances':
     case 'instance':
+    case 'instance-edit':
+    case 'instance-tasks':
+    case 'instance-task-new':
+    case 'instance-task-edit':
+    case 'instance-task-audit':
+    case 'instance-task-audit-detail':
+    case 'share-access-log':
+    case 'instance-shares':
+    case 'instance-artefacts':
+    case 'instance-artefact':
       return <InstancesView view={view}/>;
     case 'instance-new':
       return <NewInstancePage/>;
-    case 'instance-edit':
-      return <EditInstancePage instanceId={view.id}/>;
-    case 'instance-tasks':
-      return <TasksListPage instanceId={view.id}/>;
-    case 'instance-task-new':
-      return <TaskFormPage instanceId={view.id} taskName={null}/>;
-    case 'instance-task-edit':
-      return <TaskFormPage instanceId={view.id} taskName={view.taskName}/>;
-    case 'instance-task-audit':
-      return <AuditListPage instanceId={view.id}/>;
-    case 'instance-task-audit-detail':
-      return <AuditDetailPage instanceId={view.id} deliveryId={view.deliveryId}/>;
-    case 'share-access-log':
-      return <ShareAccessLogPage instanceId={view.id} jti={view.jti}/>;
-    case 'instance-shares':
-      return <InstanceArtefactsPage instanceId={view.id}/>;
-    case 'instance-artefacts':
-      return <InstanceArtefactsPage instanceId={view.id}/>;
-    case 'instance-artefact':
-      return <ArtefactPage instanceId={view.id} artefactId={view.artefactId}/>;
     case 'artefacts':
       return <MyArtefactsPage/>;
     case 'admin':
