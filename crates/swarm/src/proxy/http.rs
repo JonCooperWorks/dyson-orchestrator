@@ -827,6 +827,7 @@ mod tests {
                 .expect("build proxy")
                 .with_byo_config(crate::config::ByoConfig {
                     enabled: true,
+                    allow_localhost: false,
                     allow_internal: true,
                 })
                 .with_user_secrets(user_secrets.clone()),

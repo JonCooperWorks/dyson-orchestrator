@@ -62,6 +62,7 @@ rps_limit = 10
 #
 # [byo]
 # enabled = true
+# allow_localhost = true
 # allow_internal = true
 
 [providers.anthropic]

@@ -308,6 +308,13 @@ pub struct ProviderConfig {
 pub struct ByoConfig {
     #[serde(default = "default_byo_enabled")]
     pub enabled: bool,
+    /// Allow BYO upstreams that target localhost / loopback only
+    /// (`localhost`, `127.0.0.1`, `::1`) without opening the broader
+    /// internal/private-host opt-in. Useful for local model servers on
+    /// the swarm host while still blocking RFC1918, link-local, and
+    /// other internal targets.
+    #[serde(default)]
+    pub allow_localhost: bool,
     /// Allow BYO upstreams that resolve to private, loopback,
     /// link-local, multicast, or otherwise non-public addresses.
     /// Off by default: BYO remains usable for public/OpenAI-compatible
@@ -321,6 +328,7 @@ impl Default for ByoConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            allow_localhost: false,
             allow_internal: false,
         }
     }
@@ -430,6 +438,9 @@ impl Config {
         }
         if let Some(v) = env.get("SWARM_BYO_ENABLED") {
             self.byo.enabled = parse_boolish(v);
+        }
+        if let Some(v) = env.get("SWARM_BYO_ALLOW_LOCALHOST") {
+            self.byo.allow_localhost = parse_boolish(v);
         }
         if let Some(v) = env.get("SWARM_BYO_ALLOW_INTERNAL") {
             self.byo.allow_internal = parse_boolish(v);
@@ -629,6 +640,7 @@ local_cache_dir = "/tmp/cache"
         let path = write_tmp("byo_default.toml", example_toml());
         let cfg = Config::load(&path, &BTreeMap::new(), false).expect("loads");
         assert!(cfg.byo.enabled);
+        assert!(!cfg.byo.allow_localhost);
         assert!(!cfg.byo.allow_internal);
         std::fs::remove_file(&path).ok();
     }
@@ -638,9 +650,11 @@ local_cache_dir = "/tmp/cache"
         let path = write_tmp("byo_env.toml", example_toml());
         let mut env = BTreeMap::new();
         env.insert("SWARM_BYO_ENABLED".into(), "false".into());
+        env.insert("SWARM_BYO_ALLOW_LOCALHOST".into(), "yes".into());
         env.insert("SWARM_BYO_ALLOW_INTERNAL".into(), "yes".into());
         let cfg = Config::load(&path, &env, false).expect("loads");
         assert!(!cfg.byo.enabled);
+        assert!(cfg.byo.allow_localhost);
         assert!(cfg.byo.allow_internal);
         std::fs::remove_file(&path).ok();
     }

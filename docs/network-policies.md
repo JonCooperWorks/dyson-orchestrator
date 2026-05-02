@@ -32,6 +32,18 @@ applies the compiled policy from `/run/dyson-egress/policies.json`.
 
 Unknown source IPs fail closed.
 
+## BYO Localhost
+
+BYO upstream policy is separate from sandbox egress policy. Operators now have
+two different knobs:
+
+- `allow_localhost`: permit loopback-only BYO targets like `localhost`,
+  `127.0.0.1`, and `::1`
+- `allow_internal`: permit the broader private/internal address space
+
+That lets a host-local model server be exposed without automatically allowing
+RFC1918, link-local, or other internal BYO targets.
+
 ## Hostname Resolution
 
 Allowlist and denylist entries may be hostnames. Swarm resolves them at hire

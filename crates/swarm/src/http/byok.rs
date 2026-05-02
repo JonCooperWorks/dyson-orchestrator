@@ -522,6 +522,7 @@ mod tests {
             providers: Arc::new(providers),
             byo: Arc::new(crate::config::ByoConfig {
                 enabled: true,
+                allow_localhost: false,
                 allow_internal: true,
             }),
             webhooks: webhooks_svc,

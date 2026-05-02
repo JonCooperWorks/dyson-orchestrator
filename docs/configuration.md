@@ -96,7 +96,12 @@ swarmctl secrets system-set --stdin openrouter.provisioning_key
 OpenAI-compatible upstream.
 
 - `enabled`
+- `allow_localhost`
 - `allow_internal`
+
+`allow_localhost = true` is a narrow opt-in for loopback-only targets such as
+`localhost`, `127.0.0.1`, or `::1`. It does not open the broader private/LAN
+address space.
 
 `allow_internal = true` is an explicit operator opt-in and expands the SSRF
 surface by design. Use it only when private-fabric targets are an intended

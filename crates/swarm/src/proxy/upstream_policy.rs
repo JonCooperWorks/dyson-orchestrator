@@ -47,7 +47,7 @@ pub async fn validate_byo_upstream(
     let url = parse_byo_url(policy, upstream)?;
     let host = url.host_str().ok_or(ByoUpstreamError::MissingHost)?;
     let resolved_addrs = resolve_addrs(host, url.port_or_known_default()).await?;
-    validate_resolved_addrs(policy, &resolved_addrs)?;
+    validate_resolved_addrs(policy, &url, &resolved_addrs)?;
     Ok(ValidatedByoUpstream {
         url,
         resolved_addrs,
@@ -63,7 +63,7 @@ pub fn validate_cached_byo_upstream(
 ) -> Result<ValidatedByoUpstream, ByoUpstreamError> {
     let url = parse_byo_url(policy, upstream)?;
     let resolved_addrs = cached_or_literal_addrs(&url, cached_addrs)?;
-    validate_resolved_addrs(policy, &resolved_addrs)?;
+    validate_resolved_addrs(policy, &url, &resolved_addrs)?;
     Ok(ValidatedByoUpstream {
         url,
         resolved_addrs,
@@ -104,20 +104,40 @@ fn parse_byo_url(policy: &ByoConfig, upstream: &str) -> Result<reqwest::Url, Byo
 
 fn validate_resolved_addrs(
     policy: &ByoConfig,
+    url: &reqwest::Url,
     resolved_addrs: &[SocketAddr],
 ) -> Result<(), ByoUpstreamError> {
-    if !policy.allow_internal && resolved_addrs.iter().any(|addr| is_internal_ip(addr.ip())) {
+    if policy.allow_internal {
+        return Ok(());
+    }
+    if policy.allow_localhost && is_localhost_target(url, resolved_addrs) {
+        return Ok(());
+    }
+    if resolved_addrs.iter().any(|addr| is_internal_ip(addr.ip())) {
         return Err(ByoUpstreamError::InternalNotAllowed);
     }
     Ok(())
 }
 
+fn is_localhost_target(url: &reqwest::Url, resolved_addrs: &[SocketAddr]) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let literal_host = host.trim_start_matches('[').trim_end_matches(']');
+    let host_ok = literal_host.eq_ignore_ascii_case("localhost")
+        || literal_host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    host_ok
+        && !resolved_addrs.is_empty()
+        && resolved_addrs.iter().all(|addr| addr.ip().is_loopback())
+}
+
 async fn resolve_addrs(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>, ByoUpstreamError> {
     let port = port.unwrap_or(443);
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    let literal_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal_host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    let addrs = tokio::net::lookup_host((host, port))
+    let addrs = tokio::net::lookup_host((literal_host, port))
         .await
         .map_err(|e| ByoUpstreamError::Resolve(e.to_string()))?;
     let mut out = Vec::new();
@@ -206,6 +226,7 @@ mod tests {
     async fn rejects_when_disabled() {
         let policy = ByoConfig {
             enabled: false,
+            allow_localhost: false,
             allow_internal: false,
         };
         let err = validate_byo_upstream(&policy, "http://8.8.8.8")
@@ -231,11 +252,43 @@ mod tests {
     async fn allow_internal_opt_in_accepts_local_targets() {
         let policy = ByoConfig {
             enabled: true,
+            allow_localhost: false,
             allow_internal: true,
         };
         validate_byo_upstream(&policy, "http://127.0.0.1:11434")
             .await
             .expect("internal allowed");
+    }
+
+    #[tokio::test]
+    async fn allow_localhost_opt_in_accepts_loopback_only() {
+        let policy = ByoConfig {
+            enabled: true,
+            allow_localhost: true,
+            allow_internal: false,
+        };
+        validate_byo_upstream(&policy, "http://localhost:11434")
+            .await
+            .expect("localhost allowed");
+        validate_byo_upstream(&policy, "http://127.0.0.1:11434")
+            .await
+            .expect("ipv4 loopback allowed");
+        validate_byo_upstream(&policy, "http://[::1]:11434")
+            .await
+            .expect("ipv6 loopback allowed");
+    }
+
+    #[tokio::test]
+    async fn allow_localhost_does_not_open_other_internal_targets() {
+        let policy = ByoConfig {
+            enabled: true,
+            allow_localhost: true,
+            allow_internal: false,
+        };
+        let err = validate_byo_upstream(&policy, "http://10.0.0.5:11434")
+            .await
+            .expect_err("rfc1918 still blocked");
+        assert!(matches!(err, ByoUpstreamError::InternalNotAllowed));
     }
 
     #[test]
