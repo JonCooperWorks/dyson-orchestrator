@@ -18,6 +18,7 @@
 use std::time::Duration;
 
 use crate::config::ProviderConfig;
+use crate::proxy::upstream_policy::{ValidatedByoUpstream, pinned_byo_client_builder};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const ANTHROPIC_DEFAULT_VERSION: &str = "2023-06-01";
@@ -41,6 +42,15 @@ pub enum ValidateResult {
     Rejected,
 }
 
+pub fn build_pinned_byo_validation_client(
+    validated: &ValidatedByoUpstream,
+) -> Result<reqwest::Client, ValidateError> {
+    pinned_byo_client_builder(validated)
+        .timeout(PROBE_TIMEOUT)
+        .build()
+        .map_err(|e| ValidateError::Client(e.to_string()))
+}
+
 /// Run a validation probe.  `upstream` is the provider's base URL — for
 /// `byo`, that's the user-supplied URL; for everything else, the value
 /// from `[providers.<name>].upstream`.  `version` is consumed only for
@@ -56,6 +66,16 @@ pub async fn validate_key(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ValidateError::Client(e.to_string()))?;
+    validate_key_with_client(provider, key, upstream, version, &http).await
+}
+
+pub async fn validate_key_with_client(
+    provider: &str,
+    key: &str,
+    upstream: &str,
+    version: Option<&str>,
+    http: &reqwest::Client,
+) -> Result<ValidateResult, ValidateError> {
     let base = upstream.trim_end_matches('/');
 
     let resp = match provider {

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -40,6 +41,10 @@ impl SqlxTokenStore {
     }
 }
 
+pub(crate) fn token_lookup_key(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
 /// Provider string stamped on rows minted via `TokenStore::mint_ingest`.
 /// The internal-ingest route filters resolved tokens by prefix (`it_`),
 /// so the provider field is largely a documentation-and-grep handle for
@@ -63,11 +68,14 @@ impl SqlxTokenStore {
     ) -> Result<String, StoreError> {
         let token = format!("{prefix}{}", Uuid::new_v4().simple());
         let stored_token = self.seal_token(&token)?;
+        let lookup = token_lookup_key(&token);
         sqlx::query(
-            "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at) \
-             VALUES (?, ?, ?, ?, NULL)",
+            "INSERT INTO proxy_tokens \
+             (token, token_lookup, instance_id, provider, created_at, revoked_at) \
+             VALUES (?, ?, ?, ?, ?, NULL)",
         )
         .bind(&stored_token)
+        .bind(&lookup)
         .bind(instance_id)
         .bind(provider)
         .bind(now_secs())
@@ -108,27 +116,32 @@ impl TokenStore for SqlxTokenStore {
     }
 
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError> {
-        let rows = sqlx::query(
+        let lookup = token_lookup_key(token);
+        let row = sqlx::query(
             "SELECT token, instance_id, provider, created_at, revoked_at \
-             FROM proxy_tokens WHERE revoked_at IS NULL",
+             FROM proxy_tokens \
+             WHERE token_lookup = ? AND revoked_at IS NULL \
+             LIMIT 1",
         )
-        .fetch_all(&self.pool)
+        .bind(&lookup)
+        .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        for row in rows {
-            let stored: String = row.get("token");
-            let plain = self.open_token(&stored)?;
-            if bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
-                return Ok(Some(TokenRecord {
-                    token: plain,
-                    instance_id: row.get("instance_id"),
-                    provider: row.get("provider"),
-                    created_at: row.get("created_at"),
-                    revoked_at: row.get("revoked_at"),
-                }));
-            }
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let stored: String = row.get("token");
+        let plain = self.open_token(&stored)?;
+        if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(TokenRecord {
+            token: plain,
+            instance_id: row.get("instance_id"),
+            provider: row.get("provider"),
+            created_at: row.get("created_at"),
+            revoked_at: row.get("revoked_at"),
+        }))
     }
 
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError> {
@@ -149,28 +162,33 @@ impl TokenStore for SqlxTokenStore {
         // job, called by the destroy path.  Already-revoked rows
         // return `false` (no-op) rather than an error so a duplicate
         // revoke is idempotent at the API boundary.
-        let rows = sqlx::query("SELECT token FROM proxy_tokens WHERE revoked_at IS NULL")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
-        for row in rows {
-            let stored: String = row.get("token");
-            let plain = self.open_token(&stored)?;
-            if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
-                continue;
-            }
-            let r = sqlx::query(
-                "UPDATE proxy_tokens SET revoked_at = ? \
-                 WHERE token = ? AND revoked_at IS NULL",
-            )
-            .bind(now_secs())
-            .bind(stored)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
-            return Ok(r.rows_affected() > 0);
+        let lookup = token_lookup_key(token);
+        let row = sqlx::query(
+            "SELECT token FROM proxy_tokens WHERE token_lookup = ? AND revoked_at IS NULL LIMIT 1",
+        )
+        .bind(&lookup)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let stored: String = row.get("token");
+        let plain = self.open_token(&stored)?;
+        if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+            return Ok(false);
         }
-        Ok(false)
+        let r = sqlx::query(
+            "UPDATE proxy_tokens SET revoked_at = ? \
+             WHERE token_lookup = ? AND token = ? AND revoked_at IS NULL",
+        )
+        .bind(now_secs())
+        .bind(&lookup)
+        .bind(stored)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(r.rows_affected() > 0)
     }
 
     async fn lookup_by_instance(&self, instance_id: &str) -> Result<Option<String>, StoreError> {
@@ -413,13 +431,16 @@ mod tests {
             .await
             .unwrap();
 
-        let row = sqlx::query("SELECT token FROM proxy_tokens WHERE instance_id = 'i1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let row =
+            sqlx::query("SELECT token, token_lookup FROM proxy_tokens WHERE instance_id = 'i1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let stored: String = row.get("token");
+        let lookup: String = row.get("token_lookup");
         assert_ne!(stored, tok);
         assert_eq!(stored, format!("sealed:{tok}"));
+        assert_eq!(lookup, token_lookup_key(&tok));
 
         let resolved = store
             .resolve(&tok)
@@ -440,10 +461,12 @@ mod tests {
     async fn store_rejects_unmigrated_plaintext_tokens() {
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
+        let lookup = token_lookup_key("pt_unmigrated");
         sqlx::query(
-            "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at)
-             VALUES ('pt_unmigrated', 'i1', 'openrouter', 0, NULL)",
+            "INSERT INTO proxy_tokens (token, token_lookup, instance_id, provider, created_at, revoked_at)
+             VALUES ('pt_unmigrated', ?, 'i1', 'openrouter', 0, NULL)",
         )
+        .bind(lookup)
         .execute(&pool)
         .await
         .unwrap();
@@ -451,5 +474,23 @@ mod tests {
         let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let err = store.resolve("pt_unmigrated").await.unwrap_err();
         assert!(matches!(err, StoreError::Malformed(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_skips_unrelated_ciphertext_by_lookup() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        sqlx::query(
+            "INSERT INTO proxy_tokens (token, token_lookup, instance_id, provider, created_at, revoked_at)
+             VALUES ('not-sealed', ?, 'i1', 'openrouter', 0, NULL)",
+        )
+        .bind(token_lookup_key("pt_some_other_token"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
+        assert!(store.resolve("pt_missing").await.unwrap().is_none());
+        assert!(!store.revoke_token("pt_missing").await.unwrap());
     }
 }

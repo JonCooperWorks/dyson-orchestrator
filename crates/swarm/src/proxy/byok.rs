@@ -56,8 +56,17 @@ impl KeySource {
     }
 }
 
-/// Outcome of `resolve`.  `upstream_override` is `Some` only for `byo`,
-/// where the user owns the URL too.
+/// Cached BYO upstream routing data. The URL is the user's OpenAI-compatible
+/// base URL; `resolved_addrs` are the socket addresses validated at key-save
+/// time and reused by the proxy without another DNS lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedByoUpstream {
+    pub upstream: String,
+    pub resolved_addrs: Vec<String>,
+}
+
+/// Outcome of `resolve`.  `byo_upstream` is `Some` only for `byo`, where the
+/// user owns the URL too.
 ///
 /// `Debug` is implemented manually to redact `key` — derived `Debug`
 /// would dump the plaintext upstream key into anything that formats
@@ -65,7 +74,7 @@ impl KeySource {
 #[derive(Clone)]
 pub struct ResolvedKey {
     pub key: String,
-    pub upstream_override: Option<String>,
+    pub byo_upstream: Option<ResolvedByoUpstream>,
     pub source: KeySource,
 }
 
@@ -73,7 +82,7 @@ impl std::fmt::Debug for ResolvedKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedKey")
             .field("source", &self.source)
-            .field("upstream_override", &self.upstream_override)
+            .field("byo_upstream", &self.byo_upstream)
             .field("key_len", &self.key.len())
             .field("key", &"[redacted]")
             .finish()
@@ -88,6 +97,8 @@ impl std::fmt::Debug for ResolvedKey {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct ByoBlob {
     pub upstream: String,
+    #[serde(default)]
+    pub resolved_addrs: Vec<String>,
     pub api_key: String,
 }
 
@@ -95,6 +106,7 @@ impl std::fmt::Debug for ByoBlob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ByoBlob")
             .field("upstream", &self.upstream)
+            .field("resolved_addrs_len", &self.resolved_addrs.len())
             .field("api_key_len", &self.api_key.len())
             .field("api_key", &"[redacted]")
             .finish()
@@ -150,7 +162,10 @@ pub async fn resolve(
             .map_err(|e| ResolveError::MalformedByo(e.to_string()))?;
         return Ok(ResolvedKey {
             key: blob.api_key,
-            upstream_override: Some(blob.upstream),
+            byo_upstream: Some(ResolvedByoUpstream {
+                upstream: blob.upstream,
+                resolved_addrs: blob.resolved_addrs,
+            }),
             source: KeySource::Byok,
         });
     }
@@ -162,7 +177,7 @@ pub async fn resolve(
             let key = String::from_utf8(bytes).map_err(|_| ResolveError::NonUtf8Byok)?;
             return Ok(ResolvedKey {
                 key,
-                upstream_override: None,
+                byo_upstream: None,
                 source: KeySource::Byok,
             });
         }
@@ -179,7 +194,7 @@ pub async fn resolve(
                 .map_err(|e| ResolveError::OrMint(e.to_string()))?;
             return Ok(ResolvedKey {
                 key,
-                upstream_override: None,
+                byo_upstream: None,
                 source: KeySource::OrMinted,
             });
         }
@@ -224,11 +239,22 @@ mod tests {
     fn byo_blob_round_trips_json() {
         let b = ByoBlob {
             upstream: "https://my.example/v1".into(),
+            resolved_addrs: vec!["203.0.113.10:443".into()],
             api_key: "sk-x".into(),
         };
         let json = serde_json::to_vec(&b).unwrap();
         let back: ByoBlob = serde_json::from_slice(&json).unwrap();
         assert_eq!(back.upstream, b.upstream);
+        assert_eq!(back.resolved_addrs, b.resolved_addrs);
         assert_eq!(back.api_key, b.api_key);
+    }
+
+    #[test]
+    fn byo_blob_accepts_legacy_rows_without_cached_addresses() {
+        let json = br#"{"upstream":"https://my.example/v1","api_key":"sk-x"}"#;
+        let back: ByoBlob = serde_json::from_slice(json).unwrap();
+        assert_eq!(back.upstream, "https://my.example/v1");
+        assert!(back.resolved_addrs.is_empty());
+        assert_eq!(back.api_key, "sk-x");
     }
 }

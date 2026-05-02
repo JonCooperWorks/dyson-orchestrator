@@ -154,6 +154,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
                 tracing::info!(
                     proxy_tokens = report.proxy_tokens_sealed,
                     instance_bearers = report.instance_bearers_sealed,
+                    proxy_token_lookups = report.proxy_token_lookups_backfilled,
                     "runtime data migrations complete"
                 );
             }

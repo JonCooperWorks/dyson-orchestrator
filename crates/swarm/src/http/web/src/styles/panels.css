@@ -674,6 +674,20 @@
   max-width: 100%;
   overflow-wrap: anywhere;
 }
+.artefact-actions-bar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+}
+.artefact-actions-bar .share-menu-popover {
+  left: 0;
+  right: auto;
+}
 .artefact-body-panel {
   padding: 0;
   overflow: hidden;

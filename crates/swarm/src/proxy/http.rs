@@ -33,7 +33,7 @@ use crate::proxy::byok::{self, KeySource};
 use crate::proxy::policy_check::{EnforceContext, enforce};
 use crate::proxy::recording_body::RecordingBody;
 use crate::proxy::upstream_policy::{
-    ByoUpstreamError, ValidatedByoUpstream, validate_byo_upstream,
+    ByoUpstreamError, ValidatedByoUpstream, pinned_byo_client_builder, validate_cached_byo_upstream,
 };
 use crate::traits::{AuditEntry, TokenRecord};
 
@@ -46,13 +46,8 @@ fn elapsed_ms(started: Instant) -> i64 {
 fn build_pinned_byo_client(
     validated: &ValidatedByoUpstream,
 ) -> Result<reqwest::Client, reqwest::Error> {
-    let Some(host) = validated.url.host_str() else {
-        return reqwest::Client::builder().build();
-    };
-    reqwest::Client::builder()
+    pinned_byo_client_builder(validated)
         .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(host, &validated.resolved_addrs)
         .build()
 }
 
@@ -192,30 +187,37 @@ async fn handle(
     let key_source_str = resolved.source.as_str().to_owned();
 
     let mut pinned_byo_client: Option<reqwest::Client> = None;
-    let upstream_base: String = match resolved.upstream_override.as_deref() {
-        Some(u) if provider == "byo" => match validate_byo_upstream(&state.byo, u).await {
-            Ok(validated) => {
-                pinned_byo_client = match build_pinned_byo_client(&validated) {
-                    Ok(client) => Some(client),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "byo upstream client build failed");
-                        return error_response(
-                            StatusCode::BAD_GATEWAY,
-                            "byo upstream not reachable",
-                        );
-                    }
-                };
-                validated.url.to_string()
+    let upstream_base: String = match resolved.byo_upstream.as_ref() {
+        Some(u) if provider == "byo" => {
+            match validate_cached_byo_upstream(&state.byo, &u.upstream, &u.resolved_addrs) {
+                Ok(validated) => {
+                    pinned_byo_client = match build_pinned_byo_client(&validated) {
+                        Ok(client) => Some(client),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "byo upstream client build failed");
+                            return error_response(
+                                StatusCode::BAD_GATEWAY,
+                                "byo upstream not reachable",
+                            );
+                        }
+                    };
+                    validated.url.to_string()
+                }
+                Err(ByoUpstreamError::Disabled) => {
+                    return error_response(StatusCode::FORBIDDEN, "byo upstream disabled");
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "byo upstream rejected by operator policy");
+                    return error_response(StatusCode::FORBIDDEN, "byo upstream not allowed");
+                }
             }
-            Err(ByoUpstreamError::Disabled) => {
-                return error_response(StatusCode::FORBIDDEN, "byo upstream disabled");
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "byo upstream rejected by operator policy");
-                return error_response(StatusCode::FORBIDDEN, "byo upstream not allowed");
-            }
-        },
-        Some(u) => u.to_owned(),
+        }
+        Some(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid byo upstream state",
+            );
+        }
         None => adapter.upstream_base_url(&provider_cfg).to_owned(),
     };
     if upstream_base.is_empty() {
@@ -1308,6 +1310,44 @@ mod tests {
         assert_eq!(captured_auth(&capb), "Bearer sk-USER-B");
         assert_eq!(calls_a.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(calls_b.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// BYO proxy requests must reuse the addresses pinned in the stored blob.
+    /// The hostname below is intentionally not resolvable; the request only
+    /// succeeds if `resolve_to_addrs` uses the cached 127.0.0.1 socket.
+    #[tokio::test]
+    async fn byo_uses_cached_addresses_without_dns_on_proxy_path() {
+        let (upstream, captured, calls) = spawn_streaming_upstream_full(vec![b"b".to_vec()]).await;
+        let parsed = reqwest::Url::parse(&upstream).unwrap();
+        let port = parsed.port_or_known_default().unwrap();
+        let pinned = format!("127.0.0.1:{port}");
+        let cached_hostname_upstream = format!("http://cache-only.invalid:{port}");
+        let pool = open_in_memory().await.unwrap();
+        let (_id, token) = seed_instance_with_token_for(&pool, TEST_OWNER).await;
+        let (svc, user_secrets, _keys) =
+            build_service_with_byok(pool, "openai", upstream, Some("sk-A"), permissive_policy());
+        let blob = crate::proxy::byok::ByoBlob {
+            upstream: cached_hostname_upstream,
+            resolved_addrs: vec![pinned],
+            api_key: "sk-USER-B".into(),
+        };
+        user_secrets
+            .put(TEST_OWNER, "byok_byo", &serde_json::to_vec(&blob).unwrap())
+            .await
+            .unwrap();
+        let proxy_base = spawn_proxy(svc).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy_base}/llm/byo/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "any"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_auth(&captured), "Bearer sk-USER-B");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// `byo` without a per-user blob → 503; no upstream is contacted.

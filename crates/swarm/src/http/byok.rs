@@ -27,8 +27,13 @@ use crate::auth::CallerIdentity;
 use crate::http::AppState;
 use crate::proxy::adapters;
 use crate::proxy::byok::{BYO_BLOB_NAME, ByoBlob, byok_name};
-use crate::proxy::upstream_policy::{ByoUpstreamError, validate_byo_upstream};
-use crate::proxy::validate::{ValidateError, ValidateResult, validate_key};
+use crate::proxy::upstream_policy::{
+    ByoUpstreamError, ValidatedByoUpstream, validate_byo_upstream,
+};
+use crate::proxy::validate::{
+    ValidateError, ValidateResult, build_pinned_byo_validation_client, validate_key,
+    validate_key_with_client,
+};
 
 /// Body for `PUT /v1/byok/:provider`.  `upstream` is required only
 /// when `provider == "byo"`; the field is ignored otherwise so a
@@ -171,7 +176,7 @@ async fn put_byok(
     let (upstream_for_validate, version_for_validate, byo_upstream): (
         String,
         Option<String>,
-        Option<String>,
+        Option<ValidatedByoUpstream>,
     ) = if provider == "byo" {
         let Some(u) = body.upstream.as_ref() else {
             return (StatusCode::BAD_REQUEST, "byo requires upstream in body").into_response();
@@ -179,8 +184,8 @@ async fn put_byok(
         if u.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, "upstream is empty").into_response();
         }
-        let normalized = match validate_byo_upstream(&state.byo, u).await {
-            Ok(validated) => validated.url.to_string(),
+        let validated = match validate_byo_upstream(&state.byo, u).await {
+            Ok(validated) => validated,
             Err(ByoUpstreamError::Disabled) => {
                 return (
                     StatusCode::FORBIDDEN,
@@ -197,7 +202,7 @@ async fn put_byok(
                     .into_response();
             }
         };
-        (normalized.clone(), None, Some(normalized))
+        (validated.url.to_string(), None, Some(validated))
     } else if let Some(cfg) = state.providers.get(&provider) {
         (cfg.upstream.clone(), cfg.anthropic_version.clone(), None)
     } else {
@@ -210,14 +215,30 @@ async fn put_byok(
 
     // 3. Probe-on-paste.  Network failures bubble up as 502 — we
     //    can't tell if the key is bad or just unreachable.
-    match validate_key(
-        &provider,
-        &body.key,
-        &upstream_for_validate,
-        version_for_validate.as_deref(),
-    )
-    .await
-    {
+    let validation = if let Some(byo) = byo_upstream.as_ref() {
+        match build_pinned_byo_validation_client(byo) {
+            Ok(http) => {
+                validate_key_with_client(
+                    &provider,
+                    &body.key,
+                    &upstream_for_validate,
+                    version_for_validate.as_deref(),
+                    &http,
+                )
+                .await
+            }
+            Err(err) => Err(err),
+        }
+    } else {
+        validate_key(
+            &provider,
+            &body.key,
+            &upstream_for_validate,
+            version_for_validate.as_deref(),
+        )
+        .await
+    };
+    match validation {
         Ok(ValidateResult::Ok) => (),
         Ok(ValidateResult::Rejected) => {
             return (
@@ -244,9 +265,10 @@ async fn put_byok(
     }
 
     // 4. Persist.
-    let put_result = if let Some(byo_url) = byo_upstream {
+    let put_result = if let Some(byo) = byo_upstream {
         let blob = ByoBlob {
-            upstream: byo_url,
+            upstream: byo.url.to_string(),
+            resolved_addrs: byo.resolved_addrs.iter().map(ToString::to_string).collect(),
             api_key: body.key,
         };
         let Ok(bytes) = serde_json::to_vec(&blob) else {
@@ -611,13 +633,23 @@ mod tests {
 
         let r = reqwest::Client::new()
             .put(format!("{base}/v1/byok/byo"))
-            .json(&serde_json::json!({"key": "sk", "upstream": mock_url}))
+            .json(&serde_json::json!({"key": "sk", "upstream": mock_url.clone()}))
             .send()
             .await
             .unwrap();
         assert_eq!(r.status(), 204);
         let names = user_secrets.list_names(&uid).await.unwrap();
         assert!(names.contains(&"byok_byo".to_owned()));
+        let bytes = user_secrets.get(&uid, "byok_byo").await.unwrap().unwrap();
+        let blob: crate::proxy::byok::ByoBlob = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            blob.upstream,
+            reqwest::Url::parse(&mock_url).unwrap().to_string()
+        );
+        assert!(
+            !blob.resolved_addrs.is_empty(),
+            "PUT should cache resolved BYO addresses"
+        );
     }
 
     #[tokio::test]

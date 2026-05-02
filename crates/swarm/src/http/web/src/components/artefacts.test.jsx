@@ -12,6 +12,7 @@ import '@testing-library/jest-dom/vitest';
 import {
   ArtefactTable,
   ArtefactBody,
+  ArtefactActionsBar,
   activeSharesByArtefact,
   contentTypeBase,
   isMarkdownArtefact,
@@ -177,6 +178,34 @@ describe('ArtefactTable pagination', () => {
       url: 'https://share.example.test/a',
       expires_at: 123,
     });
+  });
+});
+
+describe('ArtefactActionsBar', () => {
+  test('keeps the detail share menu on the artefact action bar with clean expiry labels', () => {
+    const { container } = render(
+      <ArtefactActionsBar
+        client={{ mintShare: vi.fn() }}
+        row={{
+          id: 'art-1',
+          instance_id: 'inst-a',
+          chat_id: 'c-0001',
+          kind: 'other',
+        }}
+        state={{
+          blob: new Blob(['body']),
+          mime: 'text/plain',
+          text: 'body',
+        }}
+        onDownload={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('.artefact-actions-bar')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /share/i }));
+
+    expect(screen.getByRole('button', { name: 'never' })).toHaveAttribute('title', 'no expiry');
+    expect(screen.queryByText(/revoke manually/i)).toBeNull();
   });
 });
 

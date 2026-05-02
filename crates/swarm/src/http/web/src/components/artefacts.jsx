@@ -435,7 +435,7 @@ export function ArtefactPage({ instanceId, artefactId, embedded = false }) {
 /// Header bar with copy / download / share actions.  Share UI mirrors
 /// dyson's ShareMenu — dropdown picker for 1d / 7d / 30d / never,
 /// minted URL surfaced in a banner with copy + dismiss.
-function ArtefactActionsBar({ client, row, state, onDownload }) {
+export function ArtefactActionsBar({ client, row, state, onDownload }) {
   const [shareBusy, setShareBusy] = React.useState(false);
   const [shareUrl, setShareUrl] = React.useState(null);
   const [shareErr, setShareErr] = React.useState(null);
@@ -478,13 +478,7 @@ function ArtefactActionsBar({ client, row, state, onDownload }) {
 
   return (
     <>
-      <section
-        className="panel"
-        style={{
-          marginBottom: 12, display: 'flex', alignItems: 'center',
-          gap: 8, padding: '8px 12px', flexWrap: 'wrap',
-        }}
-      >
+      <section className="panel artefact-actions-bar">
         <ShareMenu busy={shareBusy} onMint={mintShare} />
         <button
           className="btn btn-ghost btn-sm"

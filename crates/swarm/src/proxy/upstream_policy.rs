@@ -22,6 +22,10 @@ pub enum ByoUpstreamError {
     MissingHost,
     #[error("upstream host did not resolve: {0}")]
     Resolve(String),
+    #[error("upstream cached address is invalid: {0}")]
+    CachedAddrInvalid(String),
+    #[error("upstream cached addresses are missing")]
+    CachedAddrsMissing,
     #[error("internal BYO upstreams are disabled")]
     InternalNotAllowed,
 }
@@ -40,6 +44,41 @@ pub async fn validate_byo_upstream(
     policy: &ByoConfig,
     upstream: &str,
 ) -> Result<ValidatedByoUpstream, ByoUpstreamError> {
+    let url = parse_byo_url(policy, upstream)?;
+    let host = url.host_str().ok_or(ByoUpstreamError::MissingHost)?;
+    let resolved_addrs = resolve_addrs(host, url.port_or_known_default()).await?;
+    validate_resolved_addrs(policy, &resolved_addrs)?;
+    Ok(ValidatedByoUpstream {
+        url,
+        resolved_addrs,
+    })
+}
+
+/// Rebuild a validated BYO upstream from addresses pinned when the user saved
+/// the key. This path deliberately does not perform DNS resolution.
+pub fn validate_cached_byo_upstream(
+    policy: &ByoConfig,
+    upstream: &str,
+    cached_addrs: &[String],
+) -> Result<ValidatedByoUpstream, ByoUpstreamError> {
+    let url = parse_byo_url(policy, upstream)?;
+    let resolved_addrs = cached_or_literal_addrs(&url, cached_addrs)?;
+    validate_resolved_addrs(policy, &resolved_addrs)?;
+    Ok(ValidatedByoUpstream {
+        url,
+        resolved_addrs,
+    })
+}
+
+pub fn pinned_byo_client_builder(validated: &ValidatedByoUpstream) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    match validated.url.host_str() {
+        Some(host) => builder.resolve_to_addrs(host, &validated.resolved_addrs),
+        None => builder,
+    }
+}
+
+fn parse_byo_url(policy: &ByoConfig, upstream: &str) -> Result<reqwest::Url, ByoUpstreamError> {
     if !policy.enabled {
         return Err(ByoUpstreamError::Disabled);
     }
@@ -59,15 +98,18 @@ pub async fn validate_byo_upstream(
     if url.query().is_some() || url.fragment().is_some() {
         return Err(ByoUpstreamError::QueryOrFragment);
     }
-    let host = url.host_str().ok_or(ByoUpstreamError::MissingHost)?;
-    let resolved_addrs = resolve_addrs(host, url.port_or_known_default()).await?;
+    url.host_str().ok_or(ByoUpstreamError::MissingHost)?;
+    Ok(url)
+}
+
+fn validate_resolved_addrs(
+    policy: &ByoConfig,
+    resolved_addrs: &[SocketAddr],
+) -> Result<(), ByoUpstreamError> {
     if !policy.allow_internal && resolved_addrs.iter().any(|addr| is_internal_ip(addr.ip())) {
         return Err(ByoUpstreamError::InternalNotAllowed);
     }
-    Ok(ValidatedByoUpstream {
-        url,
-        resolved_addrs,
-    })
+    Ok(())
 }
 
 async fn resolve_addrs(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>, ByoUpstreamError> {
@@ -87,6 +129,32 @@ async fn resolve_addrs(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>,
     if out.is_empty() {
         return Err(ByoUpstreamError::Resolve("no addresses returned".into()));
     }
+    Ok(out)
+}
+
+fn cached_or_literal_addrs(
+    url: &reqwest::Url,
+    cached_addrs: &[String],
+) -> Result<Vec<SocketAddr>, ByoUpstreamError> {
+    let mut out = Vec::with_capacity(cached_addrs.len());
+    for addr in cached_addrs {
+        out.push(
+            addr.parse::<SocketAddr>()
+                .map_err(|e| ByoUpstreamError::CachedAddrInvalid(e.to_string()))?,
+        );
+    }
+    if out.is_empty() {
+        let host = url.host_str().ok_or(ByoUpstreamError::MissingHost)?;
+        let ip = host
+            .parse::<IpAddr>()
+            .map_err(|_| ByoUpstreamError::CachedAddrsMissing)?;
+        out.push(SocketAddr::new(
+            ip,
+            url.port_or_known_default().unwrap_or(443),
+        ));
+    }
+    out.sort();
+    out.dedup();
     Ok(out)
 }
 
@@ -168,6 +236,46 @@ mod tests {
         validate_byo_upstream(&policy, "http://127.0.0.1:11434")
             .await
             .expect("internal allowed");
+    }
+
+    #[test]
+    fn cached_validation_uses_pinned_addresses_without_dns() {
+        let validated = validate_cached_byo_upstream(
+            &ByoConfig::default(),
+            "http://does-not-resolve.invalid/v1",
+            &["8.8.8.8:80".to_owned()],
+        )
+        .expect("cached public address allowed");
+
+        assert_eq!(validated.url.host_str(), Some("does-not-resolve.invalid"));
+        assert_eq!(
+            validated.resolved_addrs,
+            vec!["8.8.8.8:80".parse::<SocketAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn cached_validation_rejects_hostname_without_pinned_addresses() {
+        let err = validate_cached_byo_upstream(
+            &ByoConfig::default(),
+            "http://does-not-resolve.invalid/v1",
+            &[],
+        )
+        .expect_err("hostname needs cached addrs");
+
+        assert!(matches!(err, ByoUpstreamError::CachedAddrsMissing));
+    }
+
+    #[test]
+    fn cached_validation_accepts_legacy_ip_literal_without_pinned_addresses() {
+        let validated =
+            validate_cached_byo_upstream(&ByoConfig::default(), "http://8.8.8.8/v1", &[])
+                .expect("literal IP can be reconstructed without DNS");
+
+        assert_eq!(
+            validated.resolved_addrs,
+            vec!["8.8.8.8:80".parse::<SocketAddr>().unwrap()]
+        );
     }
 
     #[tokio::test]

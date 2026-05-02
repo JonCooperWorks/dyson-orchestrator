@@ -3,10 +3,10 @@
 //! Unlike every other provider, `byo` has no `[providers.byo]` TOML stanza.
 //! The user pastes both the upstream URL and the API key into their per-user
 //! BYOK row (`byok_byo`), stored as a JSON blob.  The proxy resolver hands
-//! the URL back via `ResolvedKey::upstream_override`, which the handler uses
-//! instead of `ProviderConfig.upstream`.  This adapter therefore only owns
-//! header rewriting (assume OpenAI-compatible Bearer); URL routing happens
-//! upstream of it.
+//! the URL and pinned socket addresses back via `ResolvedKey::byo_upstream`,
+//! which the handler uses instead of `ProviderConfig.upstream`.  This adapter
+//! therefore only owns header rewriting (assume OpenAI-compatible Bearer);
+//! URL routing happens upstream of it.
 
 use axum::http::{HeaderMap, HeaderValue, Uri};
 
@@ -23,7 +23,7 @@ impl ProviderAdapter for ByoAdapter {
     /// Returns whatever is in `ProviderConfig.upstream` (typically the
     /// empty string — `byo` is not declared in TOML).  The proxy handler
     /// always overrides this with the user's stored upstream URL via
-    /// `ResolvedKey::upstream_override`, so this method's return value is
+    /// `ResolvedKey::byo_upstream`, so this method's return value is
     /// effectively dead-code; we keep it well-defined for the trait.
     fn upstream_base_url<'a>(&self, config: &'a ProviderConfig) -> &'a str {
         &config.upstream

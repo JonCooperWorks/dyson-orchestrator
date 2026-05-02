@@ -8,11 +8,12 @@
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
+use crate::db::tokens::token_lookup_key;
 use crate::envelope::EnvelopeCipher;
 use crate::error::StoreError;
 use crate::now_secs;
 
-pub const CURRENT_VERSION: i64 = 1;
+pub const CURRENT_VERSION: i64 = 2;
 
 const MIGRATION_NAME: &str = "runtime_secret_sealing";
 const AGE_ARMOR_HEADER: &str = "-----BEGIN AGE ENCRYPTED FILE-----";
@@ -22,10 +23,12 @@ pub struct MigrationReport {
     pub applied: bool,
     pub proxy_tokens_sealed: usize,
     pub instance_bearers_sealed: usize,
+    pub proxy_token_lookups_backfilled: usize,
 }
 
 enum Step {
     SealRuntimeSecrets,
+    BackfillProxyTokenLookup,
 }
 
 struct Migration {
@@ -35,11 +38,18 @@ struct Migration {
 }
 
 const fn migrations() -> &'static [Migration] {
-    &[Migration {
-        from_version: 0,
-        description: "Seal legacy proxy tokens and instance bearer tokens",
-        steps: &[Step::SealRuntimeSecrets],
-    }]
+    &[
+        Migration {
+            from_version: 0,
+            description: "Seal legacy proxy tokens and instance bearer tokens",
+            steps: &[Step::SealRuntimeSecrets],
+        },
+        Migration {
+            from_version: 1,
+            description: "Backfill proxy token lookup hashes",
+            steps: &[Step::BackfillProxyTokenLookup],
+        },
+    ]
 }
 
 pub async fn migrate(
@@ -140,6 +150,11 @@ async fn apply_step(
             report.instance_bearers_sealed += seal_instance_bearers(pool, cipher).await?;
             Ok(())
         }
+        Step::BackfillProxyTokenLookup => {
+            report.proxy_token_lookups_backfilled +=
+                backfill_proxy_token_lookup(pool, cipher).await?;
+            Ok(())
+        }
     }
 }
 
@@ -196,6 +211,36 @@ async fn seal_instance_bearers(
     Ok(sealed)
 }
 
+async fn backfill_proxy_token_lookup(
+    pool: &SqlitePool,
+    cipher: &dyn EnvelopeCipher,
+) -> Result<usize, StoreError> {
+    let rows = sqlx::query(
+        "SELECT token FROM proxy_tokens \
+         WHERE token_lookup IS NULL OR token_lookup = ''",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let mut backfilled = 0usize;
+    for row in rows {
+        let stored: String = row.get("token");
+        let token = open_text(cipher, "proxy token", &stored)?;
+        let lookup = token_lookup_key(&token);
+        let updated = sqlx::query(
+            "UPDATE proxy_tokens SET token_lookup = ? \
+             WHERE token = ? AND (token_lookup IS NULL OR token_lookup = '')",
+        )
+        .bind(lookup)
+        .bind(stored)
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
+        backfilled += usize::try_from(updated.rows_affected()).unwrap_or(usize::MAX);
+    }
+    Ok(backfilled)
+}
+
 fn is_current_ciphertext(
     cipher: &dyn EnvelopeCipher,
     label: &str,
@@ -219,6 +264,17 @@ fn seal_text(
         .seal(plaintext.as_bytes())
         .map_err(|e| StoreError::Io(format!("seal {label}: {e}")))?;
     String::from_utf8(sealed).map_err(|_| StoreError::Malformed(format!("{label} was not utf-8")))
+}
+
+fn open_text(
+    cipher: &dyn EnvelopeCipher,
+    label: &str,
+    ciphertext: &str,
+) -> Result<String, StoreError> {
+    let plain = cipher
+        .open(ciphertext.as_bytes())
+        .map_err(|e| StoreError::Malformed(format!("open {label}: {e}")))?;
+    String::from_utf8(plain).map_err(|_| StoreError::Malformed(format!("{label} was not utf-8")))
 }
 
 #[cfg(test)]
@@ -296,6 +352,7 @@ mod tests {
                 applied: true,
                 proxy_tokens_sealed: 1,
                 instance_bearers_sealed: 1,
+                proxy_token_lookups_backfilled: 1,
             }
         );
 
@@ -309,8 +366,15 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
+        let token_lookup: String = sqlx::query_scalar(
+            "SELECT token_lookup FROM proxy_tokens WHERE instance_id = 'i-legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_ne!(stored_bearer, "0123456789abcdef0123456789abcdef");
         assert_ne!(stored_token, "pt_legacy");
+        assert_eq!(token_lookup, token_lookup_key("pt_legacy"));
 
         let instances = SqlxInstanceStore::new(pool.clone(), cipher.clone());
         assert_eq!(
@@ -358,6 +422,7 @@ mod tests {
                 applied: true,
                 proxy_tokens_sealed: 0,
                 instance_bearers_sealed: 0,
+                proxy_token_lookups_backfilled: 0,
             }
         );
         let after_bearer: String =
@@ -373,5 +438,44 @@ mod tests {
         assert_eq!(after_bearer, before_bearer);
         assert_eq!(after_token, before_token);
         assert!(tokens.resolve(&token).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn backfills_lookup_for_version_one_sealed_tokens() {
+        let pool = open_in_memory().await.unwrap();
+        let cipher = system_cipher();
+        let instances = SqlxInstanceStore::new(pool.clone(), cipher.clone());
+        instances.create(row("i-v1", "bearer")).await.unwrap();
+        let sealed = seal_text(cipher.as_ref(), "proxy token", "pt_v1").unwrap();
+        sqlx::query(
+            "INSERT INTO proxy_tokens (token, instance_id, provider, created_at, revoked_at)
+             VALUES (?, 'i-v1', 'openrouter', 0, NULL)",
+        )
+        .bind(sealed)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ensure_version_table(&pool).await.unwrap();
+        write_version(&pool, 1).await.unwrap();
+
+        let report = migrate(&pool, cipher.as_ref()).await.unwrap();
+        assert_eq!(
+            report,
+            MigrationReport {
+                applied: true,
+                proxy_tokens_sealed: 0,
+                instance_bearers_sealed: 0,
+                proxy_token_lookups_backfilled: 1,
+            }
+        );
+
+        let tokens = SqlxTokenStore::new(pool.clone(), cipher.clone());
+        assert!(tokens.resolve("pt_v1").await.unwrap().is_some());
+        let lookup: String =
+            sqlx::query_scalar("SELECT token_lookup FROM proxy_tokens WHERE instance_id = 'i-v1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(lookup, token_lookup_key("pt_v1"));
     }
 }
