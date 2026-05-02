@@ -19,7 +19,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::instance::{DysonReconfigurer, ReconfigureBody, configure_secret_name};
+use crate::instance::{
+    DysonReconfigurer, ReconfigureBody, RestoreStateFileBody, configure_secret_name,
+};
 use crate::secrets::SystemSecretsService;
 
 /// Header dyson reads to verify the per-instance configure secret.
@@ -263,6 +265,31 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
             response = %resp_body,
             "reconfigure: dyson accepted"
         );
+        Ok(())
+    }
+
+    async fn restore_state_file(
+        &self,
+        instance_id: &str,
+        sandbox_id: &str,
+        body: &RestoreStateFileBody,
+    ) -> Result<(), String> {
+        let secret = self.ensure_secret(instance_id).await?;
+        let url = self.admin_url(sandbox_id, "state/file");
+        let resp = self
+            .http
+            .post(&url)
+            .header(CONFIGURE_HEADER, &secret)
+            .header(CSRF_HEADER, "swarm-internal")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("send: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let resp_body = resp.text().await.unwrap_or_default();
+            return Err(format!("dyson /api/admin/state/file {status}: {resp_body}"));
+        }
         Ok(())
     }
 

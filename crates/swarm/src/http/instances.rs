@@ -270,13 +270,12 @@ async fn clone_instance(
     }
 }
 
-/// **Destructive in-place rebuild.**  Reset the dyson on its existing
-/// swarm id: hire a fresh cube under the latest template, preserving
-/// name, task, models, tools, network policy, per-instance secrets,
-/// MCP servers, bearer token, DNS, and webhook URLs — but NO
-/// workspace state.  SOUL/IDENTITY/MEMORY, chat history, knowledge
-/// base, learned skills, and any in-flight work are LOST: the new
-/// cube boots from the template's clean rootfs.
+/// Reset the dyson on its existing swarm id: hire a fresh cube under
+/// the latest template, preserving name, task, models, tools, network
+/// policy, per-instance secrets, MCP servers, bearer token, DNS, and
+/// webhook URLs.  Durable workspace/chat state that reached swarm is
+/// replayed from the sealed state mirror before the new cube starts
+/// mirroring again, so memory, chats, KB, and skills survive.
 ///
 /// Same id, same URL, same bearer.  Bookmarks survive.  Operator
 /// escape hatch when the running dyson got into a bad state and the
@@ -298,7 +297,7 @@ async fn reset_instance(
         .ok_or(StatusCode::BAD_REQUEST)?;
     match state
         .instances
-        .recreate_in_place(&caller.user_id, &id, &target, None)
+        .reset_in_place_from_state(&caller.user_id, &id, &target, state.state_files.as_ref())
         .await
     {
         Ok(row) => Ok(Json(InstanceView::from_row(row, state.hostname.as_deref()))),

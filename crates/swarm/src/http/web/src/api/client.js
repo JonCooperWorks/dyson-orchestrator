@@ -68,14 +68,10 @@ export class SwarmClient {
     return this._json(`/v1/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
-  /// **Destructive in-place rebuild.**  Resets the dyson on its
-  /// existing swarm id: fresh cube under the latest template,
-  /// preserving name/task/models/tools/network policy/secrets/MCP/
-  /// bearer/DNS — but the workspace (memory, chats, kb, skills) is
-  /// WIPED.  Same id, same URL, same bearer; bookmarks and webhook
-  /// integrations survive.  Response shape matches `updateInstance`:
-  /// the post-rebuild row, so the caller can refresh the detail view
-  /// in place.
+  /// In-place rebuild.  Resets the dyson on its existing swarm id:
+  /// fresh cube under the latest template, preserving config/secrets/
+  /// bearer/DNS and replaying the sealed swarm state mirror for memory,
+  /// chats, kb, and skills.
   resetInstance(id) {
     return this._json(`/v1/instances/${encodeURIComponent(id)}/reset`, {
       method: 'POST',

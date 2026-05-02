@@ -134,6 +134,13 @@ impl StateFileService {
         Ok(store::find(&self.pool, instance_id, namespace, path).await?)
     }
 
+    pub async fn list_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<StateFileRow>, StateFileError> {
+        Ok(store::list_for_instance(&self.pool, instance_id).await?)
+    }
+
     pub async fn read_body(&self, row: &StateFileRow) -> Result<Option<Vec<u8>>, StateFileError> {
         if row.deleted_at.is_some() {
             return Ok(None);
@@ -288,5 +295,30 @@ mod tests {
         let row = svc.tombstone(meta("MEMORY.md")).await.unwrap();
         assert!(row.deleted_at.is_some());
         assert!(svc.read_body(&row).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_for_instance_returns_workspace_and_chats() {
+        let (svc, _tmp, _keys) = svc().await;
+        svc.ingest(meta("memory/SOUL.md"), b"remember")
+            .await
+            .unwrap();
+        let mut chat_meta = meta("c-1/transcript.json");
+        chat_meta.namespace = "chats";
+        chat_meta.mime = Some("application/json");
+        svc.ingest(chat_meta, b"[]").await.unwrap();
+
+        let rows = svc.list_for_instance("inst-a").await.unwrap();
+        let keys: Vec<_> = rows
+            .iter()
+            .map(|r| format!("{}:{}", r.namespace, r.path))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "chats:c-1/transcript.json".to_string(),
+                "workspace:memory/SOUL.md".to_string(),
+            ]
+        );
     }
 }

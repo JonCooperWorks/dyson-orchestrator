@@ -1658,23 +1658,22 @@ function InstanceDetail({ id, onNew }) {
     }
   };
 
-  // DESTRUCTIVE in-place rebuild.  Reset the dyson on its existing
-  // swarm id: hire a fresh cube under the latest template, keep
+  // In-place rebuild.  Reset the dyson on its existing swarm id:
+  // hire a fresh cube under the latest template, keep
   // name/task/models/tools/network policy/secrets/MCP/bearer/DNS,
-  // but DROP the workspace.  Memory, chats, knowledge base, learned
-  // skills, and any in-flight work are gone.  Same URL — bookmarks
-  // and webhook integrations survive.
+  // and replay the sealed swarm mirror for memory, chats, knowledge
+  // base, and learned skills.  In-flight work is still interrupted.
   const reset = async () => {
     const label = row.name && row.name.trim() ? row.name : id;
     const warning =
       `RESET ${label} on the latest template?\n\n` +
-      `This is DESTRUCTIVE.  The agent keeps its name, task, models, ` +
+      `The agent keeps its name, task, models, ` +
       `tools, network policy, secrets, MCP servers, URL, and bearer ` +
-      `token — but its workspace will be WIPED.  Memory, chats, ` +
-      `knowledge base, learned skills, and any in-flight work will be ` +
-      `LOST.  This cannot be undone.\n\n` +
+      `token.  Memory, chats, knowledge base, and learned skills are ` +
+      `replayed from the sealed swarm mirror.  Any in-flight work will ` +
+      `be interrupted.\n\n` +
       `Use this when the agent got into a bad state and you want a ` +
-      `clean start without losing its identity.`;
+      `clean runtime without losing its durable state.`;
     if (!confirm(warning)) return;
     setBusy(true); setErr(null);
     try {
@@ -1776,7 +1775,7 @@ function InstanceDetail({ id, onNew }) {
             className="btn btn-danger"
             onClick={reset}
             disabled={busy || row.status === 'destroyed'}
-            title="DESTRUCTIVE: hire a fresh agent on the latest template with this one's config — but workspace data (memory, chats, kb, skills) is NOT carried over"
+            title="hire a fresh agent on the latest template, replaying mirrored memory, chats, kb, and skills"
           >
             reset
           </button>

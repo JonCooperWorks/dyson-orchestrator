@@ -129,6 +129,23 @@ pub async fn find(
     Ok(row.map(row_to_state_file))
 }
 
+pub async fn list_for_instance(
+    pool: &SqlitePool,
+    instance_id: &str,
+) -> Result<Vec<StateFileRow>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT id, instance_id, owner_id, namespace, path, mime, bytes, body_path, updated_at, synced_at, deleted_at \
+         FROM instance_state_files \
+         WHERE instance_id = ? \
+         ORDER BY namespace, path",
+    )
+    .bind(instance_id)
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(rows.into_iter().map(row_to_state_file).collect())
+}
+
 fn row_to_state_file(row: sqlx::sqlite::SqliteRow) -> StateFileRow {
     StateFileRow {
         id: row.get("id"),

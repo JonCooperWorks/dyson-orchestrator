@@ -12,6 +12,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -315,6 +317,18 @@ pub trait DysonReconfigurer: Send + Sync {
         body: &ReconfigureBody,
     ) -> Result<(), String>;
 
+    /// Replay one sealed swarm-side state file into a freshly recreated
+    /// dyson before its background state-sync worker is enabled.  Default
+    /// no-op keeps existing test doubles focused on configure-only paths.
+    async fn restore_state_file(
+        &self,
+        _instance_id: &str,
+        _sandbox_id: &str,
+        _body: &RestoreStateFileBody,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Read dyson's idle state.  Returns `(idle, in_flight_chats)`.
     /// Used by the upgrade orchestrator's wait-loop to decide whether
     /// `quiesce` is worth attempting yet.  Default impl returns
@@ -606,6 +620,17 @@ pub struct ReconfigureBody {
     /// Mirrors `SWARM_STATE_SYNC_TOKEN`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_sync_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreStateFileBody {
+    pub namespace: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    pub deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
@@ -1869,6 +1894,277 @@ impl InstanceService {
             .get_for_owner(owner_id, &source.id)
             .await?
             .ok_or(SwarmError::NotFound)
+    }
+
+    /// Reset onto a clean cube while replaying the sealed swarm-side
+    /// state mirror before the new dyson starts shunting files back up.
+    /// Same surviving identity as [`Self::recreate_in_place`], but
+    /// memory, knowledge-base files, skills, and chats are restored from
+    /// `instance_state_files`.
+    pub async fn reset_in_place_from_state(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        new_template_id: &str,
+        state_files: &crate::state_files::StateFileService,
+    ) -> Result<InstanceRow, SwarmError> {
+        if new_template_id.trim().is_empty() {
+            return Err(SwarmError::BadRequest("template_id is required".into()));
+        }
+        let source = self
+            .instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        if source.status == InstanceStatus::Destroyed {
+            return Err(SwarmError::BadRequest(
+                "cannot reset a destroyed instance".into(),
+            ));
+        }
+        let old_sandbox_id = source
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                SwarmError::BadRequest(
+                    "instance has no live cube sandbox; reset requires a Live row".into(),
+                )
+            })?
+            .to_owned();
+        let resolved = network_policy::resolve(
+            &source.network_policy,
+            self.llm_cidr.as_deref(),
+            &*self.resolver,
+        )
+        .await?;
+
+        tracing::info!(
+            instance = %source.id,
+            from_template = %source.template_id,
+            to_template = %new_template_id,
+            "reset-in-place: starting clean rebuild with sealed state replay"
+        );
+
+        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
+            Some(t) => t,
+            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
+        };
+        let ingest_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_ingest(&source.id).await?,
+        };
+        let state_sync_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_state_sync(&source.id).await?,
+        };
+        let existing = self.secrets.list(&source.id).await?;
+        let mut managed = managed_env(
+            &self.proxy_base,
+            &proxy_token,
+            &ingest_token,
+            &state_sync_token,
+            &source.id,
+            &source.bearer_token,
+            &source.name,
+            &source.task,
+            &source.network_policy,
+        );
+        // The clean cube must not mirror its template-default workspace
+        // back over the durable swarm copy before replay completes.  The
+        // final configure push below enables state sync after the files
+        // have landed.
+        managed.remove(ENV_STATE_SYNC_URL);
+        managed.remove(ENV_STATE_SYNC_TOKEN);
+        let env = compose_sandbox_env(&managed, &BTreeMap::new(), &existing)?;
+
+        let info = self
+            .cube
+            .create_sandbox(CreateSandboxArgs {
+                template_id: new_template_id.to_owned(),
+                env,
+                from_snapshot_path: None,
+                resolved_policy: resolved.clone(),
+            })
+            .await?;
+        tracing::info!(
+            instance = %source.id,
+            old_sandbox = %old_sandbox_id,
+            new_sandbox = %info.sandbox_id,
+            "reset-in-place: clean cube live; replaying state"
+        );
+
+        if let Err(err) = self
+            .replay_state_files_to_sandbox(owner_id, &source.id, &info.sandbox_id, state_files)
+            .await
+        {
+            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+            return Err(err);
+        }
+
+        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let body = ReconfigureBody {
+                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
+                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+                models: source.models.clone(),
+                instance_id: Some(source.id.clone()),
+                proxy_token: Some(proxy_token.clone()),
+                proxy_base: Some(format!(
+                    "{}/openrouter",
+                    self.proxy_base.trim_end_matches('/')
+                )),
+                ingest_url: {
+                    let u = build_ingest_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                ingest_token: Some(ingest_token.clone()),
+                state_sync_url: {
+                    let u = build_state_sync_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                state_sync_token: Some(state_sync_token.clone()),
+                image_provider_name: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_provider_block: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
+                image_generation_provider: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
+                reset_skills: source.tools.is_empty(),
+                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
+                mcp_servers: None,
+            };
+            if let Err(err) =
+                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
+            {
+                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+                return Err(SwarmError::Internal(format!(
+                    "reset configure-push failed after state replay: {err}"
+                )));
+            }
+        } else {
+            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+            return Err(SwarmError::PolicyDenied(
+                "dyson reconfigurer not configured".into(),
+            ));
+        }
+
+        if let Err(err) = self
+            .instances
+            .replace_cube_sandbox(
+                &source.id,
+                &info.sandbox_id,
+                new_template_id,
+                &source.network_policy,
+                &row_policy_cidrs(&source.network_policy, &resolved),
+                now_secs(),
+            )
+            .await
+        {
+            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+            return Err(err.into());
+        }
+
+        if let Err(err) = self.cube.destroy_sandbox(&old_sandbox_id).await {
+            tracing::warn!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                error = %err,
+                "reset-in-place: old cube destroy failed (orphan cube — janitor will sweep)"
+            );
+        } else {
+            tracing::info!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                "reset-in-place: old cube destroyed"
+            );
+        }
+
+        self.instances
+            .get_for_owner(owner_id, &source.id)
+            .await?
+            .ok_or(SwarmError::NotFound)
+    }
+
+    async fn replay_state_files_to_sandbox(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        sandbox_id: &str,
+        state_files: &crate::state_files::StateFileService,
+    ) -> Result<usize, SwarmError> {
+        let rows = state_files
+            .list_for_instance(instance_id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("list state files: {e}")))?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let reconfigurer = self
+            .reconfigurer
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("dyson reconfigurer not configured".into()))?;
+        let mut replayed = 0usize;
+        for row in rows {
+            if row.owner_id != owner_id {
+                return Err(SwarmError::Internal(format!(
+                    "state row owner mismatch for {}:{}",
+                    row.namespace, row.path
+                )));
+            }
+            let (deleted, body_b64) = if row.deleted_at.is_some() {
+                (true, None)
+            } else {
+                let plain = state_files
+                    .read_body(&row)
+                    .await
+                    .map_err(|e| SwarmError::Internal(format!("open state file: {e}")))?
+                    .ok_or_else(|| {
+                        SwarmError::Internal(format!(
+                            "state file body missing or unsealed for {}:{}",
+                            row.namespace, row.path
+                        ))
+                    })?;
+                (false, Some(B64.encode(plain)))
+            };
+            let body = RestoreStateFileBody {
+                namespace: row.namespace.clone(),
+                path: row.path.clone(),
+                mime: row.mime.clone(),
+                deleted,
+                body_b64,
+            };
+            reconfigurer
+                .restore_state_file(instance_id, sandbox_id, &body)
+                .await
+                .map_err(|e| {
+                    SwarmError::Internal(format!(
+                        "restore state file {}:{}: {e}",
+                        row.namespace, row.path
+                    ))
+                })?;
+            replayed += 1;
+        }
+        tracing::info!(
+            instance = %instance_id,
+            sandbox = %sandbox_id,
+            files = replayed,
+            "reset-in-place: replayed sealed state files"
+        );
+        Ok(replayed)
     }
 
     /// Snapshot-less clone — hires a fresh empty instance under
@@ -3912,6 +4208,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingReconfigurer {
         pushed: Mutex<Vec<(String, String, ReconfigureBody)>>,
+        restored: Mutex<Vec<(String, String, RestoreStateFileBody)>>,
+        events: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -3926,6 +4224,25 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((instance_id.into(), sandbox_id.into(), body.clone()));
+            self.events.lock().unwrap().push("push".into());
+            Ok(())
+        }
+
+        async fn restore_state_file(
+            &self,
+            instance_id: &str,
+            sandbox_id: &str,
+            body: &RestoreStateFileBody,
+        ) -> Result<(), String> {
+            self.restored.lock().unwrap().push((
+                instance_id.into(),
+                sandbox_id.into(),
+                body.clone(),
+            ));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("restore:{}:{}", body.namespace, body.path));
             Ok(())
         }
     }
@@ -6265,6 +6582,163 @@ mod tests {
         assert!(
             !url.contains(&src.id),
             "mcp proxy URL must NOT reference the source id, got {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_replays_sealed_state_before_enabling_sync() {
+        let pool = open_in_memory().await.unwrap();
+        let owner = "feedface".repeat(4);
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cube = MockCube::new();
+        let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let secrets_store: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+        let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+            pool.clone(),
+            crate::db::test_system_cipher(),
+        ));
+        let recorder = Arc::new(RecordingReconfigurer::default());
+        let isvc = Arc::new(
+            InstanceService::new(
+                cube.clone(),
+                instances.clone(),
+                secrets_store,
+                tokens,
+                "https://swarm.test/llm",
+            )
+            .with_reconfigurer(recorder.clone()),
+        );
+        let state_root = tempfile::tempdir().unwrap();
+        let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+            Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+        let state_files = crate::state_files::StateFileService::new(
+            pool.clone(),
+            state_root.path().into(),
+            ciphers,
+        );
+
+        let src = isvc
+            .create(
+                &owner,
+                CreateRequest {
+                    template_id: "tpl-v1".into(),
+                    name: Some("memoryful".into()),
+                    task: Some("keep context".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::Open,
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        recorder.pushed.lock().unwrap().clear();
+        recorder.restored.lock().unwrap().clear();
+        recorder.events.lock().unwrap().clear();
+
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "workspace",
+                    path: "memory/SOUL.md",
+                    mime: Some("text/markdown"),
+                    updated_at: 1_777_700_000,
+                },
+                b"remember me",
+            )
+            .await
+            .unwrap();
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "workspace",
+                    path: "skills/review/SKILL.md",
+                    mime: Some("text/markdown"),
+                    updated_at: 1_777_700_001,
+                },
+                b"# Review skill",
+            )
+            .await
+            .unwrap();
+        state_files
+            .ingest(
+                crate::state_files::StateFileMeta {
+                    instance_id: &src.id,
+                    owner_id: &owner,
+                    namespace: "chats",
+                    path: "c-1/transcript.json",
+                    mime: Some("application/json"),
+                    updated_at: 1_777_700_002,
+                },
+                br#"[{"role":"user","content":"hi"}]"#,
+            )
+            .await
+            .unwrap();
+
+        let row = isvc
+            .reset_in_place_from_state(&owner, &src.id, "tpl-v2", &state_files)
+            .await
+            .unwrap();
+        assert_eq!(row.id, src.id);
+        assert_eq!(row.template_id, "tpl-v2");
+
+        let captured = cube.last_create();
+        assert_eq!(captured.template_id, "tpl-v2");
+        assert!(captured.from_snapshot.is_none());
+        assert!(
+            !captured.env.contains_key(ENV_STATE_SYNC_URL),
+            "reset create env must keep state sync disabled until replay finishes"
+        );
+        assert!(!captured.env.contains_key(ENV_STATE_SYNC_TOKEN));
+
+        let restored = recorder.restored.lock().unwrap();
+        assert_eq!(restored.len(), 3);
+        assert!(
+            restored.iter().any(|(_, _, b)| b.namespace == "workspace"
+                && b.path == "skills/review/SKILL.md"
+                && b.body_b64.as_deref() == Some("IyBSZXZpZXcgc2tpbGw=")),
+            "skills must be replayed from the sealed mirror"
+        );
+        assert!(
+            restored
+                .iter()
+                .any(|(_, _, b)| b.namespace == "chats" && b.path == "c-1/transcript.json"),
+            "chat transcript must be replayed from the sealed mirror"
+        );
+        drop(restored);
+
+        let pushed = recorder.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        assert!(
+            pushed[0].2.state_sync_url.is_some() && pushed[0].2.state_sync_token.is_some(),
+            "state sync should be enabled by the post-replay configure push"
+        );
+        drop(pushed);
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events.last().map(String::as_str), Some("push"));
+        assert!(
+            events[..events.len() - 1]
+                .iter()
+                .all(|event| event.starts_with("restore:")),
+            "all replay calls must happen before configure enables state sync: {events:?}"
         );
     }
 
