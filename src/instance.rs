@@ -1358,6 +1358,182 @@ impl InstanceService {
             .ok_or(SwarmError::NotFound)
     }
 
+    /// Recover a swarm row onto a fresh cube using an already-captured
+    /// snapshot.  Unlike [`Self::rotate_in_place`], this does not try to
+    /// snapshot the old cube first; it is for operator recovery after the
+    /// Cube runtime has been reinstalled and the old sandbox is already
+    /// gone or unreliable.  The swarm-side identity survives: DNS,
+    /// bearer token, proxy/artifact tokens, per-instance secrets, MCP
+    /// records, network policy, name, task, models, and tools all remain
+    /// keyed to the same `instance_id`.
+    pub async fn restore_snapshot_in_place(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        snapshot_path: std::path::PathBuf,
+        target_template_id: Option<String>,
+    ) -> Result<InstanceRow, SwarmError> {
+        let source = self
+            .instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        if source.status == InstanceStatus::Destroyed {
+            return Err(SwarmError::BadRequest(
+                "cannot recover a destroyed instance".into(),
+            ));
+        }
+        let old_sandbox_id = source
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let target_template = target_template_id
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| source.template_id.clone());
+        if target_template.trim().is_empty() {
+            return Err(SwarmError::BadRequest("template_id is required".into()));
+        }
+
+        let resolved = network_policy::resolve(
+            &source.network_policy,
+            self.llm_cidr.as_deref(),
+            &*self.resolver,
+        )
+        .await?;
+
+        tracing::warn!(
+            instance = %source.id,
+            old_sandbox = ?old_sandbox_id,
+            to_template = %target_template,
+            snapshot_path = %snapshot_path.display(),
+            "restore-snapshot-in-place: creating replacement cube from deploy snapshot"
+        );
+
+        let proxy_token = match self.tokens.lookup_by_instance(&source.id).await? {
+            Some(t) => t,
+            None => self.tokens.mint(&source.id, SHARED_PROVIDER).await?,
+        };
+        let ingest_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::INGEST_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_ingest(&source.id).await?,
+        };
+        let existing = self.secrets.list(&source.id).await?;
+        let managed = managed_env(
+            &self.proxy_base,
+            &proxy_token,
+            &ingest_token,
+            &source.id,
+            &source.bearer_token,
+            &source.name,
+            &source.task,
+            &source.network_policy,
+        );
+        let env = compose_env(&BTreeMap::new(), &managed, &BTreeMap::new(), &existing);
+
+        let info = self
+            .cube
+            .create_sandbox(CreateSandboxArgs {
+                template_id: target_template.clone(),
+                env,
+                from_snapshot_path: Some(snapshot_path),
+                resolved_policy: resolved.clone(),
+            })
+            .await?;
+        tracing::info!(
+            instance = %source.id,
+            new_sandbox = %info.sandbox_id,
+            "restore-snapshot-in-place: replacement cube live"
+        );
+
+        if let Err(e) = self
+            .instances
+            .replace_cube_sandbox(
+                &source.id,
+                &info.sandbox_id,
+                &target_template,
+                &source.network_policy,
+                &row_policy_cidrs(&source.network_policy, &resolved),
+                now_secs(),
+            )
+            .await
+        {
+            if let Err(d) = self.cube.destroy_sandbox(&info.sandbox_id).await {
+                tracing::warn!(
+                    instance = %source.id,
+                    new_sandbox = %info.sandbox_id,
+                    error = %d,
+                    "restore-snapshot-in-place: orphan cube destroy after DB swap failure"
+                );
+            }
+            return Err(e.into());
+        }
+
+        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+            let body = ReconfigureBody {
+                name: Some(source.name.clone()).filter(|s| !s.is_empty()),
+                task: Some(source.task.clone()).filter(|s| !s.is_empty()),
+                models: source.models.clone(),
+                instance_id: Some(source.id.clone()),
+                proxy_token: Some(proxy_token.clone()),
+                proxy_base: Some(format!(
+                    "{}/openrouter",
+                    self.proxy_base.trim_end_matches('/')
+                )),
+                ingest_url: {
+                    let u = build_ingest_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                ingest_token: Some(ingest_token.clone()),
+                image_provider_name: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_provider_block: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_block(&self.image_proxy_base(), &proxy_token)),
+                image_generation_provider: self
+                    .image_gen_defaults
+                    .as_ref()
+                    .map(|d| d.provider_name.clone()),
+                image_generation_model: self.image_gen_defaults.as_ref().map(|d| d.model.clone()),
+                reset_skills: source.tools.is_empty(),
+                tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
+                mcp_servers: None,
+            };
+            if let Err(err) =
+                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
+            {
+                tracing::warn!(
+                    instance = %source.id,
+                    error = %err,
+                    "restore-snapshot-in-place: configure-push failed; will be retried by next sweep"
+                );
+            }
+        }
+
+        if let Some(old) = old_sandbox_id.filter(|old| old != &info.sandbox_id)
+            && let Err(err) = self.cube.destroy_sandbox(&old).await
+        {
+            tracing::warn!(
+                instance = %source.id,
+                old_sandbox = %old,
+                error = %err,
+                "restore-snapshot-in-place: old cube destroy failed or old cube was already gone"
+            );
+        }
+
+        self.instances
+            .get_for_owner(owner_id, &source.id)
+            .await?
+            .ok_or(SwarmError::NotFound)
+    }
+
     /// Snapshot-less variant of [`Self::rotate_in_place`].  Spins up a
     /// fresh cube under `new_template_id` using the same swarm id,
     /// bearer, name, task, models, tools, and per-instance secrets;
@@ -5233,6 +5409,64 @@ mod tests {
         let new_row = instances.get(&new_inst.id).await.unwrap().unwrap();
         assert_eq!(new_row.owner_id, "alice");
         assert_eq!(new_row.network_policy, NetworkPolicy::Airgap);
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_in_place_preserves_identity_and_uses_snapshot() {
+        let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot().await;
+        let created = isvc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl-old".into(),
+                    name: Some("TARS".into()),
+                    task: Some("stay useful".into()),
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::NoLocalNet,
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let before = instances.get(&created.id).await.unwrap().unwrap();
+        let old_sandbox = before.cube_sandbox_id.clone().unwrap();
+        let snap = ssvc.snapshot("legacy", &created.id).await.unwrap();
+
+        let recovered = ssvc
+            .restore_in_place("legacy", &created.id, &snap.id, None)
+            .await
+            .unwrap();
+
+        assert_eq!(recovered.id, created.id);
+        assert_eq!(recovered.owner_id, before.owner_id);
+        assert_eq!(recovered.bearer_token, before.bearer_token);
+        assert_eq!(recovered.template_id, "tpl-old");
+        assert_eq!(recovered.network_policy, NetworkPolicy::NoLocalNet);
+        assert_ne!(recovered.cube_sandbox_id, before.cube_sandbox_id);
+
+        let captured = cube.last_create();
+        assert_eq!(captured.template_id, "tpl-old");
+        assert_eq!(
+            captured.from_snapshot.as_deref(),
+            Some(std::path::Path::new(&snap.path))
+        );
+        assert_eq!(
+            captured.env.get(ENV_INSTANCE_ID).map(String::as_str),
+            Some(created.id.as_str())
+        );
+        assert_eq!(
+            captured.env.get(ENV_BEARER_TOKEN).map(String::as_str),
+            Some(created.bearer_token.as_str())
+        );
+        assert_eq!(
+            captured.env.get(ENV_PROXY_TOKEN).map(String::as_str),
+            Some(created.proxy_token.as_str())
+        );
+        assert!(
+            cube.destroyed.lock().unwrap().contains(&old_sandbox),
+            "old sandbox should be best-effort destroyed after pointer swap"
+        );
     }
 
     #[tokio::test]

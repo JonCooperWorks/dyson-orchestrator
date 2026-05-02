@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 
 use dyson_swarm::{
     api_client::ApiClient,
@@ -17,15 +19,15 @@ use dyson_swarm::{
     config, cube_client, db,
     db::{instances::SqlxInstanceStore, secrets::SqlxSecretStore, tokens::SqlxTokenStore},
     http,
-    instance::InstanceService,
+    instance::{InstanceService, SYSTEM_OWNER},
     logging,
     probe::{self, HttpHealthProber},
     proxy::{self, ProxyService, policy_check::InstancePolicy},
     secrets::SecretsService,
     snapshot::SnapshotService,
     traits::{
-        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, PolicyStore, SecretStore,
-        SnapshotStore, TokenStore, UserStore,
+        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStatus, InstanceStore,
+        ListFilter, PolicyStore, SecretStore, SnapshotStore, TokenStore, UserStore,
     },
     ttl,
 };
@@ -126,6 +128,10 @@ async fn main() -> ExitCode {
                 ttl_seconds,
             )
             .await
+        }
+        Command::DeploySnapshotLive { output } => run_deploy_snapshot_live(&cfg, output).await,
+        Command::DeployRestoreLive { manifest, template } => {
+            run_deploy_restore_live(&cfg, manifest, template).await
         }
         Command::DysonSkills { id } => run_dyson_skills(&cfg, id).await,
         Command::MintApiKey { user_id, label } => run_mint_api_key(&cfg, user_id, label).await,
@@ -820,6 +826,283 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
 
     tracing::info!("swarm stopped");
     ExitCode::SUCCESS
+}
+
+struct OpsServices {
+    instances: Arc<dyn InstanceStore>,
+    snapshots: Arc<SnapshotService>,
+}
+
+async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String> {
+    let pool = db::open(&cfg.db_path)
+        .await
+        .map_err(|e| format!("db open {}: {e:#}", cfg.db_path.display()))?;
+    let cube = Arc::new(
+        cube_client::HttpCubeClient::new(&cfg.cube).map_err(|e| format!("cube client: {e:#}"))?,
+    ) as Arc<dyn CubeClient>;
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(pool.clone()));
+    let secrets: Arc<dyn SecretStore> = Arc::new(SqlxSecretStore::new(pool.clone()));
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone()));
+    let snapshots_store: Arc<dyn SnapshotStore> =
+        Arc::new(db::snapshots::SqliteSnapshotStore::new(pool.clone()));
+
+    let cipher_dir: Arc<dyn dyson_swarm::envelope::CipherDirectory> = Arc::new(
+        dyson_swarm::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir())
+            .map_err(|e| format!("envelope key directory init: {e:#}"))?,
+    );
+    let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> = Arc::new(
+        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
+    );
+    let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> = Arc::new(
+        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
+    );
+    let system_secrets_svc = Arc::new(dyson_swarm::secrets::SystemSecretsService::new(
+        system_secrets_store,
+        cipher_dir.clone(),
+    ));
+    let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
+        user_secrets_store,
+        cipher_dir,
+    ));
+
+    let proxy_base = match cfg.cube_facing_addr.as_deref().filter(|a| !a.is_empty()) {
+        Some(addr) => format!("http://{addr}/llm"),
+        None => match cfg.hostname.as_deref().filter(|h| !h.is_empty()) {
+            Some(host) => format!("https://{host}/llm"),
+            None => format!("http://{}/llm", cfg.bind),
+        },
+    };
+    let llm_cidr: Option<String> = cfg
+        .cube_facing_addr
+        .as_deref()
+        .and_then(|addr| addr.split(':').next())
+        .filter(|host| !host.is_empty())
+        .filter(|host| host.parse::<std::net::Ipv4Addr>().is_ok())
+        .map(|host| format!("{host}/32"));
+
+    let mut instance_svc =
+        InstanceService::new(cube.clone(), instances.clone(), secrets, tokens, proxy_base)
+            .with_llm_cidr(llm_cidr)
+            .with_mcp_secrets(user_secrets_svc);
+    if let Ok(r) = dyson_swarm::dyson_reconfig::DysonReconfigurerHttp::new(
+        cfg.cube.sandbox_domain.clone(),
+        system_secrets_svc,
+    ) {
+        instance_svc = instance_svc.with_reconfigurer(Arc::new(r));
+    }
+    let instance_svc = Arc::new(instance_svc);
+
+    let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
+        config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
+        config::BackupSinkKind::S3 => {
+            let s3cfg = cfg
+                .backup
+                .s3
+                .as_ref()
+                .ok_or_else(|| "s3 backup sink selected but [backup.s3] missing".to_string())?;
+            Arc::new(
+                S3BackupSink::new(s3cfg, cfg.backup.local_cache_dir.clone(), cube.clone())
+                    .map_err(|e| format!("s3 backup sink: {e:#}"))?,
+            )
+        }
+    };
+    let snapshots = Arc::new(SnapshotService::new(
+        cube,
+        instances.clone(),
+        snapshots_store,
+        backup_sink,
+        instance_svc,
+    ));
+
+    Ok(OpsServices {
+        instances,
+        snapshots,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeployRecoveryManifest {
+    version: u32,
+    created_at: i64,
+    entries: Vec<DeployRecoveryEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeployRecoveryEntry {
+    instance_id: String,
+    name: String,
+    snapshot_id: String,
+    template_id: String,
+    sandbox_id: String,
+}
+
+async fn run_deploy_snapshot_live(cfg: &config::Config, output: PathBuf) -> ExitCode {
+    let services = match build_ops_services(cfg).await {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let live = match services
+        .instances
+        .list(
+            SYSTEM_OWNER,
+            ListFilter {
+                status: Some(InstanceStatus::Live),
+                include_destroyed: false,
+            },
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("error: list live instances: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut entries = Vec::new();
+    for row in live {
+        let Some(sandbox_id) = row
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+        else {
+            eprintln!(
+                "error: live instance {} has no cube_sandbox_id; refusing destructive cube install",
+                row.id
+            );
+            return ExitCode::FAILURE;
+        };
+        match services.snapshots.snapshot(SYSTEM_OWNER, &row.id).await {
+            Ok(snap) => {
+                println!("snapshot {} ({}) -> {}", row.id, row.name.trim(), snap.id);
+                entries.push(DeployRecoveryEntry {
+                    instance_id: row.id,
+                    name: row.name,
+                    snapshot_id: snap.id,
+                    template_id: row.template_id,
+                    sandbox_id,
+                });
+            }
+            Err(err) => {
+                eprintln!("error: snapshot {} failed: {err:#}", row.id);
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let manifest = DeployRecoveryManifest {
+        version: 1,
+        created_at: dyson_swarm::now_secs(),
+        entries,
+    };
+    if let Err(err) = write_manifest_atomic(&output, &manifest) {
+        eprintln!("error: write manifest {}: {err}", output.display());
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "wrote deploy recovery manifest {} ({} entr{})",
+        output.display(),
+        manifest.entries.len(),
+        if manifest.entries.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        }
+    );
+    ExitCode::SUCCESS
+}
+
+async fn run_deploy_restore_live(
+    cfg: &config::Config,
+    manifest_path: PathBuf,
+    template_override: Option<String>,
+) -> ExitCode {
+    let manifest: DeployRecoveryManifest = match std::fs::read(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}")))
+    {
+        Ok(m) => m,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if manifest.version != 1 {
+        eprintln!("error: unsupported manifest version {}", manifest.version);
+        return ExitCode::from(2);
+    }
+    if manifest.entries.is_empty() {
+        println!("deploy recovery manifest is empty; nothing to restore");
+        return ExitCode::SUCCESS;
+    }
+
+    let services = match build_ops_services(cfg).await {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut failed = Vec::new();
+    for entry in &manifest.entries {
+        let target_template = template_override
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| entry.template_id.clone());
+        println!(
+            "restore {} ({}) from {} using template {}",
+            entry.instance_id, entry.name, entry.snapshot_id, target_template
+        );
+        match services
+            .snapshots
+            .restore_in_place(
+                SYSTEM_OWNER,
+                &entry.instance_id,
+                &entry.snapshot_id,
+                Some(target_template),
+            )
+            .await
+        {
+            Ok(row) => {
+                let sandbox = row.cube_sandbox_id.as_deref().unwrap_or("");
+                println!("restored {} -> {}", row.id, sandbox);
+            }
+            Err(err) => {
+                eprintln!("error: restore {} failed: {err:#}", entry.instance_id);
+                failed.push(entry.instance_id.clone());
+            }
+        }
+    }
+
+    if failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("error: {} instance restore(s) failed", failed.len());
+        ExitCode::FAILURE
+    }
+}
+
+fn write_manifest_atomic(
+    path: &std::path::Path,
+    manifest: &DeployRecoveryManifest,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent dir: {e}"))?;
+    }
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "manifest path must have a UTF-8 file name".to_string())?;
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| format!("encode json: {e}"))?;
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write tmp: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename tmp: {e}"))?;
+    Ok(())
 }
 
 /// Stage 3: overlay `system_secrets[provider.<name>.api_key]` onto the

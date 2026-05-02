@@ -119,6 +119,24 @@ pub enum Command {
         #[arg(long)]
         ttl_seconds: Option<i64>,
     },
+
+    /// Operator deploy helper: snapshot every live instance to a JSON manifest.
+    DeploySnapshotLive {
+        /// Manifest path to write atomically.
+        #[arg(long)]
+        output: PathBuf,
+    },
+
+    /// Operator deploy helper: restore live instances in place from a manifest.
+    DeployRestoreLive {
+        /// Manifest produced by deploy-snapshot-live.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Optional template override for every restored cube. Omit to use
+        /// the template_id captured for each instance in the manifest.
+        #[arg(long)]
+        template: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
