@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "swarm",
+    name = "swarmctl",
     version,
     about = "Orchestrator for Dyson agents in CubeSandbox MicroVMs",
     disable_help_subcommand = true
@@ -53,9 +53,6 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run the HTTP server (default action when no subcommand is given).
-    Serve,
-
     /// Per-instance secret material.
     Secrets {
         #[command(subcommand)]
@@ -118,6 +115,24 @@ pub enum Command {
         env: Vec<(String, String)>,
         #[arg(long)]
         ttl_seconds: Option<i64>,
+    },
+
+    /// Operator deploy helper: snapshot every live instance to a JSON manifest.
+    DeploySnapshotLive {
+        /// Manifest path to write atomically.
+        #[arg(long)]
+        output: PathBuf,
+    },
+
+    /// Operator deploy helper: restore live instances in place from a manifest.
+    DeployRestoreLive {
+        /// Manifest produced by deploy-snapshot-live.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Optional template override for every restored cube. Omit to use
+        /// the template_id captured for each instance in the manifest.
+        #[arg(long)]
+        template: Option<String>,
     },
 }
 

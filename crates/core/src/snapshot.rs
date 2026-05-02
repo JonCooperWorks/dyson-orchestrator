@@ -265,6 +265,73 @@ impl SnapshotService {
             .await
     }
 
+    /// Operator recovery path: restore `instance_id` in place from an
+    /// existing snapshot, preserving the swarm row and all URLs/tokens.
+    /// This is intentionally narrower than tenant-facing restore, which
+    /// forks a brand-new instance id.
+    pub async fn restore_in_place(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        snapshot_id: &str,
+        target_template_id: Option<String>,
+    ) -> Result<crate::traits::InstanceRow, SwarmError> {
+        let mut row = self
+            .snapshots
+            .get(snapshot_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        require_owner(&row.owner_id, owner_id)?;
+        if row.source_instance_id != instance_id {
+            return Err(SwarmError::BadRequest(format!(
+                "snapshot {snapshot_id} belongs to instance {}, not {instance_id}",
+                row.source_instance_id
+            )));
+        }
+
+        let needs_pull = !std::path::Path::new(&row.path).exists() && row.remote_uri.is_some();
+        if needs_pull {
+            let new_path = self.backup.pull(&row).await?;
+            let new_path_str = new_path.display().to_string();
+            self.snapshots.update_path(&row.id, &new_path_str).await?;
+            row.path = new_path_str;
+        }
+
+        if let Some(expected) = row.content_hash.as_ref() {
+            match hash_bundle(Path::new(&row.path)).await {
+                Ok(actual) if &actual == expected => {}
+                Ok(actual) => {
+                    tracing::error!(
+                        snapshot_id = %row.id,
+                        path = %row.path,
+                        expected = %expected,
+                        actual = %actual,
+                        "snapshot content hash mismatch — refusing in-place restore",
+                    );
+                    return Err(SwarmError::SnapshotCorrupt(row.id));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        snapshot_id = %row.id,
+                        path = %row.path,
+                        error = %e,
+                        "snapshot hash compute failed at in-place restore — refusing",
+                    );
+                    return Err(SwarmError::SnapshotCorrupt(row.id));
+                }
+            }
+        } else {
+            tracing::warn!(
+                snapshot_id = %row.id,
+                "legacy snapshot, no integrity check",
+            );
+        }
+
+        self.instance_svc
+            .restore_snapshot_in_place(owner_id, instance_id, row.path.into(), target_template_id)
+            .await
+    }
+
     /// Owner-scoped permanent delete.  Removes the on-disk bundle (and
     /// any remote bytes for backup-class rows) via the configured
     /// `BackupSink`, then tombstones the DB row.  Idempotent — calling

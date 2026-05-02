@@ -1,117 +1,58 @@
-[package]
-name = "dyson-swarm"
+[workspace]
+members = [
+    "crates/core",
+    "crates/swarm",
+    "crates/cli",
+    "crates/egress-proxy",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Orchestration server for Dyson agents in CubeSandbox MicroVMs"
 license = "MIT"
 publish = false
 
-[lib]
-name = "dyson_swarm"
-path = "src/lib.rs"
-
-[[bin]]
-name = "swarm"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
 # Versions are pinned to the current minor — Cargo.lock pins exact patch.
 # Bumping a minor is a deliberate operation; SemVer-major bumps require
 # a code review and a security/breakage check.
+age = { version = "0.10.1", default-features = false, features = ["armor"] }
+ammonia = "4"
+argon2 = "0.5.3"
+async-trait = "0.1.89"
 axum = { version = "0.7.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
-tokio = { version = "1.52", default-features = false, features = ["rt-multi-thread", "net", "macros", "signal", "sync", "fs"] }
+base64 = "0.22.1"
+bytes = "1.11.1"
+clap = { version = "4.6", default-features = false, features = ["derive", "std", "help", "usage"] }
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
+hex = { version = "0.4", default-features = false, features = ["std"] }
+hmac = { version = "0.12", default-features = false, features = ["std"] }
+http-body-util = "0.1.3"
+hyper = { version = "1.9.0", default-features = false, features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }
+jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
+libc = "0.2"
+parking_lot = "0.12"
+postcard = { version = "1.0", default-features = false, features = ["use-std"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+rand = "0.8.6"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
-# rust-s3 0.37 closes RUSTSEC-2026-0098 / 2026-0099 / 2026-0104 (rustls-webpki
-# 0.101 chain shipped with 0.34).  See deploy/README.md for upgrade notes.
+rsa = { version = "0.9.10", default-features = false, features = ["std", "pem"] }
 rust-s3 = { version = "0.37.1", default-features = false, features = ["tokio-rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+subtle = { version = "2.6", default-features = false }
+tempfile = "3.27"
+thiserror = "1.0.69"
+tokio = { version = "1.52", default-features = false, features = ["rt-multi-thread", "net", "macros", "signal", "sync", "fs", "io-util", "time"] }
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
-clap = { version = "4.6", default-features = false, features = ["derive", "std", "help", "usage"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "json"] }
-thiserror = "1.0.69"
 uuid = { version = "1.23", default-features = false, features = ["v4", "serde"] }
-async-trait = "0.1.89"
-futures = { version = "0.3.32", default-features = false, features = ["std"] }
-# 10.3 closes GHSA-h395-gr6q-cpjc / CVE-2026-25537 (nbf type-confusion
-# bypass).  10.x requires picking a crypto backend explicitly; we use
-# `rust_crypto` to match the rest of the TLS stack (reqwest rustls,
-# sqlx tokio-rustls) and stay pure-Rust.  No PEM parsing here — keys
-# are reconstructed from JWKS modulus/exponent — so `use_pem` is off.
-jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
-age = { version = "0.10.1", default-features = false, features = ["armor"] }
-# argon2id for the per-instance configure secret (Stage 8) — swarm
-# generates a plaintext on instance create, sends it to dyson on every
-# /api/admin/configure call; dyson stores the argon2id hash on its
-# disk on first call (TOFU) and verifies on subsequent calls.  Same
-# crate dyson already uses for its bearer-auth hashing path.
-argon2 = "0.5.3"
-# Snapshot integrity (security review A3): SHA-256 over the bundle
-# directory, computed at snapshot-time and verified at restore-time.
-# Already a transitive dep via age/argon2 — promoting to direct so
-# we don't lean on indirect-version drift.
-sha2 = { version = "0.10", default-features = false, features = ["std"] }
-# HMAC-SHA256 for webhook signature verification.  `subtle` for the
-# constant-time tag compare so a wrong signature can't be timed-out
-# byte-by-byte.  `hex` for hex-encoding the digest on the wire
-# (matches GitHub/Stripe-style `sha256=<hex>` headers).
-hmac = { version = "0.12", default-features = false, features = ["std"] }
-subtle = { version = "2.6", default-features = false }
-hex = { version = "0.4", default-features = false, features = ["std"] }
-# CSPRNG for fresh api-key tokens (Stage 4).  Dev-deps already pulled
-# this in; promoting to a runtime dep so mint_api_key can use it
-# directly without hand-rolling a getrandom wrapper.
-rand = "0.8.6"
-# Non-poisoning sync primitives.  We use `parking_lot::Mutex` to wrap
-# the mint-lock map in `dyson_reconfig` — std's Mutex poisons on panic
-# and turns every subsequent lock into a Result.expect, which is both
-# noisy and a self-DoS risk if any panicked codepath ever held the
-# mint-locks map open.  parking_lot drops the poison machinery (panics
-# leave the mutex unlocked) and keeps the API blocking-only, which is
-# the right shape for the short critical sections we hold here.
-parking_lot = "0.12"
-# base64url encoding for PKCE verifier/challenge + CSRF state in the
-# MCP-server OAuth flow.  Same crate the dev-deps already pull in —
-# promoting to a runtime dep so `mcp_servers` can build PKCE without
-# reaching for a different encoder.
-base64 = "0.22.1"
-# Compact, schema-versioned binary encoding for the SharePayload struct
-# carried in `share.<apex>/v1/<base64url(payload)>.<base64url(sig)>`
-# URLs.  postcard is no_std-friendly, has no schema-evolution footguns
-# of the JWT/CBOR families, and produces the smallest payload of any
-# serde-compatible format we already had a credible alternative for.
-postcard = { version = "1.0", default-features = false, features = ["use-std"] }
-# Markdown rendering for the public artefact share page (server-side).
-# pulldown-cmark is the reference Rust implementation; ammonia
-# sanitises the resulting HTML against an allowlist before we ship it
-# to a viewer's browser.  The share endpoint does not load JS; CSP
-# also blocks `script-src` so an XSS in markdown is doubly contained.
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
-ammonia = "4"
-# Process-wide umask hardening.  Set 0o077 at startup so newly created
-# files (sqlite db, age key files) default to owner-only even if a
-# call site forgets to chmod after create — closes the TOCTOU window
-# between `create` and `set_permissions`.  Unix-only; cfg-guarded.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[features]
-default = []
-# Postgres backend stub. Enable to compile the (currently empty) `db::pg`
-# module skeleton. The actual Pg store impls are deferred — phase 7 ships
-# the seam, not the implementation.
-postgres = ["sqlx/postgres"]
-
-[dev-dependencies]
-# Used only by the OIDC test to mint a fresh RSA keypair + sign mock JWTs.
-# Not a runtime dep — production OIDC verification only uses the public key
-# delivered via JWKS.  RUSTSEC-2023-0071 (Marvin timing attack) is a no-op
-# here: tests sign, never decrypt.
-rsa = { version = "0.9.10", default-features = false, features = ["std", "pem"] }
-tempfile = "3.27"
 
 [profile.release]
 lto = "thin"
@@ -125,24 +66,15 @@ opt-level = 3
 # section", "could have #[must_use]") on this codebase, ~200 hits with
 # no runtime impact.  The substantive pedantic checks — cast safety,
 # allocation, match-arm dedup, manual_let_else — stay on.
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-# Doc-only nits that don't change runtime behaviour.
 doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
 return_self_not_must_use = "allow"
-# Several short helpers take `String` by value to keep call sites
-# ergonomic at the cost of one move.
 needless_pass_by_value = "allow"
-# `pub use crate::foo::Foo` is deliberate.
 module_name_repetitions = "allow"
-# A handful of long handler functions are linear request flows; splitting
-# them obscures the sequence.
 too_many_lines = "allow"
-# `i64` is the SQLite-native int type — lossless u32/u16 → i64 promotions
-# in the DB layer are intentional.
 cast_lossless = "allow"
-# Mostly fixture-naming collisions in tests.
 similar_names = "allow"
