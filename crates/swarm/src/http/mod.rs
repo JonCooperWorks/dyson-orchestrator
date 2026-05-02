@@ -21,6 +21,7 @@ pub mod healthz;
 pub mod instance_artefacts;
 pub mod instances;
 pub mod internal_ingest;
+pub mod internal_state;
 pub mod models;
 pub mod proxy_admin;
 pub mod secrets;
@@ -112,6 +113,10 @@ pub struct AppState {
     /// so destroyed/reset cubes don't break still-active share URLs
     /// or the swarm UI's artefact list.
     pub artefact_cache: crate::artefacts::ArtefactCache,
+    /// Sealed mirror of selected dyson workspace/chat state files.
+    /// Written by the internal state-sync endpoint with an `st_`
+    /// per-instance bearer; bodies are encrypted before disk.
+    pub state_files: crate::state_files::StateFiles,
 }
 
 /// Build the public `Router`.
@@ -201,6 +206,7 @@ pub fn router(
         .merge(auth_config::router(state.clone()))
         .merge(instances::internal_router(state.clone()))
         .merge(internal_ingest::router(state.clone()))
+        .merge(internal_state::router(state.clone()))
         .merge(webhooks::public_router(state.clone()))
         .merge(admin)
         .merge(tenant)
@@ -354,6 +360,11 @@ mod tests {
             cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
         ));
+        let state_files = Arc::new(crate::state_files::StateFileService::new(
+            pool.clone(),
+            cache_dir.path().to_path_buf(),
+            cipher_dir.clone(),
+        ));
         // Leak the tempdir so the body files outlive the test scope —
         // the test harness exits soon after either way.
         std::mem::forget(cache_dir);
@@ -380,6 +391,7 @@ mod tests {
             webhooks: webhooks_svc,
             shares: shares_svc,
             artefact_cache,
+            state_files,
         };
         (state, users_store)
     }

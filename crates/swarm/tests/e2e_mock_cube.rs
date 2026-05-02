@@ -302,6 +302,11 @@ async fn full_walkthrough() {
         cache_dir.path().to_path_buf(),
         cipher_dir.clone(),
     ));
+    let state_files = Arc::new(dyson_swarm::state_files::StateFileService::new(
+        pool.clone(),
+        cache_dir.path().to_path_buf(),
+        cipher_dir.clone(),
+    ));
     std::mem::forget(cache_dir);
     let app_state = http::AppState {
         secrets: secrets_svc,
@@ -326,6 +331,7 @@ async fn full_walkthrough() {
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,
+        state_files,
     };
     // Stage 5 retired the legacy `admin-token` shared bearer; this e2e
     // exercises admin endpoints via `--dangerous-no-auth`, the same

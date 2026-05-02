@@ -24,6 +24,7 @@ pub mod runtime_migrations;
 pub mod secrets;
 pub mod shares;
 pub mod snapshots;
+pub mod state_files;
 pub mod tokens;
 pub mod users;
 pub mod webhooks;

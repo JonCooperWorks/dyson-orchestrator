@@ -46,6 +46,10 @@ impl SqlxTokenStore {
 /// operators inspecting the table directly.
 pub const INGEST_PROVIDER: &str = "ingest";
 
+/// Provider string stamped on rows minted via
+/// `TokenStore::mint_state_sync`.
+pub const STATE_SYNC_PROVIDER: &str = "state_sync";
+
 impl SqlxTokenStore {
     /// Common mint path — the prefix and provider are the only knobs
     /// the public surfaces (`mint` / `mint_ingest`) flex.  Both paths
@@ -91,6 +95,15 @@ impl TokenStore for SqlxTokenStore {
         // chat-provider tokens at the door and let operators grep the
         // table apart.
         self.mint_with_prefix("it_", instance_id, INGEST_PROVIDER)
+            .await
+    }
+
+    async fn mint_state_sync(&self, instance_id: &str) -> Result<String, StoreError> {
+        // `st_` prefix marks state-file mirror tokens (selected dyson
+        // files pushed from dyson → swarm). Same row layout as chat
+        // and artefact tokens; the prefix + provider act as an
+        // audience check at the internal state endpoint.
+        self.mint_with_prefix("st_", instance_id, STATE_SYNC_PROVIDER)
             .await
     }
 
@@ -352,6 +365,7 @@ mod tests {
         let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let chat = store.mint("i1", "openai").await.unwrap();
         let ingest = store.mint_ingest("i1").await.unwrap();
+        let state = store.mint_state_sync("i1").await.unwrap();
 
         store.revoke_for_instance("i1").await.unwrap();
         assert!(
@@ -362,21 +376,31 @@ mod tests {
             store.resolve(&ingest).await.unwrap().is_none(),
             "ingest token revoked"
         );
+        assert!(
+            store.resolve(&state).await.unwrap().is_none(),
+            "state token revoked"
+        );
     }
 
     #[tokio::test]
     async fn ingest_and_chat_tokens_are_distinguishable_after_mint() {
         // Token-prefix discrimination at the route layer relies on the
-        // `pt_` and `it_` prefixes never colliding.  Belt-and-braces
-        // assertion that mint and mint_ingest produce disjoint shapes.
+        // `pt_`, `it_`, and `st_` prefixes never colliding.  Belt-and-
+        // braces assertion that token kinds produce disjoint shapes.
         let pool = open_in_memory().await.unwrap();
         seed(&pool, "i1").await;
         let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         let pt = store.mint("i1", "openai").await.unwrap();
         let it = store.mint_ingest("i1").await.unwrap();
+        let st = store.mint_state_sync("i1").await.unwrap();
         assert!(pt.starts_with("pt_"));
         assert!(it.starts_with("it_"));
+        assert!(st.starts_with("st_"));
         assert_ne!(pt, it);
+        assert_ne!(pt, st);
+        assert_ne!(it, st);
+        let resolved = store.resolve(&st).await.unwrap().expect("present");
+        assert_eq!(resolved.provider, STATE_SYNC_PROVIDER);
     }
 
     #[tokio::test]

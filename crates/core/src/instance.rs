@@ -138,10 +138,19 @@ pub const ENV_INGEST_URL: &str = "SWARM_INGEST_URL";
 /// table so `revoke_for_instance` cleans them up together at destroy.
 pub const ENV_INGEST_TOKEN: &str = "SWARM_INGEST_TOKEN";
 
+/// Full URL the swarm-mode dyson's background state worker POSTs to
+/// when mirroring selected workspace/chat files back to swarm.
+pub const ENV_STATE_SYNC_URL: &str = "SWARM_STATE_SYNC_URL";
+/// Per-instance bearer the state worker stamps on state-file POSTs.
+/// Distinct prefix (`st_`) and provider (`state_sync`) from chat and
+/// artefact ingest tokens.
+pub const ENV_STATE_SYNC_TOKEN: &str = "SWARM_STATE_SYNC_TOKEN";
+
 /// Path the ingest URL appends to `self.proxy_base`.  Kept as a
 /// constant so the route mount in `http::internal_ingest::router`
 /// and the env exposure here can't drift.
 const INGEST_PATH: &str = "/v1/internal/ingest/artefact";
+const STATE_SYNC_PATH: &str = "/v1/internal/state/file";
 
 /// Comma-separated ordered fallback list of model ids.  First entry
 /// matches `SWARM_MODEL`; trailing entries let agents that support
@@ -347,6 +356,7 @@ fn managed_env(
     proxy_base: &str,
     proxy_token: &str,
     ingest_token: &str,
+    state_sync_token: &str,
     instance_id: &str,
     bearer: &str,
     name: &str,
@@ -358,6 +368,8 @@ fn managed_env(
     out.insert(ENV_PROXY_TOKEN.into(), proxy_token.to_owned());
     out.insert(ENV_INGEST_URL.into(), build_ingest_url(proxy_base));
     out.insert(ENV_INGEST_TOKEN.into(), ingest_token.to_owned());
+    out.insert(ENV_STATE_SYNC_URL.into(), build_state_sync_url(proxy_base));
+    out.insert(ENV_STATE_SYNC_TOKEN.into(), state_sync_token.to_owned());
     out.insert(ENV_INSTANCE_ID.into(), instance_id.to_owned());
     out.insert(ENV_BEARER_TOKEN.into(), bearer.to_owned());
     out.insert(ENV_NAME.into(), name.to_owned());
@@ -458,6 +470,15 @@ fn build_ingest_url(proxy_base: &str) -> String {
     // (`https://<host>`) and the strip is a no-op.
     let apex = trimmed.strip_suffix("/llm").unwrap_or(trimmed);
     format!("{apex}{INGEST_PATH}")
+}
+
+fn build_state_sync_url(proxy_base: &str) -> String {
+    let trimmed = proxy_base.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let apex = trimmed.strip_suffix("/llm").unwrap_or(trimmed);
+    format!("{apex}{STATE_SYNC_PATH}")
 }
 
 /// True when the network policy allows traffic to arbitrary public
@@ -576,6 +597,15 @@ pub struct ReconfigureBody {
     /// (legacy rows: dyson skips the push if the token is unset).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ingest_token: Option<String>,
+    /// Full URL the swarm-mode dyson's state mirror worker POSTs to.
+    /// Mirrors `SWARM_STATE_SYNC_URL`; pushed for the same warmup-env
+    /// freeze reason as `ingest_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_sync_url: Option<String>,
+    /// Per-instance `st_<32hex>` bearer for the state-file endpoint.
+    /// Mirrors `SWARM_STATE_SYNC_TOKEN`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_sync_token: Option<String>,
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
@@ -815,6 +845,32 @@ impl InstanceService {
                     continue;
                 }
             };
+            let state_sync_token = match self
+                .tokens
+                .lookup_by_instance_for_provider(&row.id, crate::db::tokens::STATE_SYNC_PROVIDER)
+                .await
+            {
+                Ok(Some(t)) => t,
+                Ok(None) => match self.tokens.mint_state_sync(&row.id).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(
+                            instance = %row.id,
+                            error = %e,
+                            "rewire-image-gen: state-sync token mint failed — skipping"
+                        );
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        instance = %row.id,
+                        error = %e,
+                        "rewire-image-gen: state-sync token lookup failed — skipping"
+                    );
+                    continue;
+                }
+            };
             // Re-render the mcp_servers block on every sweep so any
             // change to the proxied URL (e.g. swarm hostname rotation,
             // the `/llm` strip fix) propagates into running dysons
@@ -858,6 +914,11 @@ impl InstanceService {
                 // returns `skills_reset: false` and the JSON file
                 // doesn't get rewritten).
                 reset_skills: true,
+                state_sync_url: {
+                    let u = build_state_sync_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                state_sync_token: Some(state_sync_token),
                 mcp_servers,
                 ..Default::default()
             };
@@ -1260,6 +1321,14 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_ingest(&source.id).await?,
         };
+        let state_sync_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_state_sync(&source.id).await?,
+        };
         // Existing per-instance secrets pass straight through to the
         // new cube's env envelope — same shape `restore` uses.  Note
         // the SecretStore returns ciphertexts; we don't decrypt here.
@@ -1268,6 +1337,7 @@ impl InstanceService {
             &self.proxy_base,
             &proxy_token,
             &ingest_token,
+            &state_sync_token,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -1365,6 +1435,11 @@ impl InstanceService {
                     if u.is_empty() { None } else { Some(u) }
                 },
                 ingest_token: Some(ingest_token.clone()),
+                state_sync_url: {
+                    let u = build_state_sync_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                state_sync_token: Some(state_sync_token.clone()),
                 image_provider_name: self
                     .image_gen_defaults
                     .as_ref()
@@ -1485,11 +1560,20 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_ingest(&source.id).await?,
         };
+        let state_sync_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_state_sync(&source.id).await?,
+        };
         let existing = self.secrets.list(&source.id).await?;
         let managed = managed_env(
             &self.proxy_base,
             &proxy_token,
             &ingest_token,
+            &state_sync_token,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -1552,6 +1636,11 @@ impl InstanceService {
                     if u.is_empty() { None } else { Some(u) }
                 },
                 ingest_token: Some(ingest_token.clone()),
+                state_sync_url: {
+                    let u = build_state_sync_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                state_sync_token: Some(state_sync_token.clone()),
                 image_provider_name: self
                     .image_gen_defaults
                     .as_ref()
@@ -1663,11 +1752,20 @@ impl InstanceService {
             Some(t) => t,
             None => self.tokens.mint_ingest(&source.id).await?,
         };
+        let state_sync_token = match self
+            .tokens
+            .lookup_by_instance_for_provider(&source.id, crate::db::tokens::STATE_SYNC_PROVIDER)
+            .await?
+        {
+            Some(t) => t,
+            None => self.tokens.mint_state_sync(&source.id).await?,
+        };
         let existing = self.secrets.list(&source.id).await?;
         let managed = managed_env(
             &self.proxy_base,
             &proxy_token,
             &ingest_token,
+            &state_sync_token,
             &source.id,
             &source.bearer_token,
             &source.name,
@@ -1719,6 +1817,11 @@ impl InstanceService {
                     if u.is_empty() { None } else { Some(u) }
                 },
                 ingest_token: Some(ingest_token.clone()),
+                state_sync_url: {
+                    let u = build_state_sync_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                state_sync_token: Some(state_sync_token.clone()),
                 image_provider_name: self
                     .image_gen_defaults
                     .as_ref()
@@ -2117,6 +2220,7 @@ impl InstanceService {
         // in `proxy_tokens`.  Same revoke path (`revoke_for_instance`
         // at destroy) so we don't need a parallel cleanup hook.
         let ingest_token = self.tokens.mint_ingest(&id).await?;
+        let state_sync_token = self.tokens.mint_state_sync(&id).await?;
 
         // Persist MCP server records under the owner's cipher so the
         // proxy path can decrypt them per-request.  We do this BEFORE
@@ -2145,6 +2249,7 @@ impl InstanceService {
             &self.proxy_base,
             &proxy_token,
             &ingest_token,
+            &state_sync_token,
             &id,
             &bearer,
             &name,
@@ -2234,6 +2339,11 @@ impl InstanceService {
                     if u.is_empty() { None } else { Some(u) }
                 },
                 ingest_token: Some(ingest_token.clone()),
+                state_sync_url: {
+                    let u = build_state_sync_url(&self.proxy_base);
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                state_sync_token: Some(state_sync_token.clone()),
                 // Image-generation defaults — register the dedicated
                 // image provider entry and point the agent at it.  The
                 // same proxy_token authenticates against swarm's `/llm`
@@ -2898,6 +3008,7 @@ impl InstanceService {
         // a brand-new instance id and bearer, so a sibling token here
         // is a fresh row, not a reused one.
         let ingest_token = self.tokens.mint_ingest(&id).await?;
+        let state_sync_token = self.tokens.mint_state_sync(&id).await?;
 
         // Persist carried-over secrets early so they appear in the new
         // instance's `existing` rows on subsequent restarts. They also feed
@@ -2913,6 +3024,7 @@ impl InstanceService {
             &self.proxy_base,
             &proxy_token,
             &ingest_token,
+            &state_sync_token,
             &id,
             &bearer,
             &restored_name,
@@ -3380,6 +3492,22 @@ mod tests {
         let ingest_resolved = tokens.resolve(ingest_token).await.unwrap().unwrap();
         assert_eq!(ingest_resolved.instance_id, created.id);
         assert_eq!(ingest_resolved.provider, crate::db::tokens::INGEST_PROVIDER);
+        let state_sync_token = &captured.env[ENV_STATE_SYNC_TOKEN];
+        assert!(
+            state_sync_token.starts_with("st_"),
+            "state sync env carries an st_ token"
+        );
+        assert_eq!(state_sync_token.len(), 35);
+        assert_eq!(
+            captured.env[ENV_STATE_SYNC_URL],
+            "http://swarm.test:8080/v1/internal/state/file"
+        );
+        let state_resolved = tokens.resolve(state_sync_token).await.unwrap().unwrap();
+        assert_eq!(state_resolved.instance_id, created.id);
+        assert_eq!(
+            state_resolved.provider,
+            crate::db::tokens::STATE_SYNC_PROVIDER
+        );
 
         let row = instances.get(&created.id).await.unwrap().unwrap();
         assert_eq!(row.status, InstanceStatus::Live);
@@ -3403,6 +3531,7 @@ mod tests {
             "http://swarm:8080/llm",
             "tok",
             "ingest_tok",
+            "state_tok",
             "id",
             "bear",
             "n",
@@ -3423,6 +3552,7 @@ mod tests {
             "http://swarm:8080/llm",
             "tok",
             "ingest_tok",
+            "state_tok",
             "id",
             "bear",
             "n",
@@ -3438,6 +3568,7 @@ mod tests {
             "http://swarm:8080/llm",
             "tok",
             "ingest_tok",
+            "state_tok",
             "id",
             "bear",
             "n",
@@ -3458,6 +3589,7 @@ mod tests {
             "http://swarm:8080/llm",
             "tok",
             "ingest_tok",
+            "state_tok",
             "id",
             "bear",
             "n",
@@ -3477,6 +3609,7 @@ mod tests {
             "http://swarm:8080/llm",
             "tok",
             "ingest_tok",
+            "state_tok",
             "id",
             "bear",
             "n",
@@ -3501,6 +3634,7 @@ mod tests {
             "http://swarm.example/llm",
             "pt_chat",
             "it_ingest",
+            "st_state",
             "id",
             "bear",
             "n",
@@ -3511,6 +3645,11 @@ mod tests {
         assert_eq!(
             env[ENV_INGEST_URL],
             "http://swarm.example/v1/internal/ingest/artefact"
+        );
+        assert_eq!(env[ENV_STATE_SYNC_TOKEN], "st_state");
+        assert_eq!(
+            env[ENV_STATE_SYNC_URL],
+            "http://swarm.example/v1/internal/state/file"
         );
     }
 

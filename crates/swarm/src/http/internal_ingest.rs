@@ -330,6 +330,11 @@ mod tests {
             cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
         ));
+        let state_files = Arc::new(crate::state_files::StateFileService::new(
+            pool.clone(),
+            cache_dir.path().to_path_buf(),
+            cipher_dir.clone(),
+        ));
 
         // Seed the owner user (FK target for instances.owner_id),
         // then the instance row, then mint both token kinds.
@@ -399,6 +404,7 @@ mod tests {
             webhooks: webhooks_svc,
             shares: shares_svc,
             artefact_cache,
+            state_files,
         };
 
         // Spawn the router on an ephemeral port.

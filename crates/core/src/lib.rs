@@ -39,6 +39,8 @@ pub mod shares;
 #[cfg(feature = "full")]
 pub mod snapshot;
 #[cfg(feature = "full")]
+pub mod state_files;
+#[cfg(feature = "full")]
 pub mod traits;
 #[cfg(feature = "full")]
 pub mod ttl;

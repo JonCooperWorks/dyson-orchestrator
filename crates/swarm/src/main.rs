@@ -644,6 +644,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
     ));
+    let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
+        pool.clone(),
+        cfg.backup.local_cache_dir.clone(),
+        cipher_dir.clone(),
+    ));
 
     let app_state = http::AppState {
         secrets: secrets_svc,
@@ -673,6 +678,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,
+        state_files,
     };
     let app = http::router(app_state, auth, user_auth, llm_router, mcp_user_router);
 

@@ -442,6 +442,12 @@ pub trait TokenStore: Send + Sync {
     /// chat-provider tokens against the ingest endpoint by prefix.
     /// `revoke_for_instance` cleans these up alongside the chat token.
     async fn mint_ingest(&self, instance_id: &str) -> Result<String, StoreError>;
+    /// Mint a per-instance state-sync token (the bearer dyson stamps on
+    /// `POST /v1/internal/state/file`). It shares the `proxy_tokens`
+    /// table with chat and artefact ingest tokens, but uses an `st_`
+    /// prefix and `provider = "state_sync"` so the state endpoint can
+    /// reject tokens minted for any other audience.
+    async fn mint_state_sync(&self, instance_id: &str) -> Result<String, StoreError>;
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError>;
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError>;
     /// Revoke a single proxy_token by its plaintext value (B1).

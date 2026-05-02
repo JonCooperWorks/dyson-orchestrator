@@ -469,6 +469,11 @@ mod tests {
         ));
         let cache_dir = tempfile::tempdir().unwrap();
         let artefact_cache = Arc::new(crate::artefacts::ArtefactCacheService::new(
+            pool.clone(),
+            cache_dir.path().to_path_buf(),
+            cipher_dir.clone(),
+        ));
+        let state_files = Arc::new(crate::state_files::StateFileService::new(
             pool,
             cache_dir.path().to_path_buf(),
             cipher_dir.clone(),
@@ -500,6 +505,7 @@ mod tests {
             webhooks: webhooks_svc,
             shares: shares_svc,
             artefact_cache,
+            state_files,
         };
         // We don't return the upstream URL here; tests close over their
         // own variables.  The third return is kept stable for symmetry
