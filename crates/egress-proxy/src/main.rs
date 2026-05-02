@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use dyson_swarm::network_policy::NetworkPolicy;
+use dyson_swarm_core::network_policy::NetworkPolicy;
 
 const DEFAULT_POLICY_PATH: &str = "/run/dyson-egress/policies.json";
 const DEFAULT_LISTEN: &str = "192.168.0.1:3128";
@@ -716,7 +716,7 @@ fn boxed_incoming(body: Incoming) -> ProxyBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dyson_swarm::network_policy::DEFAULT_DENY_OUT;
+    use dyson_swarm_core::network_policy::DEFAULT_DENY_OUT;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn default_deny() -> Vec<Ipv4Cidr> {

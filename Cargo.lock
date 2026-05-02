@@ -718,7 +718,73 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "dyson-egress-proxy"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "dyson-swarm-core",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dyson-swarm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "dyson-swarm-core",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonwebtoken",
+ "libc",
+ "parking_lot",
+ "rand 0.8.6",
+ "reqwest",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "dyson-swarm-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dyson-swarm-core",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dyson-swarm-core"
 version = "0.1.0"
 dependencies = [
  "age",
@@ -727,22 +793,13 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "bytes",
- "clap",
- "futures",
  "hex",
  "hmac",
- "http-body-util",
- "hyper",
- "hyper-util",
- "jsonwebtoken",
- "libc",
  "parking_lot",
  "postcard",
  "pulldown-cmark",
  "rand 0.8.6",
  "reqwest",
- "rsa",
  "rust-s3",
  "serde",
  "serde_json",
@@ -754,7 +811,6 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

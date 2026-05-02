@@ -9,6 +9,17 @@ they form one Dyson, but each side ships independently — config and
 binary upgrade on different cadences, which is what motivates the
 operations note below.
 
+## Workspace Layout
+
+`dyson-swarm` is a Rust workspace with four intentionally coarse crates:
+
+| Crate | Binary/library | Responsibility |
+|---|---|---|
+| `crates/core` | `dyson_swarm_core` | Shared domain logic: config, DB stores, instances, snapshots, secrets, webhooks, shares, and network policy resolution. |
+| `crates/swarm` | `swarm`, `dyson_swarm` | The host HTTP server, SPA assets, auth middleware, and LLM/MCP proxy surface. |
+| `crates/cli` | `swarmctl` | Host-operator commands that touch the DB or call the server API. |
+| `crates/egress-proxy` | `dyson-egress-proxy` | The policy-aware HTTP/HTTPS sandbox egress proxy. Depends on `dyson_swarm_core` with default features disabled. |
+
 ## Operations
 
 ### Binary rotation
@@ -142,13 +153,13 @@ ranges stay denied.
 
 Some flows assume you already hold a bearer (the SPA mints user
 api-keys, the IdP issues admin JWTs).  When neither is reachable —
-fresh deploy, IdP outage, you're SSH-only on the host — the swarm
-binary mints an opaque user api-key directly through the DB +
+fresh deploy, IdP outage, you're SSH-only on the host — `swarmctl`
+mints an opaque user api-key directly through the DB +
 cipher, bypassing the HTTP surface entirely:
 
 ```sh
 sudo -u dyson-swarm env SWARM_MINT_API_KEY_OK=1 \
-  /usr/local/bin/swarm mint-api-key --label "ops-foo" <users.id>
+  /usr/local/bin/swarmctl mint-api-key --label "ops-foo" <users.id>
 ```
 
 Prints the plaintext token (e.g. `dy_…`) to stdout; capture it

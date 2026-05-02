@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "swarm",
+    name = "swarmctl",
     version,
     about = "Orchestrator for Dyson agents in CubeSandbox MicroVMs",
     disable_help_subcommand = true
@@ -53,9 +53,6 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run the HTTP server (default action when no subcommand is given).
-    Serve,
-
     /// Per-instance secret material.
     Secrets {
         #[command(subcommand)]
