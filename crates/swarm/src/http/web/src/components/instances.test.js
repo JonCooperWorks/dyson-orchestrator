@@ -84,7 +84,7 @@ describe('instance subpage rail routing', () => {
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
   });
 
-  test('offers a data tab back to the instance overview', () => {
+  test('offers an instance tab back to the instance overview', () => {
     const row = {
       id: 'a',
       name: 'Alpha',
@@ -113,9 +113,9 @@ describe('instance subpage rail routing', () => {
       ),
     );
 
-    const data = screen.getByRole('link', { name: 'data' });
-    expect(data).toHaveAttribute('href', '#/i/a');
-    expect(data).toHaveClass('btn-active');
+    const instance = screen.getByRole('link', { name: 'instance' });
+    expect(instance).toHaveAttribute('href', '#/i/a');
+    expect(instance).toHaveClass('btn-active');
   });
 
   test('does not highlight artefacts solely because shared links exist', async () => {

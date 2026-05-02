@@ -1771,7 +1771,7 @@ function InstanceDetail({ id, onNew, view }) {
             onClick={(e) => { if (busy) e.preventDefault(); }}
             title="instance data, runtime, snapshots, network, tools, secrets, and instructions"
           >
-            data
+            instance
           </a>
           <a
             className={`btn btn-ghost ${activeSection === 'edit' ? 'btn-active' : ''}`}
