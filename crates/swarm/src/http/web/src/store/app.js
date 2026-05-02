@@ -31,7 +31,7 @@ const initial = {
     byInstance: {},
   },
   // Per-instance share roster — same shape as webhooks.  Backs the
-  // all-artefacts button's shared count, artefact row highlights, and
+  // artefacts button's shared count, artefact row highlights, and
   // the shared-links panel.
   shares: {
     byInstance: {},

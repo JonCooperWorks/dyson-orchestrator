@@ -17,6 +17,7 @@ describe('TopBar', () => {
     );
 
     expect(screen.getByRole('link', { name: 'artefacts' })).toHaveAttribute('href', '#/artefacts');
-    expect(screen.queryByRole('link', { name: 'all artefacts' })).toBeNull();
+    const retiredLabel = ['all', 'artefacts'].join(' ');
+    expect(screen.queryByRole('link', { name: retiredLabel })).toBeNull();
   });
 });

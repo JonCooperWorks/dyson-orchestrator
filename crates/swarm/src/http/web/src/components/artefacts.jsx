@@ -121,7 +121,7 @@ function ArtefactsView({ backHref, subtitle, load, onSweep, showInstance, instan
     <Shell className={embedded ? 'instance-subpage instance-subpage-artefacts' : 'page page-edit page-artefacts'}>
       <header className={embedded ? 'subpage-header' : 'page-header'}>
         {embedded ? null : <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>}
-        <h1 className={embedded ? 'subpage-title' : 'page-title'}>all artefacts</h1>
+        <h1 className={embedded ? 'subpage-title' : 'page-title'}>artefacts</h1>
         <p className="page-sub muted">{subtitle}</p>
       </header>
 

@@ -1587,7 +1587,7 @@ function InstanceDetail({ id, onNew, view }) {
     if (!slot) return null;
     return slot.rows.filter(r => r.enabled).length;
   });
-  // Active share count for the all-artefacts button badge — same
+  // Active share count for the artefacts button badge — same
   // shape as the tasks badge.  Active = not revoked AND not expired.
   const activeShareCount = useAppState(s => {
     const slot = id ? s.shares.byInstance[id] : null;
@@ -1623,7 +1623,7 @@ function InstanceDetail({ id, onNew, view }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
-  // Shares list — fed into the all-artefacts button's count badge.  Same
+  // Shares list — fed into the artefacts button's count badge.  Same
   // pattern as webhooks above.
   React.useEffect(() => {
     if (!id) return;
@@ -1789,9 +1789,9 @@ function InstanceDetail({ id, onNew, view }) {
             href={`#/i/${encodeURIComponent(id)}/artefacts`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="all artefacts cached on swarm, with active shared links highlighted"
+            title="artefacts cached on swarm, with active shared links highlighted"
           >
-            all artefacts
+            artefacts
             {activeShareCount > 0
               ? <span className="btn-count-badge" aria-label={`${activeShareCount} active shared`}>{activeShareCount}</span>
               : null}

@@ -56,7 +56,7 @@ export function SharesPage({ instanceId }) {
     <main className="page page-edit page-artefacts">
       <header className="page-header">
         <a className="btn btn-ghost btn-sm" href={backHref}>← back</a>
-        <h1 className="page-title">all artefacts</h1>
+        <h1 className="page-title">artefacts</h1>
         <p className="page-sub muted">
           Artefact sharing now lives with the artefacts list, so cached outputs
           and active public links can be managed in one pass.
@@ -311,7 +311,7 @@ export function ShareAccessLogPage({ instanceId, jti, embedded = false }) {
   return (
     <Shell className={embedded ? 'instance-subpage page-share-log' : 'page page-edit page-share-log'}>
       <header className={embedded ? 'subpage-header' : 'page-header'}>
-        <a className="btn btn-ghost btn-sm" href={backHref}>← all artefacts</a>
+        <a className="btn btn-ghost btn-sm" href={backHref}>← artefacts</a>
         <h1 className={embedded ? 'subpage-title' : 'page-title'}>access log</h1>
         <p className="page-sub muted">
           <span>{filename}</span>
