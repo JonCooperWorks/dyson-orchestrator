@@ -1785,11 +1785,11 @@ function InstanceDetail({ id, onNew, view }) {
               : null}
           </a>
           <a
-            className={`btn btn-ghost ${activeShareCount > 0 ? 'btn-shared-active' : ''} ${activeSection === 'artefacts' ? 'btn-active' : ''}`}
+            className={`btn btn-ghost ${activeSection === 'artefacts' ? 'btn-active' : ''}`}
             href={`#/i/${encodeURIComponent(id)}/artefacts`}
             aria-disabled={busy}
             onClick={(e) => { if (busy) e.preventDefault(); }}
-            title="artefacts cached on swarm, with active shared links highlighted"
+            title="artefacts cached on swarm, with active shared links counted in the badge"
           >
             artefacts
             {activeShareCount > 0

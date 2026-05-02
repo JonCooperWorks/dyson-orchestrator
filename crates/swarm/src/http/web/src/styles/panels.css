@@ -552,14 +552,6 @@
 }
 .btn-danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-shared-active {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--fg);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.btn-shared-active:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
 .btn-active,
 .btn-active:hover {
   border-color: color-mix(in srgb, var(--accent) 58%, transparent);
