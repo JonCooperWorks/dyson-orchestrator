@@ -2703,35 +2703,25 @@ const DEFAULT_MCP_JSON_CONFIG = `{
 
 // ─── MCP servers panel (instance detail) ──────────────────────────
 //
-// Lives next to SecretsPanel.  The primary editor is a VS Code-style
-// JSON blob with exactly one server under `servers`; swarm validates
-// and seals that raw JSON, then renders only the hidden swarm proxy URL
-// into the dyson config.  The row list below remains the operational
-// surface for check/connect/tool allowlisting/removal.
+// Lives next to SecretsPanel.  Lists the MCP servers attached to one
+// instance, lets the user add / edit / delete / disconnect, and
+// kicks off OAuth flows in a new tab.  Remote HTTP/SSE servers keep
+// the original field-based flow; Docker stdio servers are added via
+// the VS Code-style JSON editor exposed only from Add -> CLI.
 
-function McpServersPanel({ instanceId, policyKind, disabled }) {
+export function McpServersPanel({ instanceId, policyKind, disabled }) {
   const { client } = useApi();
   const [rows, setRows] = React.useState(null);
   const [err, setErr] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
-  const [jsonText, setJsonText] = React.useState(DEFAULT_MCP_JSON_CONFIG);
-  const [jsonLoaded, setJsonLoaded] = React.useState(false);
-  const [jsonDirty, setJsonDirty] = React.useState(false);
+  // editing: null | { mode: 'new' } | { mode: 'edit', row }
+  // Edit-button path fetches the full URL before opening the modal.
+  const [editing, setEditing] = React.useState(null);
 
-  const refresh = React.useCallback(async ({ preserveJson = false } = {}) => {
+  const refresh = React.useCallback(async () => {
     try {
       const list = await client.listMcpServers(instanceId);
       setRows(Array.isArray(list) ? list : []);
-      if (!preserveJson) {
-        const ret = await client.getMcpJsonConfig(instanceId);
-        if (ret?.config) {
-          setJsonText(JSON.stringify(ret.config, null, 2));
-        } else {
-          setJsonText(DEFAULT_MCP_JSON_CONFIG);
-        }
-        setJsonLoaded(true);
-        setJsonDirty(false);
-      }
     } catch (e) {
       setErr(formatMcpPanelError(e, 'list'));
     }
@@ -2779,22 +2769,12 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
-  const saveJsonConfig = async () => {
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch (e) {
-      setErr({
-        title: 'Invalid MCP JSON',
-        body: e?.message || 'The configuration is not valid JSON.',
-        hint: 'Paste a single VS Code-style object with exactly one entry in servers.',
-      });
-      return;
-    }
+  const submitEdit = async (spec) => {
     setBusy(true); setErr(null);
     try {
-      await client.putMcpJsonConfig(instanceId, parsed);
+      await client.putMcpServer(instanceId, spec.name, { url: spec.url, auth: spec.auth });
       await refresh();
+      setEditing(null);
     } catch (e) {
       setErr(formatMcpPanelError(e, 'save'));
     } finally {
@@ -2802,14 +2782,34 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
     }
   };
 
-  const clearJsonConfig = async () => {
-    if (!confirm('clear the attached MCP server? the agent will stop seeing this tool set.')) return;
+  const submitCliJson = async (config) => {
     setBusy(true); setErr(null);
     try {
-      await client.deleteMcpJsonConfig(instanceId);
+      await client.putMcpJsonConfig(instanceId, config);
       await refresh();
+      setEditing(null);
     } catch (e) {
-      setErr(formatMcpPanelError(e, 'delete'));
+      setErr(formatMcpPanelError(e, 'save'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Edit-button path: fetch the FULL URL via getMcpServer (the listing
+  // strips query strings) so the modal pre-fills with whatever the
+  // operator originally saved.  Shows a transient busy state while
+  // the round-trip lands; on failure we fall back to the stripped row
+  // so the user can still edit (worst case: they re-paste the URL).
+  const openEdit = async (row) => {
+    if (row.server_type === 'cli') return;
+    setBusy(true); setErr(null);
+    try {
+      const detail = await client.getMcpServer(instanceId, row.name);
+      setEditing({ mode: 'edit', row: detail || row });
+    } catch (e) {
+      // Fall back to listing data -- better than blocking the edit.
+      console.warn('[swarm] mcp edit: getMcpServer failed', e);
+      setEditing({ mode: 'edit', row });
     } finally {
       setBusy(false);
     }
@@ -2822,35 +2822,19 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
         <div className="panel-actions">
           <button
             className="btn btn-sm"
-            onClick={saveJsonConfig}
-            disabled={disabled || busy || !jsonLoaded}
+            onClick={() => setEditing({ mode: 'new' })}
+            disabled={disabled || busy}
           >
-            save json
-          </button>
-          <button className="btn btn-ghost btn-sm" onClick={clearJsonConfig} disabled={disabled || busy}>
-            clear
+            add
           </button>
         </div>
       </div>
       {err ? <McpErrorNotice notice={err}/> : null}
       <p className="muted small">
-        Paste a VS Code-style MCP config with exactly one server. Swarm seals
-        the JSON with your key and only gives the agent a swarm proxy URL.
+        Swarm proxies every MCP request — the agent only sees a swarm URL,
+        never your upstream URL or its credentials. OAuth tokens land in
+        your encrypted user secret store and refresh transparently.
       </p>
-      <textarea
-        className="mcp-json-textarea"
-        value={jsonText}
-        onChange={e => {
-          setJsonText(e.target.value);
-          setJsonDirty(true);
-        }}
-        spellCheck={false}
-        disabled={disabled || busy}
-        aria-label="VS Code-style MCP JSON config"
-      />
-      {jsonDirty ? (
-        <p className="muted small mcp-json-dirty">unsaved MCP JSON changes</p>
-      ) : null}
       {rows === null ? (
         <p className="muted small">loading…</p>
       ) : rows.length === 0 ? (
@@ -2864,14 +2848,25 @@ function McpServersPanel({ instanceId, policyKind, disabled }) {
               instanceId={instanceId}
               policyKind={policyKind}
               busy={busy || disabled}
+              onEdit={r.server_type === 'cli' ? null : () => openEdit(r)}
               onConnect={() => connect(r.name)}
               onDisconnect={() => disconnect(r.name)}
               onRemove={() => remove(r.name)}
-              onCatalogUpdated={() => refresh({ preserveJson: true })}
+              onCatalogUpdated={() => refresh()}
             />
           ))}
         </ul>
       )}
+      {editing ? (
+        <McpServerEditModal
+          existingNames={(rows || []).map(r => r.name)}
+          initial={editing.mode === 'edit' ? editing.row : null}
+          onCancel={() => setEditing(null)}
+          onSubmit={submitEdit}
+          onSubmitJson={submitCliJson}
+          busy={busy}
+        />
+      ) : null}
     </section>
   );
 }
@@ -3044,7 +3039,42 @@ function McpServerRow({
   );
 }
 
-function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }) {
+export function parseMcpCliJsonConfig(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error(e?.message || 'The configuration is not valid JSON.');
+  }
+  const servers = parsed
+    && typeof parsed === 'object'
+    && !Array.isArray(parsed)
+    && parsed.servers
+    && typeof parsed.servers === 'object'
+    && !Array.isArray(parsed.servers)
+    ? parsed.servers
+    : null;
+  const names = servers ? Object.keys(servers) : [];
+  if (names.length !== 1) {
+    throw new Error('Paste a VS Code-style object with exactly one entry in servers.');
+  }
+  const server = servers[names[0]];
+  if (!server || typeof server !== 'object' || Array.isArray(server)) {
+    throw new Error('The server entry must be a JSON object.');
+  }
+  const serverType = typeof server.type === 'string'
+    ? server.type
+    : (server.url ? 'http' : 'stdio');
+  if (serverType !== 'stdio') {
+    throw new Error('CLI JSON must describe a stdio server. Use the remote MCP form for HTTP/SSE servers.');
+  }
+  if (typeof server.command !== 'string' || server.command.trim() !== 'docker') {
+    throw new Error('CLI stdio MCP support requires command: "docker".');
+  }
+  return parsed;
+}
+
+function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubmitJson, busy }) {
   // Initial row when editing carries `name`, `url`, `auth_kind` (no
   // tokens — those stay server-side).  Credential inputs pre-fill
   // with the static MCP_KEEP_TOKEN sentinel when the existing auth
@@ -3064,6 +3094,7 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }
   // shape matches: a false-positive mask reveals nothing.
   const hasExistingBearer = !isNew && initialAuthKind === 'bearer';
   const hasExistingOauthSecret = !isNew && initialAuthKind === 'oauth';
+  const [serverType, setServerType] = React.useState('remote');
   const [name, setName] = React.useState(initial?.name || '');
   const [url, setUrl] = React.useState(initial?.url || '');
   const [authKind, setAuthKind] = React.useState(initialAuthKind);
@@ -3077,6 +3108,8 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }
   const [authorizationUrl, setAuthorizationUrl] = React.useState('');
   const [tokenUrl, setTokenUrl] = React.useState('');
   const [registrationUrl, setRegistrationUrl] = React.useState('');
+  const [jsonText, setJsonText] = React.useState(DEFAULT_MCP_JSON_CONFIG);
+  const [jsonDirty, setJsonDirty] = React.useState(false);
   const [err, setErr] = React.useState(null);
 
   // Auth kind changed mid-edit → drop any "keep existing" sentinels.
@@ -3093,6 +3126,14 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }
   const submit = (e) => {
     e.preventDefault();
     setErr(null);
+    if (isNew && serverType === 'cli') {
+      try {
+        onSubmitJson(parseMcpCliJsonConfig(jsonText));
+      } catch (e) {
+        setErr(e?.message || 'The configuration is not valid JSON.');
+      }
+      return;
+    }
     const trimmed = (name || '').trim();
     if (!trimmed) { setErr('name is required'); return; }
     if (isNew && existingNames.includes(trimmed)) {
@@ -3136,132 +3177,171 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, busy }
           </button>
         </div>
         <form className="form modal-body" onSubmit={submit}>
-          <label className="field">
-            <span>name</span>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="linear"
-              disabled={!isNew /* server name is the storage key — immutable */}
-              autoFocus={isNew}
-              autoComplete="off"
-            />
-            {!isNew ? (
-              <span className="hint muted small">
-                Names are immutable — remove and re-add to rename.
-              </span>
-            ) : null}
-          </label>
-          <label className="field">
-            <span>URL</span>
-            <input
-              value={url}
-              onChange={e => setUrl(e.target.value)}
-              placeholder="https://api.linear.app/mcp"
-              autoComplete="off"
-            />
-          </label>
-          <label className="field">
-            <span>authentication</span>
-            <select value={authKind} onChange={e => setAuthKind(e.target.value)}>
-              <option value="none">none</option>
-              <option value="bearer">bearer token</option>
-              <option value="oauth">OAuth 2.1 (PKCE)</option>
-            </select>
-            {!isNew && initial.auth_kind !== authKind ? (
-              <span className="hint muted small">
-                Switching auth shape clears any stored OAuth tokens.
-              </span>
-            ) : null}
-          </label>
-          {authKind === 'bearer' ? (
+          {isNew ? (
             <label className="field">
-              <span>token</span>
-              <input
-                type="password"
-                value={token}
-                onChange={e => setToken(e.target.value)}
-                placeholder="lin_api_…"
-                autoComplete="off"
-              />
-              <span className="hint muted small">
-                Sealed in your user secret store. Leave the
-                <code className="byok-inline-code">{MCP_KEEP_TOKEN}</code>
-                placeholder to keep the existing token; replace it
-                to rotate.  Swarm never reads the value back.
-              </span>
+              <span>type</span>
+              <select
+                value={serverType}
+                onChange={e => setServerType(e.target.value)}
+                aria-label="MCP server type"
+              >
+                <option value="remote">remote HTTP/SSE</option>
+                <option value="cli">CLI</option>
+              </select>
             </label>
           ) : null}
-          {authKind === 'oauth' ? (
+          {isNew && serverType === 'cli' ? (
+            <>
+              <p className="muted small">
+                Paste a VS Code-style MCP config with exactly one stdio
+                server. Swarm seals the JSON with your key and only gives
+                the agent a swarm proxy URL.
+              </p>
+              <textarea
+                className="mcp-json-textarea"
+                value={jsonText}
+                onChange={e => {
+                  setJsonText(e.target.value);
+                  setJsonDirty(true);
+                }}
+                spellCheck={false}
+                disabled={busy}
+                aria-label="VS Code-style MCP JSON config"
+              />
+              {jsonDirty ? (
+                <p className="muted small mcp-json-dirty">unsaved MCP JSON changes</p>
+              ) : null}
+            </>
+          ) : (
             <>
               <label className="field">
-                <span>scopes</span>
+                <span>name</span>
                 <input
-                  value={scopes}
-                  onChange={e => setScopes(e.target.value)}
-                  placeholder="read write"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  placeholder="linear"
+                  disabled={!isNew /* server name is the storage key — immutable */}
+                  autoFocus={isNew}
+                  autoComplete="off"
+                />
+                {!isNew ? (
+                  <span className="hint muted small">
+                    Names are immutable — remove and re-add to rename.
+                  </span>
+                ) : null}
+              </label>
+              <label className="field">
+                <span>URL</span>
+                <input
+                  value={url}
+                  onChange={e => setUrl(e.target.value)}
+                  placeholder="https://api.linear.app/mcp"
                   autoComplete="off"
                 />
               </label>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm mcp-advanced-toggle"
-                onClick={() => setAdvanced(a => !a)}
-              >
-                {advanced ? '− hide advanced' : '+ advanced (DCR / endpoints)'}
-              </button>
-              {advanced ? (
-                <div className="mcp-advanced">
+              <label className="field">
+                <span>authentication</span>
+                <select value={authKind} onChange={e => setAuthKind(e.target.value)}>
+                  <option value="none">none</option>
+                  <option value="bearer">bearer token</option>
+                  <option value="oauth">OAuth 2.1 (PKCE)</option>
+                </select>
+                {!isNew && initial.auth_kind !== authKind ? (
+                  <span className="hint muted small">
+                    Switching auth shape clears any stored OAuth tokens.
+                  </span>
+                ) : null}
+              </label>
+              {authKind === 'bearer' ? (
+                <label className="field">
+                  <span>token</span>
+                  <input
+                    type="password"
+                    value={token}
+                    onChange={e => setToken(e.target.value)}
+                    placeholder="lin_api_…"
+                    autoComplete="off"
+                  />
+                  <span className="hint muted small">
+                    Sealed in your user secret store. Leave the
+                    <code className="byok-inline-code">{MCP_KEEP_TOKEN}</code>
+                    placeholder to keep the existing token; replace it
+                    to rotate.  Swarm never reads the value back.
+                  </span>
+                </label>
+              ) : null}
+              {authKind === 'oauth' ? (
+                <>
                   <label className="field">
-                    <span>client_id</span>
+                    <span>scopes</span>
                     <input
-                      value={clientId}
-                      onChange={e => setClientId(e.target.value)}
-                      placeholder="(empty = Dynamic Client Registration)"
+                      value={scopes}
+                      onChange={e => setScopes(e.target.value)}
+                      placeholder="read write"
                       autoComplete="off"
                     />
                   </label>
-                  <label className="field">
-                    <span>client_secret</span>
-                    <input
-                      type="password"
-                      value={clientSecret}
-                      onChange={e => setClientSecret(e.target.value)}
-                      placeholder="(only if your provider requires it)"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label className="field">
-                    <span>authorization_url</span>
-                    <input
-                      value={authorizationUrl}
-                      onChange={e => setAuthorizationUrl(e.target.value)}
-                      placeholder="(empty = .well-known discovery)"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label className="field">
-                    <span>token_url</span>
-                    <input
-                      value={tokenUrl}
-                      onChange={e => setTokenUrl(e.target.value)}
-                      placeholder="(empty = .well-known discovery)"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label className="field">
-                    <span>registration_url</span>
-                    <input
-                      value={registrationUrl}
-                      onChange={e => setRegistrationUrl(e.target.value)}
-                      placeholder="(only needed if discovery doesn't expose one)"
-                      autoComplete="off"
-                    />
-                  </label>
-                </div>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm mcp-advanced-toggle"
+                    onClick={() => setAdvanced(a => !a)}
+                  >
+                    {advanced ? '− hide advanced' : '+ advanced (DCR / endpoints)'}
+                  </button>
+                  {advanced ? (
+                    <div className="mcp-advanced">
+                      <label className="field">
+                        <span>client_id</span>
+                        <input
+                          value={clientId}
+                          onChange={e => setClientId(e.target.value)}
+                          placeholder="(empty = Dynamic Client Registration)"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label className="field">
+                        <span>client_secret</span>
+                        <input
+                          type="password"
+                          value={clientSecret}
+                          onChange={e => setClientSecret(e.target.value)}
+                          placeholder="(only if your provider requires it)"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label className="field">
+                        <span>authorization_url</span>
+                        <input
+                          value={authorizationUrl}
+                          onChange={e => setAuthorizationUrl(e.target.value)}
+                          placeholder="(empty = .well-known discovery)"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label className="field">
+                        <span>token_url</span>
+                        <input
+                          value={tokenUrl}
+                          onChange={e => setTokenUrl(e.target.value)}
+                          placeholder="(empty = .well-known discovery)"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label className="field">
+                        <span>registration_url</span>
+                        <input
+                          value={registrationUrl}
+                          onChange={e => setRegistrationUrl(e.target.value)}
+                          placeholder="(only needed if discovery doesn't expose one)"
+                          autoComplete="off"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                </>
               ) : null}
             </>
-          ) : null}
+          )}
           {err ? <div className="error">{err}</div> : null}
           <div className="modal-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>

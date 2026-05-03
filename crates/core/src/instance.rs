@@ -3052,10 +3052,10 @@ impl InstanceService {
         Ok(())
     }
 
-    /// Replace the instance's MCP attachment with exactly one
-    /// VS Code-style MCP JSON document.  The raw JSON is sealed on the
-    /// resulting entry so the SPA can round-trip the familiar config,
-    /// while dyson still receives only the hidden swarm proxy URL.
+    /// Add or replace exactly one MCP server from a VS Code-style MCP
+    /// JSON document.  The raw JSON is sealed on the resulting entry so
+    /// the SPA can round-trip the familiar config, while dyson still
+    /// receives only the hidden swarm proxy URL.
     pub async fn put_vscode_mcp_config(
         &self,
         owner_id: &str,
@@ -3074,20 +3074,21 @@ impl InstanceService {
         let (name, entry) =
             mcp_servers::entry_from_vscode_config(raw).map_err(SwarmError::BadRequest)?;
 
-        // One-server JSON editor semantics: replacing the document
-        // replaces the whole MCP set for the instance.
-        mcp_servers::forget_all(secrets, owner_id, id)
-            .await
-            .map_err(|e| SwarmError::Internal(format!("mcp forget: {e}")))?;
         mcp_servers::put(secrets, owner_id, id, &name, &entry)
             .await
             .map_err(|e| SwarmError::Internal(format!("mcp put: {e}")))?;
-        let idx = serde_json::to_vec(&vec![name])
-            .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
-        secrets
-            .put(owner_id, &mcp_servers::index_key(id), &idx)
+        let mut names = mcp_servers::list_names(secrets, owner_id, id)
             .await
-            .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+            .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
+        if !names.iter().any(|n| n == &name) {
+            names.push(name);
+            let idx = serde_json::to_vec(&names)
+                .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
+            secrets
+                .put(owner_id, &mcp_servers::index_key(id), &idx)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+        }
 
         if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
             tracing::warn!(error = %err, instance = %id, "mcp vscode put: sync_mcp_to_dyson failed (entry persisted)");
@@ -3096,8 +3097,8 @@ impl InstanceService {
     }
 
     /// Fetch the exact VS Code-style JSON previously saved through the
-    /// single-server editor.  Returns `None` for legacy MCP entries
-    /// created through the older per-field UI.
+    /// CLI add path.  Returns `None` when there is no raw JSON-backed
+    /// MCP entry on the instance.
     pub async fn get_vscode_mcp_config(
         &self,
         owner_id: &str,
@@ -3115,17 +3116,19 @@ impl InstanceService {
         let names = mcp_servers::list_names(secrets, owner_id, id)
             .await
             .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
-        let Some(name) = names.first() else {
-            return Ok(None);
-        };
-        let entry = mcp_servers::get(secrets, owner_id, id, name)
-            .await
-            .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
-        Ok(entry.and_then(|e| e.raw_vscode_config))
+        for name in names {
+            let entry = mcp_servers::get(secrets, owner_id, id, &name)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
+            if let Some(raw) = entry.and_then(|e| e.raw_vscode_config) {
+                return Ok(Some(raw));
+            }
+        }
+        Ok(None)
     }
 
-    /// Clear the single-server JSON config and push an empty MCP block
-    /// to the running dyson.
+    /// Clear the first raw JSON-backed MCP config entry and push the
+    /// resulting MCP block to the running dyson.
     pub async fn delete_vscode_mcp_config(
         &self,
         owner_id: &str,
@@ -3140,9 +3143,39 @@ impl InstanceService {
             .mcp_secrets
             .as_ref()
             .ok_or_else(|| SwarmError::PolicyDenied("mcp secrets store not configured".into()))?;
-        mcp_servers::forget_all(secrets, owner_id, id)
+        let names = mcp_servers::list_names(secrets, owner_id, id)
             .await
-            .map_err(|e| SwarmError::Internal(format!("mcp forget: {e}")))?;
+            .map_err(|e| SwarmError::Internal(format!("mcp list: {e}")))?;
+        let mut delete_name = None;
+        for name in &names {
+            let entry = mcp_servers::get(secrets, owner_id, id, name)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
+            if entry.and_then(|e| e.raw_vscode_config).is_some() {
+                delete_name = Some(name.clone());
+                break;
+            }
+        }
+        let Some(delete_name) = delete_name else {
+            return Ok(());
+        };
+        if let Err(err) = secrets
+            .delete(owner_id, &mcp_servers::entry_key(id, &delete_name))
+            .await
+        {
+            tracing::warn!(error = %err, instance = %id, server = %delete_name, "mcp vscode delete: row delete failed");
+        }
+        let names: Vec<String> = names.into_iter().filter(|n| n != &delete_name).collect();
+        if names.is_empty() {
+            let _ = secrets.delete(owner_id, &mcp_servers::index_key(id)).await;
+        } else {
+            let idx = serde_json::to_vec(&names)
+                .map_err(|e| SwarmError::Internal(format!("mcp index serialise: {e}")))?;
+            secrets
+                .put(owner_id, &mcp_servers::index_key(id), &idx)
+                .await
+                .map_err(|e| SwarmError::Internal(format!("mcp index put: {e}")))?;
+        }
         if let Err(err) = self.sync_mcp_to_dyson(owner_id, id).await {
             tracing::warn!(error = %err, instance = %id, "mcp vscode delete: sync_mcp_to_dyson failed");
         }
@@ -4803,6 +4836,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(names, vec!["linear"]);
+    }
+
+    #[tokio::test]
+    async fn put_vscode_mcp_config_adds_cli_without_replacing_remote_servers() {
+        let (svc, _cube, _tokens, _instances, recorder, user_secrets, owner) =
+            build_with_mcp_secrets().await;
+        let created = hire_minimal(&svc, &owner).await;
+        wait_for_pushes(&recorder, 1).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        svc.put_mcp_server(
+            &owner,
+            &created.id,
+            McpServerSpec {
+                name: "linear".into(),
+                url: "https://api.linear.app/mcp".into(),
+                auth: crate::mcp_servers::McpAuthSpec::None,
+                enabled_tools: None,
+            },
+        )
+        .await
+        .unwrap();
+        wait_for_pushes(&recorder, 1).await;
+        recorder.pushed.lock().unwrap().clear();
+
+        let raw = serde_json::json!({
+            "servers": {
+                "github": {
+                    "type": "stdio",
+                    "command": "docker",
+                    "args": ["run", "-i", "--rm", "ghcr.io/example/github-mcp"]
+                }
+            }
+        });
+        svc.put_vscode_mcp_config(&owner, &created.id, raw.clone())
+            .await
+            .unwrap();
+
+        wait_for_pushes(&recorder, 1).await;
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = pushed.last().unwrap();
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("put must push mcp_servers");
+        assert!(block.contains_key("linear"));
+        assert!(block.contains_key("github"));
+
+        let mut names = crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
+            .await
+            .unwrap();
+        names.sort();
+        assert_eq!(names, vec!["github", "linear"]);
+
+        let github = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "github")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(github.raw_vscode_config, Some(raw.clone()));
+        assert!(matches!(
+            github.runtime,
+            Some(crate::mcp_servers::McpRuntimeSpec::DockerStdio { .. })
+        ));
+        assert_eq!(
+            svc.get_vscode_mcp_config(&owner, &created.id)
+                .await
+                .unwrap(),
+            Some(raw)
+        );
     }
 
     #[tokio::test]

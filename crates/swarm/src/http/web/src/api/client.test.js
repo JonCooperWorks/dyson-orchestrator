@@ -73,6 +73,42 @@ describe('SwarmClient', () => {
     expect(url).toBe('/v1/instances/inst1/secrets/API%20KEY');
   });
 
+  test('remote MCP add/update uses the per-server API path', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.putMcpServer('inst/1', 'linear server', {
+      url: 'https://api.linear.app/mcp',
+      auth: { kind: 'none' },
+    });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/instances/inst%2F1/mcp/servers/linear%20server');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({
+      url: 'https://api.linear.app/mcp',
+      auth: { kind: 'none' },
+      enabled_tools: null,
+    });
+  });
+
+  test('CLI MCP JSON uses only the single-server config API path', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    const config = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '-i', '--rm', 'ghcr.io/example/github-mcp'],
+        },
+      },
+    };
+    await client.putMcpJsonConfig('inst/1', config);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/instances/inst%2F1/mcp/config');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual(config);
+  });
+
   test('204 No Content returns null instead of throwing on JSON parse', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(noContentResponse());
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });

@@ -825,6 +825,9 @@ fn html_escape(s: &str) -> String {
 struct ServerSummary {
     name: String,
     url: String,
+    /// `remote` for HTTP/SSE servers created through the field UI,
+    /// `cli` for Docker stdio servers created from VS Code-style JSON.
+    server_type: &'static str,
     auth_kind: &'static str,
     /// True when an OAuth flow has completed — surfaced so the UI can
     /// render a "connect" vs. "reconnect" button.
@@ -883,6 +886,7 @@ async fn list_servers(
             out.push(ServerSummary {
                 name,
                 url,
+                server_type: if e.runtime.is_some() { "cli" } else { "remote" },
                 auth_kind,
                 connected,
                 tools_catalog: e.tools_catalog,
@@ -943,6 +947,11 @@ async fn get_server(
     Ok(Json(ServerSummary {
         name,
         url: entry.url,
+        server_type: if entry.runtime.is_some() {
+            "cli"
+        } else {
+            "remote"
+        },
         auth_kind,
         connected,
         tools_catalog: entry.tools_catalog,

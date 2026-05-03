@@ -4,9 +4,9 @@
  * stable — the SPA is the only place an operator sees these
  * profiles, and a label change shouldn't sneak in via a refactor.
  */
-import { describe, expect, test, afterEach } from 'vitest';
+import { describe, expect, test, afterEach, vi } from 'vitest';
 import React from 'react';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import { ApiProvider } from '../hooks/useApi.jsx';
@@ -22,6 +22,7 @@ import {
   DEFAULT_POLICY_KIND,
   POLICY_OPTIONS,
   CubeProfilePicker,
+  McpServersPanel,
   findCubeProfile,
   InstancesView,
   instanceRailHref,
@@ -303,6 +304,127 @@ describe('CubeProfilePicker', () => {
   test('renders a single-tier deployment instead of hiding (drops the > 1 guard)', () => {
     render(h(CubeProfilePicker, { profiles: [PROFILES[1]], value: 'tpl-default', onChange: () => {} }));
     expect(screen.getByText('default')).toBeInTheDocument();
+  });
+});
+
+describe('McpServersPanel', () => {
+  const h = React.createElement;
+
+  function renderPanel(client, props = {}) {
+    return render(
+      h(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        h(McpServersPanel, {
+          instanceId: 'inst-1',
+          policyKind: 'nolocalnet',
+          disabled: false,
+          ...props,
+        }),
+      ),
+    );
+  }
+
+  test('remote add flow stays field-based and does not use the JSON config endpoint', async () => {
+    const calls = [];
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      putMcpServer: vi.fn(async (...args) => { calls.push(args); return { ok: true }; }),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    expect(screen.getByText('add mcp server')).toBeInTheDocument();
+    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('name'), { target: { value: 'linear' } });
+    fireEvent.change(screen.getByLabelText('URL'), { target: { value: 'https://api.linear.app/mcp' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putMcpServer).toHaveBeenCalledTimes(1));
+    expect(calls[0]).toEqual([
+      'inst-1',
+      'linear',
+      {
+        url: 'https://api.linear.app/mcp',
+        auth: { kind: 'none' },
+      },
+    ]);
+    expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+  });
+
+  test('CLI add path shows the JSON editor and saves through the single-server config API', async () => {
+    let rows = [];
+    const cliConfig = {
+      servers: {
+        github: {
+          type: 'stdio',
+          command: 'docker',
+          args: ['run', '-i', '--rm', 'ghcr.io/example/github-mcp'],
+        },
+      },
+    };
+    const client = {
+      listMcpServers: vi.fn(async () => rows),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(async () => {
+        rows = [{
+          name: 'github',
+          url: 'docker://ghcr.io/example/github-mcp',
+          server_type: 'cli',
+          auth_kind: 'none',
+          connected: true,
+        }];
+        return { ok: true };
+      }),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
+
+    const editor = screen.getByLabelText('VS Code-style MCP JSON config');
+    fireEvent.change(editor, { target: { value: JSON.stringify(cliConfig, null, 2) } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.putMcpJsonConfig).toHaveBeenCalledTimes(1));
+    expect(client.putMcpJsonConfig).toHaveBeenCalledWith('inst-1', cliConfig);
+    expect(client.putMcpServer).not.toHaveBeenCalled();
+    await screen.findByText('github');
+    expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+  });
+
+  test('CLI JSON editor rejects HTTP configs so remote servers stay on the remote API path', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
+    fireEvent.change(screen.getByLabelText('VS Code-style MCP JSON config'), {
+      target: {
+        value: JSON.stringify({
+          servers: {
+            linear: {
+              type: 'http',
+              url: 'https://api.linear.app/mcp',
+            },
+          },
+        }),
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    expect(await screen.findByText(/Use the remote MCP form/)).toBeInTheDocument();
+    expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+    expect(client.putMcpServer).not.toHaveBeenCalled();
   });
 });
 
