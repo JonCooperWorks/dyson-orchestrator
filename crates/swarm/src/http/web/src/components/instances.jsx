@@ -3200,13 +3200,10 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
                 server. Swarm seals the JSON with your key and only gives
                 the agent a swarm proxy URL.
               </p>
-              <pre className="mcp-json-example" aria-label="Example MCP JSON shape">
-                {MCP_JSON_CONFIG_EXAMPLE}
-              </pre>
               <textarea
                 className="mcp-json-textarea"
                 value={jsonText}
-                placeholder="Paste your VS Code MCP JSON here."
+                placeholder={MCP_JSON_CONFIG_EXAMPLE}
                 onChange={e => {
                   setJsonText(e.target.value);
                   setJsonDirty(true);

@@ -388,10 +388,9 @@ describe('McpServersPanel', () => {
 
     const editor = screen.getByLabelText('VS Code-style MCP JSON config');
     expect(editor).toHaveValue('');
-    expect(editor).toHaveAttribute('placeholder', 'Paste your VS Code MCP JSON here.');
-    const example = screen.getByLabelText('Example MCP JSON shape');
-    expect(example).toHaveTextContent('<container-image>');
-    expect(example).not.toHaveTextContent('ghcr.io/example/github-mcp');
+    expect(editor.getAttribute('placeholder')).toContain('<container-image>');
+    expect(editor.getAttribute('placeholder')).not.toContain('ghcr.io/example/github-mcp');
+    expect(screen.queryByLabelText('Example MCP JSON shape')).toBeNull();
     fireEvent.change(editor, { target: { value: JSON.stringify(cliConfig, null, 2) } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 

@@ -1664,16 +1664,6 @@
   tab-size: 2;
 }
 
-.mcp-json-example {
-  margin: 8px 0 0;
-  color: var(--fg-faint);
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  user-select: none;
-}
-
 .mcp-json-textarea::placeholder {
   color: var(--fg-faint);
 }
