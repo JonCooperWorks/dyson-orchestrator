@@ -1938,10 +1938,6 @@
 }
 .tasks-row-name:hover { text-decoration: underline; }
 
-.tasks-row-desc {
-  white-space: pre-wrap;
-}
-
 .tasks-row-url {
   display: flex;
   align-items: center;
@@ -2026,6 +2022,16 @@
   min-width: 0;
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 12px;
+}
+
+.task-instructions-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .deliveries-list {

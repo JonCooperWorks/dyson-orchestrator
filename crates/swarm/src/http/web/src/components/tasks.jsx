@@ -15,6 +15,9 @@
  */
 
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import {
@@ -41,8 +44,22 @@ const SCHEMES = [
   },
 ];
 
+const TASK_SLUG_RE = /^[a-z0-9_-]{1,64}$/;
+const TASK_MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
+const TASK_MARKDOWN_COMPONENTS = {
+  a: ({ node, ...props }) => (
+    <a {...props} target="_blank" rel="noopener noreferrer"/>
+  ),
+};
+
 function schemeLabel(s) {
   return SCHEMES.find(x => x.value === s)?.label || s;
+}
+
+function webhookUrlFor(instanceId, name) {
+  const slug = (name || '').trim();
+  if (!TASK_SLUG_RE.test(slug) || typeof window === 'undefined') return null;
+  return `${window.location.origin}/webhooks/${encodeURIComponent(instanceId)}/${encodeURIComponent(slug)}`;
 }
 
 // ─── List page ────────────────────────────────────────────────────
@@ -189,11 +206,6 @@ function TaskRow({ row, instanceId, onToggle, onDelete }) {
         </span>
         <span className="badge badge-warn small">{schemeLabel(row.auth_scheme)}</span>
       </div>
-      {row.description ? (
-        <div className="tasks-row-desc muted small">{row.description}</div>
-      ) : (
-        <div className="tasks-row-desc muted small"><em>no instructions</em></div>
-      )}
       <div className="tasks-row-url">
         <code className="mono-sm" title={fullUrl}>{fullUrl}</code>
         <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
@@ -318,9 +330,7 @@ function TaskForm({ instanceId, taskName }) {
     return <div className="muted">loading…</div>;
   }
 
-  const fullUrl = editing && typeof window !== 'undefined'
-    ? `${window.location.origin}/webhooks/${encodeURIComponent(instanceId)}/${encodeURIComponent(taskName)}`
-    : null;
+  const fullUrl = webhookUrlFor(instanceId, editing ? taskName : name);
 
   return (
     <div className="edit-stack">
@@ -330,6 +340,7 @@ function TaskForm({ instanceId, taskName }) {
           <label className="field">
             <span>name</span>
             <input
+              aria-label="name"
               value={name}
               onChange={e => setName(e.target.value.toLowerCase())}
               placeholder="github-deploy"
@@ -348,6 +359,11 @@ function TaskForm({ instanceId, taskName }) {
             <label className="field">
               <span>url</span>
               <UrlField value={fullUrl}/>
+              {!editing ? (
+                <small className="muted">
+                  Give this to the provider now, then paste the secret it gives you below before creating the task.
+                </small>
+              ) : null}
             </label>
           ) : null}
           <label className="field">
@@ -365,6 +381,12 @@ function TaskForm({ instanceId, taskName }) {
               with the payload that arrives.
             </small>
           </label>
+          {description.trim() ? (
+            <section className="task-instructions-preview" aria-label="instructions preview">
+              <div className="muted small">preview</div>
+              <TaskMarkdown markdown={description}/>
+            </section>
+          ) : null}
         </section>
 
         <section className="page-section">
@@ -456,6 +478,19 @@ function TaskForm({ instanceId, taskName }) {
   );
 }
 
+const TaskMarkdown = React.memo(function TaskMarkdown({ markdown }) {
+  return (
+    <div className="task-prose">
+      <ReactMarkdown
+        remarkPlugins={TASK_MARKDOWN_PLUGINS}
+        components={TASK_MARKDOWN_COMPONENTS}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
+});
+
 function UrlField({ value }) {
   const [copied, setCopied] = React.useState(false);
   const copy = async (e) => {
@@ -468,7 +503,7 @@ function UrlField({ value }) {
   };
   return (
     <div className="task-url-field">
-      <input value={value} readOnly className="mono-sm"/>
+      <input aria-label="url" value={value} readOnly className="mono-sm"/>
       <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
         {copied ? 'copied!' : 'copy'}
       </button>
