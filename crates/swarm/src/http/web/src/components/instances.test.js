@@ -387,6 +387,11 @@ describe('McpServersPanel', () => {
     fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
 
     const editor = screen.getByLabelText('VS Code-style MCP JSON config');
+    expect(editor).toHaveValue('');
+    expect(editor).toHaveAttribute('placeholder', 'Paste your VS Code MCP JSON here.');
+    const example = screen.getByLabelText('Example MCP JSON shape');
+    expect(example).toHaveTextContent('<container-image>');
+    expect(example).not.toHaveTextContent('ghcr.io/example/github-mcp');
     fireEvent.change(editor, { target: { value: JSON.stringify(cliConfig, null, 2) } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
@@ -395,6 +400,24 @@ describe('McpServersPanel', () => {
     expect(client.putMcpServer).not.toHaveBeenCalled();
     await screen.findByText('github');
     expect(screen.queryByLabelText('VS Code-style MCP JSON config')).toBeNull();
+  });
+
+  test('CLI add path does not submit the grey example when the editor is empty', async () => {
+    const client = {
+      listMcpServers: vi.fn().mockResolvedValue([]),
+      putMcpServer: vi.fn(),
+      putMcpJsonConfig: vi.fn(),
+    };
+    renderPanel(client);
+
+    await screen.findByText('no MCP servers attached.');
+    fireEvent.click(screen.getByRole('button', { name: 'add' }));
+    fireEvent.change(screen.getByLabelText('MCP server type'), { target: { value: 'cli' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    expect(await screen.findByText(/before saving/)).toBeInTheDocument();
+    expect(client.putMcpJsonConfig).not.toHaveBeenCalled();
+    expect(client.putMcpServer).not.toHaveBeenCalled();
   });
 
   test('CLI JSON editor rejects HTTP configs so remote servers stay on the remote API path', async () => {

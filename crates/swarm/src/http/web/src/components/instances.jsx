@@ -2691,12 +2691,12 @@ function McpErrorNotice({ notice, compact = false }) {
   );
 }
 
-const DEFAULT_MCP_JSON_CONFIG = `{
+const MCP_JSON_CONFIG_EXAMPLE = `{
   "servers": {
-    "github": {
+    "server-name": {
       "type": "stdio",
       "command": "docker",
-      "args": ["run", "-i", "--rm", "ghcr.io/example/github-mcp"]
+      "args": ["run", "-i", "--rm", "<container-image>"]
     }
   }
 }`;
@@ -3040,6 +3040,9 @@ function McpServerRow({
 }
 
 export function parseMcpCliJsonConfig(text) {
+  if (!text.trim()) {
+    throw new Error('Paste a VS Code-style MCP config before saving.');
+  }
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -3108,7 +3111,7 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
   const [authorizationUrl, setAuthorizationUrl] = React.useState('');
   const [tokenUrl, setTokenUrl] = React.useState('');
   const [registrationUrl, setRegistrationUrl] = React.useState('');
-  const [jsonText, setJsonText] = React.useState(DEFAULT_MCP_JSON_CONFIG);
+  const [jsonText, setJsonText] = React.useState('');
   const [jsonDirty, setJsonDirty] = React.useState(false);
   const [err, setErr] = React.useState(null);
 
@@ -3197,9 +3200,13 @@ function McpServerEditModal({ initial, existingNames, onCancel, onSubmit, onSubm
                 server. Swarm seals the JSON with your key and only gives
                 the agent a swarm proxy URL.
               </p>
+              <pre className="mcp-json-example" aria-label="Example MCP JSON shape">
+                {MCP_JSON_CONFIG_EXAMPLE}
+              </pre>
               <textarea
                 className="mcp-json-textarea"
                 value={jsonText}
+                placeholder="Paste your VS Code MCP JSON here."
                 onChange={e => {
                   setJsonText(e.target.value);
                   setJsonDirty(true);
