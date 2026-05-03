@@ -716,6 +716,8 @@ fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -
         "--cap-drop=ALL".to_string(),
         "--security-opt".to_string(),
         "no-new-privileges".to_string(),
+        "--network".to_string(),
+        "bridge".to_string(),
         "--memory=512m".to_string(),
         "--cpus=1".to_string(),
         "--pids-limit=256".to_string(),
@@ -724,7 +726,26 @@ fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -
         "--label".to_string(),
         format!("dyson.mcp.server={server_name}"),
     ];
-    out.extend(user_args.iter().skip(1).cloned());
+    out.extend(sanitized_docker_user_args(user_args));
+    out
+}
+
+fn sanitized_docker_user_args(user_args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 1usize;
+    while i < user_args.len() {
+        let arg = &user_args[i];
+        if arg == "--network" || arg == "--net" {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with("--network=") || arg.starts_with("--net=") {
+            i += 1;
+            continue;
+        }
+        out.push(arg.clone());
+        i += 1;
+    }
     out
 }
 
@@ -975,6 +996,26 @@ for line in sys.stdin:
         let value = parse_sse_jsonrpc_response(sse, Some("2")).unwrap();
         assert_eq!(value["id"], 2);
         assert!(value["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn docker_run_args_forces_bridge_network_and_strips_user_network_flags() {
+        let args = vec![
+            "run".to_string(),
+            "--network=bridge".to_string(),
+            "--net".to_string(),
+            "bridge".to_string(),
+            "example/mcp".to_string(),
+        ];
+        let out = docker_run_args(&args, "i-1", "stdio");
+        assert!(out.windows(2).any(|w| w == ["--network", "bridge"]));
+        assert_eq!(
+            out.iter().filter(|arg| arg.as_str() == "--network").count(),
+            1
+        );
+        assert!(!out.iter().any(|arg| arg == "--network=bridge"));
+        assert!(!out.iter().any(|arg| arg == "--net"));
+        assert!(out.iter().any(|arg| arg == "example/mcp"));
     }
 
     #[tokio::test]
