@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
                 .patch(update_instance),
         )
         .route("/v1/instances/:id/url", get(instance_url))
+        .route("/v1/instances/:id/skills", get(instance_skills))
         .route("/v1/instances/:id/probe", post(probe_instance))
         .route("/v1/instances/:id/change-network", post(change_network))
         .route("/v1/instances/:id/rotate-template", post(rotate_template))
@@ -537,6 +538,28 @@ async fn instance_url(
     Ok(Json(UrlView {
         url: format!("https://{sb}.{}", state.sandbox_domain),
     }))
+}
+
+async fn instance_skills(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::skill_inventory::SkillInventoryEntry>>, StatusCode> {
+    match state.instances.get(&caller.user_id, &id).await {
+        Ok(_) => {}
+        Err(e) => return Err(swarm_err_to_status(e)),
+    }
+    match crate::skill_inventory::list_instance_skills(state.state_files.as_ref(), &id).await {
+        Ok(skills) => Ok(Json(skills)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                instance = %id,
+                "instance skills: inventory derivation failed"
+            );
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 /// Public view of an instance — strips the bearer token (returned only at

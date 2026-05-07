@@ -37,6 +37,10 @@ pub mod secrets;
 #[cfg(feature = "full")]
 pub mod shares;
 #[cfg(feature = "full")]
+pub mod skill_inventory;
+#[cfg(feature = "full")]
+pub mod skill_marketplace;
+#[cfg(feature = "full")]
 pub mod snapshot;
 #[cfg(feature = "full")]
 pub mod state_files;

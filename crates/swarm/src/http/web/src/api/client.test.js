@@ -172,6 +172,21 @@ describe('SwarmClient', () => {
     expect(fetchImpl.mock.calls[5][1].method).toBe('POST');
   });
 
+  test('skill marketplace and inventory methods use skill routes', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse({ skills: [] })));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+
+    await client.listSkillMarketplaces();
+    await client.listMarketplaceSkills();
+    await client.listSkills();
+    await client.listInstanceSkills('inst/1');
+
+    expect(fetchImpl.mock.calls[0][0]).toBe('/v1/skill-marketplaces');
+    expect(fetchImpl.mock.calls[1][0]).toBe('/v1/skill-marketplaces/skills');
+    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/skills');
+    expect(fetchImpl.mock.calls[3][0]).toBe('/v1/instances/inst%2F1/skills');
+  });
+
   test('204 No Content returns null instead of throwing on JSON parse', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(noContentResponse());
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });

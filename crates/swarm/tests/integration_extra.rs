@@ -397,6 +397,12 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         shares: shares_svc,
         artefact_cache,
         state_files,
+        skill_marketplace: Arc::new(
+            dyson_swarm::skill_marketplace::SkillMarketplaceService::new(
+                dyson_swarm::skill_marketplace::SkillMarketplaceConfig::default(),
+                cache_dir.path().to_path_buf(),
+            ),
+        ),
         mcp_runtime_socket: None,
     };
     let app = http::router(

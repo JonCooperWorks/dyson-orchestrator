@@ -27,6 +27,8 @@ pub mod models;
 pub mod proxy_admin;
 pub mod share_public;
 pub mod shares;
+pub mod skill_marketplace;
+pub mod skills;
 pub mod snapshots;
 pub mod static_assets;
 pub mod webhooks;
@@ -118,6 +120,9 @@ pub struct AppState {
     /// Written by the internal state-sync endpoint with an `st_`
     /// per-instance bearer; bodies are encrypted before disk.
     pub state_files: crate::state_files::StateFiles,
+    /// Shared skill marketplace catalog. Swarm owns catalog ingestion;
+    /// Dyson instances install selected packages into their own workspaces.
+    pub skill_marketplace: Arc<crate::skill_marketplace::SkillMarketplaceService>,
     /// Unix socket for the MCP runtime helper. Instance destroy uses
     /// it to tell the helper to stop any Docker/stdout sessions keyed
     /// to the instance before the sealed MCP rows disappear.
@@ -199,6 +204,8 @@ pub fn router(
         .merge(webhooks::router(state.clone()))
         .merge(shares::router(state.clone()))
         .merge(instance_artefacts::router(state.clone()))
+        .merge(skill_marketplace::router(state.clone()))
+        .merge(skills::router(state.clone()))
         .merge(mcp_user_router)
         .layer(middleware::from_fn_with_state(
             user_auth.clone(),
@@ -223,6 +230,7 @@ pub fn router(
         .merge(instances::internal_router(state.clone()))
         .merge(internal_ingest::router(state.clone()))
         .merge(internal_state::router(state.clone()))
+        .merge(skill_marketplace::internal_router(state.clone()))
         .merge(webhooks::public_router(state.clone()))
         .merge(admin)
         .merge(tenant)
@@ -400,6 +408,10 @@ mod tests {
             shares: shares_svc,
             artefact_cache,
             state_files,
+            skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::new(
+                crate::skill_marketplace::SkillMarketplaceConfig::default(),
+                cache_dir.path().to_path_buf(),
+            )),
             mcp_runtime_socket: None,
         };
         (state, users_store)

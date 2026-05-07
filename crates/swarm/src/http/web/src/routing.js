@@ -3,6 +3,7 @@ const SPA_PATH_PREFIXES = [
   '/new',
   '/admin',
   '/keys',
+  '/skills',
   '/artifacts',
 ];
 

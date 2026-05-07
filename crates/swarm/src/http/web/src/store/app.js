@@ -207,6 +207,7 @@ export function removeShare(instanceId, jti) {
 //   #/i/<id>/artifacts…         → artifacts
 //   #/i/<id>/shares…            → shared links
 //   #/new                       → dedicated hire page (replaces the old CreateModal)
+//   #/skills                    → marketplace catalog + fleet skill inventory
 //   #/admin                     → admin (users, proxy tokens)
 //
 // Anything else falls back to the list.  Order matters: every
@@ -221,6 +222,7 @@ const SECTION_VIEW_NAMES = {
   mcp: 'instance-mcp',
   snapshots: 'instance-snapshots',
   runtime: 'instance-runtime',
+  skills: 'instance-skills',
 };
 
 export function parseHashView() {
@@ -289,6 +291,7 @@ export function parseHashView() {
   }
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };
   if (h.startsWith('#/keys')) return { name: 'byok', id: null };
+  if (h.startsWith('#/skills')) return { name: 'skills', id: null };
   if (h.startsWith('#/artifacts')) return { name: 'artifacts', id: null };
   return { name: 'instances', id: null };
 }

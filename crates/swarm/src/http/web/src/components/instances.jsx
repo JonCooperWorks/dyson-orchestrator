@@ -24,6 +24,7 @@ import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './t
 import { InstanceArtifactsPage, ArtifactPage } from './artifacts.jsx';
 import { MarkdownBody } from './markdown.jsx';
 import { ShareAccessLogPage } from './shares.jsx';
+import { SkillInventoryList } from './skills.jsx';
 
 // Links inside task markdown open in a new tab — the task pane is a
 // scratchpad, not a navigation target, and following a link in-place
@@ -80,6 +81,7 @@ export function instanceSectionFromView(view) {
     case 'instance-mcp': return 'mcp';
     case 'instance-snapshots': return 'snapshots';
     case 'instance-runtime': return 'runtime';
+    case 'instance-skills': return 'skills';
     case 'instance-tasks':
     case 'instance-task-new':
     case 'instance-task-edit':
@@ -107,6 +109,7 @@ export function sectionHref(id, section) {
     case 'mcp': return `#/i/${enc}/mcp`;
     case 'snapshots': return `#/i/${enc}/snapshots`;
     case 'runtime': return `#/i/${enc}/runtime`;
+    case 'skills': return `#/i/${enc}/skills`;
     case 'tasks': return `#/i/${enc}/tasks`;
     case 'artifacts': return `#/i/${enc}/artifacts`;
     default: return `#/i/${enc}`;
@@ -390,6 +393,7 @@ const TOOL_CATALOGUE = [
   { name: 'exploit_builder',            group: 'security' },
   { name: 'load_skill',                 group: 'skills' },
   { name: 'skill_create',               group: 'skills' },
+  { name: 'skill_marketplace',          group: 'skills' },
   { name: 'send_file',                  group: 'comm' },
   { name: 'export_conversation',        group: 'comm' },
   { name: 'planner',                    group: 'subagents' },
@@ -2410,6 +2414,7 @@ const DETAIL_SECTIONS = [
   { key: 'mcp', label: 'MCP' },
   { key: 'snapshots', label: 'snapshots' },
   { key: 'runtime', label: 'runtime' },
+  { key: 'skills', label: 'skills' },
   { key: 'tasks', label: 'webhooks' },
   { key: 'artifacts', label: 'artifacts' },
 ];
@@ -2727,6 +2732,8 @@ function DetailSectionBody({ view, instance, activeSection }) {
       return <SnapshotsPanel instanceId={instance.id} disabled={instance.status === 'destroyed'}/>;
     case 'runtime':
       return <RuntimeSection instance={instance}/>;
+    case 'skills':
+      return <SkillsSection instance={instance}/>;
     case 'tasks':
     case 'artifacts':
       return <InstanceAuxiliaryRoute view={view} instanceId={instance.id}/>;
@@ -2758,6 +2765,39 @@ function InstanceAuxiliaryRoute({ view, instanceId }) {
     default:
       return null;
   }
+}
+
+function SkillsSection({ instance }) {
+  const { client } = useApi();
+  const [rows, setRows] = React.useState(null);
+  const [err, setErr] = React.useState('');
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setRows(null);
+    setErr('');
+    client.listInstanceSkills(instance.id).then(list => {
+      if (!cancelled) setRows(Array.isArray(list) ? list : []);
+    }).catch(e => {
+      if (!cancelled) setErr(e?.detail || e?.message || 'skills load failed');
+    });
+    return () => { cancelled = true; };
+  }, [client, instance.id]);
+
+  return (
+    <section className="panel">
+      <div className="panel-title">skills</div>
+      {err ? <div className="error">{err}</div> : null}
+      {rows === null ? (
+        <p className="muted small">loading…</p>
+      ) : (
+        <SkillInventoryList rows={rows}/>
+      )}
+      <p className="muted small" style={{marginTop:12}}>
+        mirrored from this agent's workspace; installable marketplace skills live on the swarm skills page.
+      </p>
+    </section>
+  );
 }
 
 function SummarySection({ instance }) {

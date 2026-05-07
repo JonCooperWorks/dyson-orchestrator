@@ -15,6 +15,7 @@ import { InstancesView, NewInstancePage } from './instances.jsx';
 import { AdminView } from './admin.jsx';
 import { ByokView } from './byok.jsx';
 import { MyArtifactsPage } from './artifacts.jsx';
+import { SkillsPage } from './skills.jsx';
 
 export function App() {
   const view = useAppState(s => s.meta.view);
@@ -50,6 +51,7 @@ function renderView(view) {
     case 'instance-mcp':
     case 'instance-snapshots':
     case 'instance-runtime':
+    case 'instance-skills':
     case 'instance-tasks':
     case 'instance-task-new':
     case 'instance-task-edit':
@@ -64,6 +66,8 @@ function renderView(view) {
       return <NewInstancePage/>;
     case 'artifacts':
       return <MyArtifactsPage/>;
+    case 'skills':
+      return <SkillsPage/>;
     case 'admin':
     case 'admin-mcp-catalog-new':
     case 'admin-mcp-catalog-edit':

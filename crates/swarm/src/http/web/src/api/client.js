@@ -180,6 +180,27 @@ export class SwarmClient {
     return this._json('/v1/models', { headers: { Accept: 'application/json' } });
   }
 
+  // ─── Skills ─────────────────────────────────────────────────────
+
+  listSkillMarketplaces() {
+    return this._json('/v1/skill-marketplaces', { headers: { Accept: 'application/json' } });
+  }
+
+  listMarketplaceSkills() {
+    return this._json('/v1/skill-marketplaces/skills', { headers: { Accept: 'application/json' } });
+  }
+
+  listSkills() {
+    return this._json('/v1/skills', { headers: { Accept: 'application/json' } });
+  }
+
+  listInstanceSkills(instanceId) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/skills`,
+      { headers: { Accept: 'application/json' } },
+    );
+  }
+
   // ─── Per-instance webhooks ("tasks" in UI copy) ────────────────────
   //
   // Each row is `{ name, description, auth_scheme, enabled, has_secret,
