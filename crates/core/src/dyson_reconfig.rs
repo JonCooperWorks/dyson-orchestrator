@@ -16,7 +16,8 @@
 //! cube's network isolation: even an attacker who reaches the
 //! sandbox via cubeproxy can't reconfigure without the plaintext.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,61 @@ const CONFIGURE_HEADER: &str = "X-Swarm-Configure";
 /// methods.  The value isn't read — only the presence is checked
 /// (the gate is browser-CORS-shaped, not a token).
 const CSRF_HEADER: &str = "X-Dyson-CSRF";
+pub const ENV_CUBE_ROOT_CA: &str = "SWARM_CUBE_ROOT_CA";
+pub const DEFAULT_CUBE_ROOT_CA: &str = "/etc/dyson-swarm/cube-root-ca.pem";
+
+pub fn cube_root_ca_path_from_env() -> Option<PathBuf> {
+    cube_root_ca_path(
+        std::env::var_os(ENV_CUBE_ROOT_CA),
+        Path::new(DEFAULT_CUBE_ROOT_CA),
+    )
+}
+
+pub fn cube_root_ca_path(env_path: Option<OsString>, default_path: &Path) -> Option<PathBuf> {
+    env_path
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| default_path.is_file().then(|| default_path.to_path_buf()))
+}
+
+pub fn add_cube_root_ca(
+    mut builder: reqwest::ClientBuilder,
+    root_ca_path: Option<&Path>,
+    component: &str,
+) -> reqwest::ClientBuilder {
+    let Some(path) = root_ca_path else {
+        return builder;
+    };
+    match std::fs::read(path) {
+        Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
+            Ok(cert) => {
+                tracing::info!(
+                    component = %component,
+                    path = %path.display(),
+                    "trusting cube root CA"
+                );
+                builder = builder.add_root_certificate(cert);
+            }
+            Err(e) => {
+                tracing::error!(
+                    component = %component,
+                    path = %path.display(),
+                    error = %e,
+                    "cube root CA parse failed"
+                );
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                component = %component,
+                path = %path.display(),
+                error = %e,
+                "cube root CA read failed"
+            );
+        }
+    }
+    builder
+}
 
 #[derive(Debug, serde::Deserialize)]
 struct ConfigureResponse {
@@ -74,57 +130,63 @@ impl ConfigureResponse {
         if !self.ok {
             return Err("dyson configure response had ok=false".into());
         }
-        require_applied(
-            "models",
-            !body.models.is_empty(),
-            self.models_applied.or(self.models_updated),
-        )?;
-        require_applied(
-            "provider",
-            body.proxy_token.as_deref().is_some_and(|s| !s.is_empty())
-                || body.proxy_base.as_deref().is_some_and(|s| !s.is_empty())
-                || !body.models.is_empty(),
-            self.provider_applied.or(self.provider_updated),
-        )?;
-        require_applied(
-            "image_generation",
-            body.image_provider_name
-                .as_deref()
-                .is_some_and(|s| !s.is_empty())
-                || body.image_provider_block.is_some()
-                || body
-                    .image_generation_provider
-                    .as_deref()
-                    .is_some_and(|s| !s.is_empty())
-                || body
-                    .image_generation_model
-                    .as_deref()
-                    .is_some_and(|s| !s.is_empty()),
-            self.image_generation_applied
-                .or(self.image_generation_updated),
-        )?;
-        require_applied(
-            "skills",
-            body.reset_skills || body.tools.is_some(),
-            self.skills_applied.or(self.skills_reset),
-        )?;
-        require_applied(
-            "mcp_servers",
-            body.mcp_servers.is_some(),
-            self.mcp_servers_applied.or(self.mcp_servers_updated),
-        )?;
-        require_applied(
-            "ingest",
-            paired_runtime_target(&body.ingest_url, &body.ingest_token),
-            self.ingest_applied.or(self.ingest_updated),
-        )?;
-        require_applied(
-            "state_sync",
-            paired_runtime_target(&body.state_sync_url, &body.state_sync_token),
-            self.state_sync_applied.or(self.state_sync_updated),
-        )?;
+        for (label, requested, observed) in [
+            (
+                "models",
+                !body.models.is_empty(),
+                self.models_applied.or(self.models_updated),
+            ),
+            (
+                "provider",
+                provider_requested(body),
+                self.provider_applied.or(self.provider_updated),
+            ),
+            (
+                "image_generation",
+                image_generation_requested(body),
+                self.image_generation_applied
+                    .or(self.image_generation_updated),
+            ),
+            (
+                "skills",
+                body.reset_skills || body.tools.is_some(),
+                self.skills_applied.or(self.skills_reset),
+            ),
+            (
+                "mcp_servers",
+                body.mcp_servers.is_some(),
+                self.mcp_servers_applied.or(self.mcp_servers_updated),
+            ),
+            (
+                "ingest",
+                paired_runtime_target(&body.ingest_url, &body.ingest_token),
+                self.ingest_applied.or(self.ingest_updated),
+            ),
+            (
+                "state_sync",
+                paired_runtime_target(&body.state_sync_url, &body.state_sync_token),
+                self.state_sync_applied.or(self.state_sync_updated),
+            ),
+        ] {
+            require_applied(label, requested, observed)?;
+        }
         Ok(())
     }
+}
+
+fn has_text(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|s| !s.is_empty())
+}
+
+fn provider_requested(body: &ReconfigureBody) -> bool {
+    !body.models.is_empty() || has_text(&body.proxy_token) || has_text(&body.proxy_base)
+}
+
+fn image_generation_requested(body: &ReconfigureBody) -> bool {
+    has_text(&body.image_provider_name)
+        || body.image_provider_block.is_some()
+        || has_text(&body.image_generation_provider)
+        || has_text(&body.image_generation_model)
 }
 
 fn paired_runtime_target(url: &Option<String>, token: &Option<String>) -> bool {
@@ -179,14 +241,8 @@ impl DysonReconfigurerHttp {
         sandbox_domain: impl Into<String>,
         system_secrets: Arc<SystemSecretsService>,
     ) -> Result<Self, reqwest::Error> {
-        let root_ca = std::env::var("SWARM_CUBE_ROOT_CA")
-            .ok()
-            .filter(|path| !path.is_empty());
-        Self::new_with_root_ca_path(
-            sandbox_domain,
-            system_secrets,
-            root_ca.as_deref().map(Path::new),
-        )
+        let root_ca_path = cube_root_ca_path_from_env();
+        Self::new_with_root_ca_path(sandbox_domain, system_secrets, root_ca_path.as_deref())
     }
 
     pub fn new_with_root_ca_path(
@@ -194,23 +250,11 @@ impl DysonReconfigurerHttp {
         system_secrets: Arc<SystemSecretsService>,
         root_ca_path: Option<&Path>,
     ) -> Result<Self, reqwest::Error> {
-        let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15));
-        if let Some(path) = root_ca_path {
-            match std::fs::read(path) {
-                Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
-                    Ok(cert) => {
-                        tracing::info!(path = %path.display(), "reconfigurer: trusting cube root CA");
-                        b = b.add_root_certificate(cert);
-                    }
-                    Err(e) => {
-                        tracing::error!(path = %path.display(), error = %e, "reconfigurer: parse PEM failed")
-                    }
-                },
-                Err(e) => {
-                    tracing::error!(path = %path.display(), error = %e, "reconfigurer: read PEM failed")
-                }
-            }
-        }
+        let b = add_cube_root_ca(
+            reqwest::Client::builder().timeout(Duration::from_secs(15)),
+            root_ca_path,
+            "reconfigurer",
+        );
         Ok(Self {
             http: b.build()?,
             sandbox_domain: sandbox_domain.into(),
@@ -609,6 +653,44 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "forget_secret must wipe the sealed plaintext"
+        );
+    }
+
+    #[test]
+    fn cube_root_ca_prefers_explicit_env_path() {
+        let path = PathBuf::from("/tmp/custom-cube-root-ca.pem");
+        assert_eq!(
+            cube_root_ca_path(
+                Some(path.clone().into_os_string()),
+                Path::new("/no/such/file")
+            ),
+            Some(path)
+        );
+    }
+
+    #[test]
+    fn cube_root_ca_uses_existing_default_path_when_env_missing() {
+        let default = std::env::temp_dir().join(format!(
+            "swarm-root-ca-{}-{}.pem",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&default, "test pem").unwrap();
+
+        let got = cube_root_ca_path(None, &default);
+
+        let _ = std::fs::remove_file(&default);
+        assert_eq!(got, Some(default));
+    }
+
+    #[test]
+    fn cube_root_ca_ignores_empty_env_and_missing_default() {
+        assert_eq!(
+            cube_root_ca_path(Some(OsString::new()), Path::new("/no/such/file")),
+            None
         );
     }
 

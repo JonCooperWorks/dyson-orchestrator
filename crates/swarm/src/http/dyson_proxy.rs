@@ -627,31 +627,16 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 /// on; the only thing changing is which CAs the client treats as
 /// authoritative for cubeproxy's hostnames.
 pub fn build_client() -> Result<reqwest::Client, reqwest::Error> {
-    let mut b = reqwest::Client::builder()
+    let b = reqwest::Client::builder()
         // This client is for host-side cubeproxy traffic only: the
         // reverse proxy, webhooks, and artefact fetches must not inherit
         // a host HTTP_PROXY/HTTPS_PROXY and loop through sandbox egress.
         .no_proxy()
         .timeout(Duration::from_secs(30 * 60))
         .pool_idle_timeout(Duration::from_secs(60));
-    if let Ok(path) = std::env::var("SWARM_CUBE_ROOT_CA")
-        && !path.is_empty()
-    {
-        match std::fs::read(&path) {
-            Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
-                Ok(cert) => {
-                    tracing::info!(path = %path, "dyson_proxy: trusting cube root CA");
-                    b = b.add_root_certificate(cert);
-                }
-                Err(e) => {
-                    tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to parse PEM")
-                }
-            },
-            Err(e) => {
-                tracing::error!(path = %path, error = %e, "SWARM_CUBE_ROOT_CA: failed to read")
-            }
-        }
-    }
+    let root_ca = dyson_swarm_core::dyson_reconfig::cube_root_ca_path_from_env();
+    let b =
+        dyson_swarm_core::dyson_reconfig::add_cube_root_ca(b, root_ca.as_deref(), "dyson_proxy");
     b.build()
 }
 
