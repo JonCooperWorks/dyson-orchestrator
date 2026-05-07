@@ -1648,6 +1648,10 @@ struct ServerSummary {
     /// `None` ⇒ admin hasn't run a check yet (UI shows "not connected").
     #[serde(skip_serializing_if = "Option::is_none")]
     tools_catalog: Option<McpToolsCatalog>,
+    /// Cached failure from the most recent /check call. Persisted so
+    /// a page refresh keeps showing a broken server as broken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_check_error: Option<mcp_servers::McpCheckError>,
     /// Admin-selected tool allowlist.  Mirrors the built-in tools
     /// section: `None` ⇒ "use default" (SPA applies airgap rule on
     /// prefill); `Some(vec)` ⇒ explicit allowlist.
@@ -1743,6 +1747,7 @@ async fn list_servers(
                 auth_kind,
                 connected,
                 tools_catalog: e.tools_catalog,
+                last_check_error: e.last_check_error,
                 enabled_tools: e.enabled_tools,
             });
         }
@@ -1812,6 +1817,7 @@ async fn get_server(
         auth_kind,
         connected,
         tools_catalog: entry.tools_catalog,
+        last_check_error: entry.last_check_error,
         enabled_tools: entry.enabled_tools,
     }))
 }
@@ -2099,6 +2105,15 @@ async fn check_server(
     let catalog = match run_tools_list(&svc, &instance_id, &name, &entry).await {
         Ok(c) => c,
         Err(err) => {
+            entry.last_check_error = Some(mcp_servers::McpCheckError {
+                message: err.to_string(),
+                checked_at: crate::now_secs(),
+            });
+            if let Err(write_err) =
+                mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await
+            {
+                tracing::warn!(error = %write_err, "mcp: failed to persist check error");
+            }
             tracing::warn!(
                 error = %err,
                 domain = %crate::mcp_servers::domain_of(&entry.url),
@@ -2113,6 +2128,7 @@ async fn check_server(
     };
 
     entry.tools_catalog = Some(catalog.clone());
+    entry.last_check_error = None;
     if let Err(e) =
         mcp_servers::put(&svc.user_secrets, &owner_id, &instance_id, &name, &entry).await
     {
@@ -2777,6 +2793,7 @@ mod tests {
             raw_vscode_config: None,
             oauth_tokens: None,
             tools_catalog: None,
+            last_check_error: None,
             enabled_tools: None,
         };
         restart_runtime_server(Some(&socket), "i-1", "brave", &entry)

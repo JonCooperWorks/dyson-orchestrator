@@ -112,6 +112,11 @@ pub struct McpServerEntry {
     /// doesn't depend on this for filtering — it only steers the SPA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_catalog: Option<McpToolsCatalog>,
+    /// Most recent check failure, persisted so a reload of the UI does
+    /// not turn a broken MCP server back into an ambiguous "not checked"
+    /// state.  Cleared on the next successful check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check_error: Option<McpCheckError>,
     /// Admin-selected subset of tool names.  Mirrors the built-in
     /// tools allowlist: `None` ⇒ "use default" (proxy passes tools/list
     /// through unfiltered — the SPA applies the airgap rule when
@@ -221,6 +226,12 @@ pub struct McpToolsCatalog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpCheckError {
+    pub message: String,
+    pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpToolSummary {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +286,7 @@ impl McpServerEntry {
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
+                last_check_error: None,
                 enabled_tools,
             },
         )
@@ -336,6 +348,7 @@ pub fn entry_from_vscode_config(
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
+                last_check_error: None,
                 enabled_tools: None,
             }
         }
@@ -365,6 +378,7 @@ pub fn entry_from_vscode_config(
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
+                last_check_error: None,
                 enabled_tools: None,
             }
         }
@@ -1996,6 +2010,7 @@ mod tests {
             raw_vscode_config: None,
             oauth_tokens: None,
             tools_catalog: None,
+            last_check_error: None,
             enabled_tools: None,
         };
         let supplied = BTreeMap::from([("github_token".into(), MCP_KEEP_TOKEN.into())]);

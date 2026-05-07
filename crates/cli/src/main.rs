@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -247,14 +248,18 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
         system_secrets_store,
         cipher_dir,
     ));
-    let reconfigurer =
-        match DysonReconfigurerHttp::new(cfg.cube.sandbox_domain.clone(), system_secrets) {
-            Ok(r) => r,
-            Err(err) => {
-                eprintln!("reconfigurer init: {err}");
-                return ExitCode::from(2);
-            }
-        };
+    let root_ca_path = cube_root_ca_path_for_cli();
+    let reconfigurer = match DysonReconfigurerHttp::new_with_root_ca_path(
+        cfg.cube.sandbox_domain.clone(),
+        system_secrets,
+        root_ca_path.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("reconfigurer init: {err}");
+            return ExitCode::from(2);
+        }
+    };
     match reconfigurer.get_skills(&id, &sandbox_id).await {
         Ok(v) => {
             println!(
@@ -268,6 +273,20 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn cube_root_ca_path_for_cli() -> Option<PathBuf> {
+    cube_root_ca_path_from(
+        std::env::var_os("SWARM_CUBE_ROOT_CA"),
+        Path::new("/etc/dyson-swarm/cube-root-ca.pem"),
+    )
+}
+
+fn cube_root_ca_path_from(env_path: Option<OsString>, default_path: &Path) -> Option<PathBuf> {
+    env_path
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| default_path.is_file().then(|| default_path.to_path_buf()))
 }
 
 struct OpsServices {
@@ -798,5 +817,45 @@ async fn run_restore(
             eprintln!("error: {err:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cube_root_ca_prefers_explicit_env_path() {
+        let path = PathBuf::from("/tmp/custom-cube-root-ca.pem");
+        assert_eq!(
+            cube_root_ca_path_from(Some(OsString::from(&path)), Path::new("/no/such/file")),
+            Some(path)
+        );
+    }
+
+    #[test]
+    fn cube_root_ca_uses_existing_default_path_when_env_missing() {
+        let default = std::env::temp_dir().join(format!(
+            "swarmctl-root-ca-{}-{}.pem",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&default, "test pem").unwrap();
+
+        let got = cube_root_ca_path_from(None, &default);
+
+        let _ = std::fs::remove_file(&default);
+        assert_eq!(got, Some(default));
+    }
+
+    #[test]
+    fn cube_root_ca_ignores_empty_env_and_missing_default() {
+        assert_eq!(
+            cube_root_ca_path_from(Some(OsString::new()), Path::new("/no/such/file")),
+            None
+        );
     }
 }

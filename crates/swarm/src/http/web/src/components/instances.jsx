@@ -3709,12 +3709,20 @@ function McpServerRow({
   const initialCatalog = row.tools_catalog || null;
   const [catalog, setCatalog] = React.useState(initialCatalog);
   const [checking, setChecking] = React.useState(false);
-  const [checkErr, setCheckErr] = React.useState(null);
+  const [checkErr, setCheckErr] = React.useState(
+    row.last_check_error?.message
+      ? formatMcpPanelError(row.last_check_error.message, 'check')
+      : null
+  );
   // Reset state when the row's identity changes (e.g. parent refresh).
   React.useEffect(() => {
     setCatalog(row.tools_catalog || null);
-    setCheckErr(null);
-  }, [row.name, row.tools_catalog]);
+    setCheckErr(
+      row.last_check_error?.message
+        ? formatMcpPanelError(row.last_check_error.message, 'check')
+        : null
+    );
+  }, [row.name, row.tools_catalog, row.last_check_error?.message]);
 
   // Selection state.  `null` ⇒ "use default" — the airgap rule then
   // determines what the picker shows ticked (mirrors the built-in

@@ -16,6 +16,7 @@
 //! cube's network isolation: even an attacker who reaches the
 //! sandbox via cubeproxy can't reconfigure without the plaintext.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,114 @@ const CONFIGURE_HEADER: &str = "X-Swarm-Configure";
 /// methods.  The value isn't read — only the presence is checked
 /// (the gate is browser-CORS-shaped, not a token).
 const CSRF_HEADER: &str = "X-Dyson-CSRF";
+
+#[derive(Debug, serde::Deserialize)]
+struct ConfigureResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    models_updated: Option<bool>,
+    #[serde(default)]
+    models_applied: Option<bool>,
+    #[serde(default)]
+    provider_updated: Option<bool>,
+    #[serde(default)]
+    provider_applied: Option<bool>,
+    #[serde(default)]
+    image_generation_updated: Option<bool>,
+    #[serde(default)]
+    image_generation_applied: Option<bool>,
+    #[serde(default)]
+    skills_reset: Option<bool>,
+    #[serde(default)]
+    skills_applied: Option<bool>,
+    #[serde(default)]
+    mcp_servers_updated: Option<bool>,
+    #[serde(default)]
+    mcp_servers_applied: Option<bool>,
+    #[serde(default)]
+    ingest_updated: Option<bool>,
+    #[serde(default)]
+    ingest_applied: Option<bool>,
+    #[serde(default)]
+    state_sync_updated: Option<bool>,
+    #[serde(default)]
+    state_sync_applied: Option<bool>,
+}
+
+impl ConfigureResponse {
+    fn validate_against(&self, body: &ReconfigureBody) -> Result<(), String> {
+        if !self.ok {
+            return Err("dyson configure response had ok=false".into());
+        }
+        require_applied(
+            "models",
+            !body.models.is_empty(),
+            self.models_applied.or(self.models_updated),
+        )?;
+        require_applied(
+            "provider",
+            body.proxy_token.as_deref().is_some_and(|s| !s.is_empty())
+                || body.proxy_base.as_deref().is_some_and(|s| !s.is_empty())
+                || !body.models.is_empty(),
+            self.provider_applied.or(self.provider_updated),
+        )?;
+        require_applied(
+            "image_generation",
+            body.image_provider_name
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+                || body.image_provider_block.is_some()
+                || body
+                    .image_generation_provider
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty())
+                || body
+                    .image_generation_model
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty()),
+            self.image_generation_applied
+                .or(self.image_generation_updated),
+        )?;
+        require_applied(
+            "skills",
+            body.reset_skills || body.tools.is_some(),
+            self.skills_applied.or(self.skills_reset),
+        )?;
+        require_applied(
+            "mcp_servers",
+            body.mcp_servers.is_some(),
+            self.mcp_servers_applied.or(self.mcp_servers_updated),
+        )?;
+        require_applied(
+            "ingest",
+            paired_runtime_target(&body.ingest_url, &body.ingest_token),
+            self.ingest_applied.or(self.ingest_updated),
+        )?;
+        require_applied(
+            "state_sync",
+            paired_runtime_target(&body.state_sync_url, &body.state_sync_token),
+            self.state_sync_applied.or(self.state_sync_updated),
+        )?;
+        Ok(())
+    }
+}
+
+fn paired_runtime_target(url: &Option<String>, token: &Option<String>) -> bool {
+    matches!(
+        (url.as_deref(), token.as_deref()),
+        (Some(u), Some(t)) if (!u.is_empty() && !t.is_empty()) || (u.is_empty() && t.is_empty())
+    )
+}
+
+fn require_applied(label: &str, requested: bool, observed: Option<bool>) -> Result<(), String> {
+    if requested && observed != Some(true) {
+        return Err(format!(
+            "dyson configure did not apply requested {label} block (observed={observed:?})"
+        ));
+    }
+    Ok(())
+}
 
 /// HTTP reconfigurer.  Holds the cube-trusted reqwest client + the
 /// SystemSecretsService for sealing/recovering the per-instance
@@ -70,22 +179,35 @@ impl DysonReconfigurerHttp {
         sandbox_domain: impl Into<String>,
         system_secrets: Arc<SystemSecretsService>,
     ) -> Result<Self, reqwest::Error> {
+        let root_ca = std::env::var("SWARM_CUBE_ROOT_CA")
+            .ok()
+            .filter(|path| !path.is_empty());
+        Self::new_with_root_ca_path(
+            sandbox_domain,
+            system_secrets,
+            root_ca.as_deref().map(Path::new),
+        )
+    }
+
+    pub fn new_with_root_ca_path(
+        sandbox_domain: impl Into<String>,
+        system_secrets: Arc<SystemSecretsService>,
+        root_ca_path: Option<&Path>,
+    ) -> Result<Self, reqwest::Error> {
         let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15));
-        if let Ok(path) = std::env::var("SWARM_CUBE_ROOT_CA")
-            && !path.is_empty()
-        {
-            match std::fs::read(&path) {
+        if let Some(path) = root_ca_path {
+            match std::fs::read(path) {
                 Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
                     Ok(cert) => {
-                        tracing::info!(path = %path, "reconfigurer: trusting cube root CA");
+                        tracing::info!(path = %path.display(), "reconfigurer: trusting cube root CA");
                         b = b.add_root_certificate(cert);
                     }
                     Err(e) => {
-                        tracing::error!(path = %path, error = %e, "reconfigurer: parse PEM failed")
+                        tracing::error!(path = %path.display(), error = %e, "reconfigurer: parse PEM failed")
                     }
                 },
                 Err(e) => {
-                    tracing::error!(path = %path, error = %e, "reconfigurer: read PEM failed")
+                    tracing::error!(path = %path.display(), error = %e, "reconfigurer: read PEM failed")
                 }
             }
         }
@@ -253,6 +375,11 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
         let status = resp.status();
         if !status.is_success() {
             let resp_body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(format!(
+                    "dyson configure secret mismatch for instance {instance_id}: /api/admin/configure returned 401; swarm's sealed configure secret no longer matches the hash in the sandbox"
+                ));
+            }
             return Err(format!("dyson /api/admin/configure {status}: {resp_body}"));
         }
         // Drain the response body for diagnostics — dyson returns
@@ -265,6 +392,9 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
             response = %resp_body,
             "reconfigure: dyson accepted"
         );
+        let parsed: ConfigureResponse = serde_json::from_str(&resp_body)
+            .map_err(|e| format!("dyson /api/admin/configure response parse: {e}: {resp_body}"))?;
+        parsed.validate_against(body)?;
         Ok(())
     }
 
@@ -480,5 +610,104 @@ mod tests {
                 .is_none(),
             "forget_secret must wipe the sealed plaintext"
         );
+    }
+
+    #[test]
+    fn configure_response_requires_requested_blocks_to_apply() {
+        let body = ReconfigureBody {
+            models: vec!["openrouter/model".into()],
+            proxy_token: Some("pt_test".into()),
+            proxy_base: Some("https://swarm.test/llm/openrouter".into()),
+            image_provider_name: Some("image".into()),
+            image_provider_block: Some(serde_json::json!({"type": "openrouter"})),
+            image_generation_provider: Some("image".into()),
+            image_generation_model: Some("google/gemini-image".into()),
+            reset_skills: true,
+            mcp_servers: Some(serde_json::Map::from_iter([(
+                "massive".into(),
+                serde_json::json!({"url": "https://swarm.test/mcp/i/massive"}),
+            )])),
+            ingest_url: Some("https://swarm.test/v1/internal/artefacts".into()),
+            ingest_token: Some("it_123".into()),
+            state_sync_url: Some("https://swarm.test/v1/internal/state/file".into()),
+            state_sync_token: Some("st_123".into()),
+            ..ReconfigureBody::default()
+        };
+        let ok = ConfigureResponse {
+            ok: true,
+            models_updated: None,
+            models_applied: Some(true),
+            provider_updated: None,
+            provider_applied: Some(true),
+            image_generation_updated: None,
+            image_generation_applied: Some(true),
+            skills_reset: None,
+            skills_applied: Some(true),
+            mcp_servers_updated: None,
+            mcp_servers_applied: Some(true),
+            ingest_updated: None,
+            ingest_applied: Some(true),
+            state_sync_updated: None,
+            state_sync_applied: Some(true),
+        };
+        ok.validate_against(&body).unwrap();
+
+        let missing_mcp = ConfigureResponse {
+            mcp_servers_applied: Some(false),
+            ..ok
+        };
+        let err = missing_mcp.validate_against(&body).unwrap_err();
+        assert!(err.contains("mcp_servers"));
+    }
+
+    #[test]
+    fn reconfigure_body_serializes_every_configure_wire_field() {
+        let mut mcp = serde_json::Map::new();
+        mcp.insert(
+            "massive".into(),
+            serde_json::json!({"url": "https://swarm.test/mcp/i/massive"}),
+        );
+        let body = ReconfigureBody {
+            name: Some("axelrod".into()),
+            task: Some("research".into()),
+            models: vec!["deepseek/deepseek-v4-pro".into()],
+            instance_id: Some("i-1".into()),
+            proxy_token: Some("pt_test".into()),
+            proxy_base: Some("https://swarm.test/llm/openrouter".into()),
+            image_provider_name: Some("image".into()),
+            image_provider_block: Some(serde_json::json!({"type": "openrouter"})),
+            image_generation_provider: Some("image".into()),
+            image_generation_model: Some("google/gemini-image".into()),
+            reset_skills: true,
+            tools: Some(vec!["read_file".into()]),
+            mcp_servers: Some(mcp),
+            ingest_url: Some("https://swarm.test/v1/internal/ingest".into()),
+            ingest_token: Some("it_123".into()),
+            state_sync_url: Some("https://swarm.test/v1/internal/state/file".into()),
+            state_sync_token: Some("st_123".into()),
+        };
+        let value = serde_json::to_value(body).unwrap();
+        let obj = value.as_object().unwrap();
+        for key in [
+            "name",
+            "task",
+            "models",
+            "instance_id",
+            "proxy_token",
+            "proxy_base",
+            "image_provider_name",
+            "image_provider_block",
+            "image_generation_provider",
+            "image_generation_model",
+            "reset_skills",
+            "tools",
+            "mcp_servers",
+            "ingest_url",
+            "ingest_token",
+            "state_sync_url",
+            "state_sync_token",
+        ] {
+            assert!(obj.contains_key(key), "missing configure field {key}");
+        }
     }
 }

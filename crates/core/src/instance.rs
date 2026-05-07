@@ -254,6 +254,9 @@ pub async fn push_with_retry(
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = e;
+                if is_non_retryable_reconfigure_error(&last_err) {
+                    return Err(last_err);
+                }
                 tracing::debug!(
                     attempt,
                     instance = %instance_id,
@@ -266,6 +269,13 @@ pub async fn push_with_retry(
         }
     }
     Err(last_err)
+}
+
+fn is_non_retryable_reconfigure_error(error: &str) -> bool {
+    error.contains("configure secret mismatch")
+        || error.contains("did not apply requested")
+        || error.contains("configure response had ok=false")
+        || error.contains("/api/admin/configure response parse")
 }
 
 /// Same cubeproxy warm-up race as [`push_with_retry`], but for the
@@ -1069,6 +1079,15 @@ impl InstanceService {
                         error = %e,
                         "runtime-config-sync: token repair failed; skipping"
                     );
+                    let _ = self
+                        .instances
+                        .record_probe(
+                            &row.id,
+                            crate::traits::ProbeResult::Degraded {
+                                reason: format!("runtime-config token repair failed: {e}"),
+                            },
+                        )
+                        .await;
                     continue;
                 }
             };
@@ -1092,6 +1111,15 @@ impl InstanceService {
                         error = %e,
                         "runtime-config-sync: push failed (will retry next sweep)"
                     );
+                    let _ = self
+                        .instances
+                        .record_probe(
+                            &row.id,
+                            crate::traits::ProbeResult::Degraded {
+                                reason: format!("runtime-config push failed: {e}"),
+                            },
+                        )
+                        .await;
                 }
             }
         }
@@ -3069,6 +3097,7 @@ impl InstanceService {
                 raw_vscode_config: None,
                 oauth_tokens: None,
                 tools_catalog: None,
+                last_check_error: None,
                 enabled_tools: enabled_tools.clone(),
             });
         // Keep-existing semantics: the SPA never reads back sealed
@@ -4826,6 +4855,20 @@ mod tests {
         }
     }
 
+    struct FailingPushReconfigurer;
+
+    #[async_trait]
+    impl DysonReconfigurer for FailingPushReconfigurer {
+        async fn push(
+            &self,
+            _instance_id: &str,
+            _sandbox_id: &str,
+            _body: &ReconfigureBody,
+        ) -> Result<(), String> {
+            Err("dyson configure did not apply requested mcp_servers block".into())
+        }
+    }
+
     #[derive(Default)]
     struct FlakyRestoreReconfigurer {
         attempts: Mutex<usize>,
@@ -6042,6 +6085,60 @@ mod tests {
             let got = tokens.lookup_by_instance(id).await.unwrap();
             assert_eq!(got.as_ref(), Some(expect));
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_failure_is_visible_on_instance_probe_status() {
+        let (svc, cube, tokens, instances) = build().await;
+        let created = svc
+            .create(
+                "legacy",
+                CreateRequest {
+                    template_id: "tpl".into(),
+                    name: None,
+                    task: None,
+                    env: env_with_model(),
+                    ttl_seconds: None,
+                    network_policy: NetworkPolicy::default(),
+                    mcp_servers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let failing = InstanceService::new(
+            cube.clone(),
+            instances.clone(),
+            tokens.clone(),
+            "https://dyson.example.com/llm",
+        )
+        .with_reconfigurer(Arc::new(FailingPushReconfigurer));
+
+        let (visited, succeeded) = failing.sync_runtime_config_all().await.unwrap();
+        assert_eq!(visited, 1);
+        assert_eq!(succeeded, 0);
+
+        let row = instances.get(&created.id).await.unwrap().unwrap();
+        match row.last_probe_status {
+            Some(crate::traits::ProbeResult::Degraded { reason }) => {
+                assert!(reason.contains("runtime-config push failed"));
+                assert!(reason.contains("did not apply requested mcp_servers"));
+            }
+            other => panic!("runtime config failure must be visible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn semantic_reconfigure_errors_are_not_retried() {
+        assert!(is_non_retryable_reconfigure_error(
+            "dyson configure did not apply requested mcp_servers block"
+        ));
+        assert!(is_non_retryable_reconfigure_error(
+            "dyson configure secret mismatch for instance i-1"
+        ));
+        assert!(!is_non_retryable_reconfigure_error(
+            "dyson /api/admin/configure 502: bad gateway"
+        ));
     }
 
     #[tokio::test]
@@ -7396,6 +7493,7 @@ mod tests {
                 client_secret: None,
             }),
             tools_catalog: None,
+            last_check_error: None,
             enabled_tools: None,
         };
         crate::mcp_servers::put(&user_secrets, &owner, &src.id, "linear", &entry)
@@ -7564,6 +7662,7 @@ mod tests {
                 client_secret: None,
             }),
             tools_catalog: None,
+            last_check_error: None,
             enabled_tools: None,
         };
         crate::mcp_servers::put(&user_secrets, &owner, &src.id, "linear", &mcp_entry)
