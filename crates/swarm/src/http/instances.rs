@@ -9,7 +9,7 @@
 use axum::extract::{Extension, Path, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/instances/:id/skills/install",
             post(install_instance_skill),
+        )
+        .route(
+            "/v1/instances/:id/skills/:skill",
+            delete(uninstall_instance_skill),
         )
         .route("/v1/instances/:id/probe", post(probe_instance))
         .route("/v1/instances/:id/change-network", post(change_network))
@@ -720,6 +724,88 @@ async fn install_instance_skill(
     Json(outcome).into_response()
 }
 
+async fn uninstall_instance_skill(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path((id, skill)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let row = match state.instances.get_unscoped(&id).await {
+        Ok(row) => row,
+        Err(SwarmError::NotFound) => {
+            return install_error(StatusCode::NOT_FOUND, "instance_not_found", None);
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                instance = %id,
+                "skill uninstall: instance lookup failed"
+            );
+            return install_error(swarm_err_to_status(e), "instance_lookup_failed", None);
+        }
+    };
+    if row.owner_id != caller.user_id {
+        return install_error(StatusCode::FORBIDDEN, "forbidden", None);
+    }
+    if !matches!(row.status, InstanceStatus::Live)
+        || row
+            .cube_sandbox_id
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+    {
+        return install_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_live", None);
+    }
+
+    let skill = skill.trim();
+    if crate::skill_marketplace::validate_skill_name(skill).is_err() {
+        return install_error(StatusCode::BAD_REQUEST, "invalid_skill", None);
+    }
+    match installed_skill_present(&state, &id, skill).await {
+        Ok(true) => {}
+        Ok(false) => return install_error(StatusCode::NOT_FOUND, "skill_not_installed", None),
+        Err(status) => return install_error(status, "skill_inventory_failed", None),
+    }
+
+    let outcome = match state.instances.uninstall_skill_on_live(&row, skill).await {
+        Ok(outcome) => outcome,
+        Err(SwarmError::BadRequest(msg)) if msg == "instance_not_live" => {
+            return install_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_live", None);
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                instance = %id,
+                skill,
+                "skill uninstall: dyson agent rejected uninstall"
+            );
+            return install_error(StatusCode::BAD_GATEWAY, "agent_unreachable", None);
+        }
+    };
+
+    if let Err(e) = tombstone_installed_skill(&state, &row, skill).await {
+        tracing::warn!(
+            error = %e,
+            instance = %row.id,
+            skill,
+            "skill uninstall: immediate state-file tombstone failed"
+        );
+        return install_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "skill_mirror_failed",
+            None,
+        );
+    }
+
+    tracing::info!(
+        instance = %row.id,
+        owner = %row.owner_id,
+        skill,
+        uninstalled = outcome.uninstalled,
+        source = "ui",
+        "skill uninstall audit"
+    );
+    Json(outcome).into_response()
+}
+
 fn install_error(
     status: StatusCode,
     error: &'static str,
@@ -752,6 +838,25 @@ async fn installed_skill_version(
         .into_iter()
         .find(|entry| entry.skill == skill)
         .and_then(|entry| entry.version))
+}
+
+async fn installed_skill_present(
+    state: &AppState,
+    instance_id: &str,
+    skill: &str,
+) -> Result<bool, StatusCode> {
+    let skills =
+        crate::skill_inventory::list_instance_skills(state.state_files.as_ref(), instance_id)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    instance = %instance_id,
+                    "skill uninstall: inventory derivation failed"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    Ok(skills.into_iter().any(|entry| entry.skill == skill))
 }
 
 async fn mirror_installed_skill(
@@ -804,6 +909,32 @@ async fn mirror_installed_skill(
         .ingest(metadata_meta, &metadata_body)
         .await
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn tombstone_installed_skill(
+    state: &AppState,
+    row: &InstanceRow,
+    skill: &str,
+) -> Result<(), String> {
+    let now = crate::now_secs();
+    let skill_path = format!("skills/{skill}/SKILL.md");
+    let metadata_path = format!("skills/{skill}/dyson-skill.json");
+    for path in [skill_path.as_str(), metadata_path.as_str()] {
+        let meta = crate::state_files::StateFileMeta {
+            instance_id: &row.id,
+            owner_id: &row.owner_id,
+            namespace: "workspace",
+            path,
+            mime: None,
+            updated_at: now,
+        };
+        state
+            .state_files
+            .tombstone(meta)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

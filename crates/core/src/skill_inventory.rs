@@ -328,4 +328,60 @@ mod tests {
             .unwrap();
         assert!(invalid.is_none());
     }
+
+    #[tokio::test]
+    async fn tombstoned_skill_files_disappear_from_inventory() {
+        let (svc, _dir, _keys) = svc().await;
+        svc.ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: "inst-a",
+                owner_id: ALICE,
+                namespace: "workspace",
+                path: "skills/code-review/SKILL.md",
+                mime: Some("text/markdown"),
+                updated_at: 10,
+            },
+            b"Review diffs.",
+        )
+        .await
+        .unwrap();
+        svc.ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: "inst-a",
+                owner_id: ALICE,
+                namespace: "workspace",
+                path: "skills/code-review/dyson-skill.json",
+                mime: Some("application/json"),
+                updated_at: 11,
+            },
+            br#"{"version":"1.0.0","origin":{"kind":"marketplace"}}"#,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(list_instance_skills(&svc, "inst-a").await.unwrap().len(), 1);
+
+        for path in [
+            "skills/code-review/SKILL.md",
+            "skills/code-review/dyson-skill.json",
+        ] {
+            svc.tombstone(crate::state_files::StateFileMeta {
+                instance_id: "inst-a",
+                owner_id: ALICE,
+                namespace: "workspace",
+                path,
+                mime: None,
+                updated_at: 12,
+            })
+            .await
+            .unwrap();
+        }
+
+        assert!(
+            list_instance_skills(&svc, "inst-a")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

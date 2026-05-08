@@ -24,7 +24,7 @@ use std::time::Duration;
 use crate::http::InternalHttpClient;
 use crate::instance::{
     DysonReconfigurer, InstallSkillBody, InstallSkillResponse, ReconfigureBody,
-    RestoreStateFileBody, configure_secret_name,
+    RestoreStateFileBody, UninstallSkillResponse, configure_secret_name,
 };
 use crate::secrets::SystemSecretsService;
 
@@ -500,6 +500,40 @@ impl DysonReconfigurer for DysonReconfigurerHttp {
         }
         serde_json::from_str(&resp_body).map_err(|e| {
             format!("dyson /api/admin/skills/install response parse: {e}: {resp_body}")
+        })
+    }
+
+    async fn uninstall_skill(
+        &self,
+        instance_id: &str,
+        sandbox_id: &str,
+        skill: &str,
+    ) -> Result<UninstallSkillResponse, String> {
+        let secret = self.ensure_secret(instance_id).await?;
+        let url = self.admin_url(sandbox_id, &format!("skills/{skill}"));
+        let resp = self
+            .http
+            .request(reqwest::Method::DELETE, &url)
+            .header(CONFIGURE_HEADER, &secret)
+            .header(CSRF_HEADER, "swarm-internal")
+            .send()
+            .await
+            .map_err(|e| format!("send: {e}"))?;
+        let status = resp.status();
+        let resp_body = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(UninstallSkillResponse {
+                uninstalled: false,
+                skill: skill.to_owned(),
+            });
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "dyson /api/admin/skills/{skill} {status}: {resp_body}"
+            ));
+        }
+        serde_json::from_str(&resp_body).map_err(|e| {
+            format!("dyson /api/admin/skills/{skill} response parse: {e}: {resp_body}")
         })
     }
 

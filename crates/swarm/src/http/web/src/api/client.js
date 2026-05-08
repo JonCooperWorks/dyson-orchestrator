@@ -226,6 +226,13 @@ export class SwarmClient {
     );
   }
 
+  uninstallSkillFromInstance(instanceId, skill) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/skills/${encodeURIComponent(skill)}`,
+      { method: 'DELETE' },
+    );
+  }
+
   // ─── Per-instance webhooks ("tasks" in UI copy) ────────────────────
   //
   // Each row is `{ name, description, auth_scheme, enabled, has_secret,

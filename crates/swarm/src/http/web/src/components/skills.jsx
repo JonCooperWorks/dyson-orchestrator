@@ -244,7 +244,7 @@ export function MarketplaceSkillDetailPage({ view }) {
             </section>
             <section className="panel">
               <div className="panel-title">SKILL.md</div>
-              <div style={{maxHeight:'62vh', overflow:'auto', marginTop:12}}>
+              <div className="skill-detail-markdown" aria-label="skill markdown">
                 {body ? <MarkdownBody markdown={body.skill_md}/> : <p className="muted small">loading…</p>}
               </div>
             </section>
@@ -484,13 +484,13 @@ export function SkillCatalogRow({ skill, refNode, onFocus }) {
   return (
     <a
       ref={refNode}
-      className="mcp-row"
+      className="mcp-row skill-catalog-row"
       href={skillHref(skill)}
       onFocus={onFocus}
       style={{alignItems:'start', textDecoration:'none', color:'inherit'}}
     >
-      <div style={{minWidth:0, flex:1}}>
-        <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
+      <div className="skill-row-main">
+        <div className="skill-row-title">
           <strong className="mono">{skill.name}</strong>
           <span className="badge">{skill.marketplace_id}</span>
           <span className="muted small">v{skill.version}</span>
@@ -498,7 +498,7 @@ export function SkillCatalogRow({ skill, refNode, onFocus }) {
             <span className="badge badge-info">learned by {skill.author.name}</span>
           ) : null}
         </div>
-        <div className="muted small" style={{marginTop:4, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+        <div className="muted small skill-row-description">
           {skill.description}
         </div>
         {(skill.tags || []).length > 0 ? (
@@ -548,33 +548,71 @@ export function SkillInventoryGroup({ group }) {
   );
 }
 
-export function SkillInventoryList({ rows }) {
+export function SkillInventoryList({ rows, instanceId = null, onChanged = null }) {
+  const { client } = useApi();
+  const [busySkill, setBusySkill] = React.useState('');
+  const [errBySkill, setErrBySkill] = React.useState({});
+
+  const uninstall = async (row) => {
+    const targetInstanceId = instanceId || row.instance_id;
+    if (!targetInstanceId || !row.skill) return;
+    if (!window.confirm(`Uninstall ${row.skill} from this agent?`)) return;
+    setBusySkill(row.skill);
+    setErrBySkill(prev => ({ ...prev, [row.skill]: '' }));
+    try {
+      await client.uninstallSkillFromInstance(targetInstanceId, row.skill);
+      const next = typeof client.listInstanceSkills === 'function'
+        ? await client.listInstanceSkills(targetInstanceId).catch(() => null)
+        : null;
+      if (Array.isArray(next)) setSkillsFor(targetInstanceId, next);
+      onChanged?.(next);
+    } catch (e) {
+      setErrBySkill(prev => ({
+        ...prev,
+        [row.skill]: e?.detail?.error || e?.detail || e?.message || 'uninstall failed',
+      }));
+    } finally {
+      setBusySkill('');
+    }
+  };
+
   if (!rows || rows.length === 0) {
     return <p className="muted small">no mirrored skills yet</p>;
   }
   return (
-    <div style={{display:'grid', gap:8}}>
+    <div className="skill-inventory-list">
       {rows.map(row => (
-        <a
+        <div
           key={`${row.instance_id}/${row.skill}`}
-          className="mcp-row"
-          href={inventoryRowHref(row)}
-          style={{alignItems:'start', textDecoration:'none', color:'inherit'}}
+          className="mcp-row skill-inventory-row"
+          style={{alignItems:'start'}}
         >
-          <div style={{minWidth:0, flex:1}}>
-            <div style={{display:'flex', gap:8, flexWrap:'wrap', alignItems:'center'}}>
-              <strong className="mono">{row.skill}</strong>
+          <div className="skill-row-main">
+            <div className="skill-row-title">
+              <a className="skill-row-link mono" href={inventoryRowHref(row)}>{row.skill}</a>
               <span className="badge">{row.origin_kind || 'unknown'}</span>
               {row.version ? <span className="muted small">v{row.version}</span> : null}
               {!row.has_metadata ? <span className="badge badge-warn">no metadata</span> : null}
               {!row.has_body ? <span className="badge badge-warn">missing body</span> : null}
             </div>
-            <div className="muted small" style={{marginTop:4}}>{row.description || '—'}</div>
-            <div className="mono muted small" style={{marginTop:6}}>
+            <div className="muted small skill-row-description skill-row-description-wrap">{row.description || '—'}</div>
+            <div className="mono muted small skill-row-path">
               swept {fmtTime(row.synced_at)} · {row.source_path}
             </div>
+            {errBySkill[row.skill] ? <div className="error" style={{marginTop:6}}>{errBySkill[row.skill]}</div> : null}
           </div>
-        </a>
+          {client.uninstallSkillFromInstance ? (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm skill-uninstall-button"
+              onClick={() => uninstall(row)}
+              disabled={busySkill === row.skill}
+              aria-label={`Uninstall ${row.skill}`}
+            >
+              {busySkill === row.skill ? 'uninstalling…' : 'uninstall'}
+            </button>
+          ) : null}
+        </div>
       ))}
     </div>
   );

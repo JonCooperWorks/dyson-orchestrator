@@ -211,6 +211,7 @@ describe('SwarmClient', () => {
       skill: 'code/review',
       force: true,
     });
+    await client.uninstallSkillFromInstance('inst/1', 'code/review');
 
     expect(fetchImpl.mock.calls[0][0]).toBe('/v1/skill-marketplaces');
     expect(fetchImpl.mock.calls[1][0]).toBe('/v1/skill-marketplaces/skills');
@@ -225,6 +226,8 @@ describe('SwarmClient', () => {
       skill: 'code/review',
       force: true,
     });
+    expect(fetchImpl.mock.calls[7][0]).toBe('/v1/instances/inst%2F1/skills/code%2Freview');
+    expect(fetchImpl.mock.calls[7][1].method).toBe('DELETE');
   });
 
   test('204 No Content returns null instead of throwing on JSON parse', async () => {

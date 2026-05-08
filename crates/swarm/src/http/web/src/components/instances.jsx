@@ -2793,16 +2793,21 @@ function SkillsSection({ instance }) {
   const [err, setErr] = React.useState('');
   const [installOpen, setInstallOpen] = React.useState(false);
 
-  React.useEffect(() => {
-    let cancelled = false;
+  const refreshSkills = React.useCallback(async () => {
     setErr('');
-    client.listInstanceSkills(instance.id).then(list => {
-      if (!cancelled) setSkillsFor(instance.id, list || []);
-    }).catch(e => {
-      if (!cancelled) setErr(e?.detail || e?.message || 'skills load failed');
-    });
-    return () => { cancelled = true; };
+    try {
+      const list = await client.listInstanceSkills(instance.id);
+      setSkillsFor(instance.id, list || []);
+      return list || [];
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'skills load failed');
+      return null;
+    }
   }, [client, instance.id]);
+
+  React.useEffect(() => {
+    refreshSkills();
+  }, [refreshSkills]);
 
   const rows = cached ? cached.rows : null;
 
@@ -2823,12 +2828,13 @@ function SkillsSection({ instance }) {
       {rows === null ? (
         <p className="muted small">loading…</p>
       ) : (
-        <SkillInventoryList rows={rows}/>
+        <SkillInventoryList rows={rows} instanceId={instance.id} onChanged={refreshSkills}/>
       )}
       {installOpen ? (
         <InstallSkillModal
           defaultInstanceId={instance.id}
           onClose={() => setInstallOpen(false)}
+          onInstalled={refreshSkills}
         />
       ) : null}
     </section>

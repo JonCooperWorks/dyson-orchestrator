@@ -447,6 +447,18 @@ pub trait DysonReconfigurer: Send + Sync {
     ) -> Result<InstallSkillResponse, String> {
         Err("dyson skill install reconfigurer is not configured".into())
     }
+
+    /// Remove a marketplace-installed skill from a running dyson's
+    /// workspace. Default error keeps callers from silently updating
+    /// only swarm's mirror when runtime reconfiguration is unavailable.
+    async fn uninstall_skill(
+        &self,
+        _instance_id: &str,
+        _sandbox_id: &str,
+        _skill: &str,
+    ) -> Result<UninstallSkillResponse, String> {
+        Err("dyson skill uninstall reconfigurer is not configured".into())
+    }
 }
 
 /// Build the orchestrator-managed env envelope that gets handed to the
@@ -739,6 +751,12 @@ pub struct InstallSkillResponse {
     pub installed: bool,
     pub version: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UninstallSkillResponse {
+    pub uninstalled: bool,
+    pub skill: String,
 }
 
 /// Image-generation defaults a swarm-managed dyson should run with.
@@ -2833,6 +2851,33 @@ impl InstanceService {
         };
         reconfigurer
             .install_skill(&row.id, sandbox_id, &body)
+            .await
+            .map_err(|err| SwarmError::Internal(format!("agent_unreachable: {err}")))
+    }
+
+    /// Remove an installed skill from a Live dyson. Swarm's mirrored
+    /// state-file tombstones are applied by the HTTP handler after the
+    /// live runtime accepts the removal.
+    pub async fn uninstall_skill_on_live(
+        &self,
+        row: &InstanceRow,
+        skill: &str,
+    ) -> Result<UninstallSkillResponse, SwarmError> {
+        if !matches!(row.status, InstanceStatus::Live) {
+            return Err(SwarmError::BadRequest("instance_not_live".into()));
+        }
+        let sandbox_id = row
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| SwarmError::BadRequest("instance_not_live".into()))?;
+        let Some(reconfigurer) = self.reconfigurer.as_ref() else {
+            return Err(SwarmError::Internal(
+                "dyson skill uninstall reconfigurer is not configured".into(),
+            ));
+        };
+        reconfigurer
+            .uninstall_skill(&row.id, sandbox_id, skill)
             .await
             .map_err(|err| SwarmError::Internal(format!("agent_unreachable: {err}")))
     }

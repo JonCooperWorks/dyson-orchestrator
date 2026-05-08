@@ -1572,6 +1572,90 @@
   color: var(--fg-muted);
   font-size: 12.5px;
 }
+
+.skill-detail-markdown {
+  margin-top: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.skill-catalog-row,
+.skill-inventory-row {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.skill-row-main {
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 100%;
+}
+
+.skill-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.skill-row-description {
+  margin-top: 4px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.skill-row-description-wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.skill-row-path {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.skill-inventory-list {
+  display: grid;
+  gap: 8px;
+}
+
+.skill-inventory-row {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+}
+
+.skill-row-link {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  text-underline-offset: 2px;
+}
+
+.skill-row-link:hover {
+  color: var(--accent);
+}
+
+.skill-uninstall-button {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
+@media (max-width: 680px) {
+  .skill-inventory-row {
+    flex-direction: column;
+  }
+
+  .skill-uninstall-button {
+    align-self: flex-start;
+  }
+}
+
 .md-body-compact {
   width: 100%;
   margin: 6px 0 0;
