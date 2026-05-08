@@ -13,7 +13,7 @@ export function SkillsPage() {
   const [inventory, setInventory] = React.useState(null);
   const [inventoryErr, setInventoryErr] = React.useState('');
   const [query, setQuery] = React.useState('');
-  const [source, setSource] = React.useState('');
+  const [source, setSource] = React.useState(() => sourceParamFromHash());
   const [tag, setTag] = React.useState('');
   const [errorsOpen, setErrorsOpen] = React.useState(true);
   const searchRef = React.useRef(null);
@@ -42,6 +42,12 @@ export function SkillsPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  React.useEffect(() => {
+    const onHash = () => setSource(sourceParamFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
   const catalogSkills = catalog?.skills || [];
@@ -519,6 +525,12 @@ function skillAuthorHref(author) {
   if (author?.href) return author.href;
   if (author?.instance_id) return `#/i/${encodeURIComponent(author.instance_id)}/skills`;
   return '#/skills';
+}
+
+function sourceParamFromHash() {
+  if (typeof window === 'undefined') return '';
+  const query = String(window.location.hash || '').split('?')[1] || '';
+  return new URLSearchParams(query).get('source') || '';
 }
 
 export function SkillInventoryGroup({ group }) {

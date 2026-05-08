@@ -214,6 +214,85 @@
   background: var(--bg-2);
 }
 
+.admin-marketplace-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.admin-marketplace-section {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.admin-marketplace-section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.admin-marketplace-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.admin-marketplace-section-head h3 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.admin-marketplace-section-head p {
+  margin: 3px 0 0;
+}
+
+.admin-marketplace-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0 2px;
+}
+
+.admin-marketplace-empty h4 {
+  margin: 0 0 3px;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.admin-marketplace-empty p,
+.admin-marketplace-empty-line {
+  margin: 0;
+}
+
+.admin-marketplace-empty .btn,
+.virtual-catalog-actions .btn {
+  margin-top: 0;
+}
+
+.admin-skill-marketplaces-panel code {
+  overflow-wrap: anywhere;
+}
+
+.virtual-catalog-name {
+  font-weight: 600;
+}
+
+.virtual-catalog-instance {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.virtual-catalog-instance code {
+  color: var(--fg-muted);
+}
+
 .form-actions {
   display: flex;
   flex-wrap: wrap;
@@ -224,6 +303,16 @@
   .admin-empty-state {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .admin-marketplace-empty,
+  .admin-marketplace-section-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-marketplace-empty .btn {
+    align-self: flex-start;
   }
 }
 

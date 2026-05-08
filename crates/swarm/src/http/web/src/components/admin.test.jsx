@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 describe('AdminView Docker MCP catalog', () => {
-  test('links DB-backed skill marketplace sources to dedicated pages', async () => {
+  test('configured DB-backed skill marketplace sources still render and link to edit pages', async () => {
     const sources = [{
       id: 'team-skills',
       source_type: 'http',
@@ -28,6 +28,7 @@ describe('AdminView Docker MCP catalog', () => {
       adminListUsers: vi.fn().mockResolvedValue([]),
       adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
       adminListSkillMarketplaces: vi.fn(async () => ({ sources })),
+      listMarketplaceSkills: vi.fn(async () => ({ sources: [], skills: [], errors: [] })),
       adminPutSkillMarketplaceSource: vi.fn(),
       adminDeleteSkillMarketplaceSource: vi.fn(),
     };
@@ -39,6 +40,7 @@ describe('AdminView Docker MCP catalog', () => {
     );
 
     expect(await screen.findByText('skill marketplaces')).toBeInTheDocument();
+    expect(screen.getByText('configured marketplace sources')).toBeInTheDocument();
     expect(await screen.findByText('team-skills')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'add marketplace' }))
       .toHaveAttribute('href', '#/admin/skill-marketplaces/new');
@@ -46,11 +48,35 @@ describe('AdminView Docker MCP catalog', () => {
       .toHaveAttribute('href', '#/admin/skill-marketplaces/team-skills');
   });
 
-  test('shows an empty state for skill marketplaces', async () => {
+  test('configured source empty state does not hide virtual agent catalogs', async () => {
+    const marketplaceId = 'agent-dancing-horizon-846-4b26de';
     const client = {
       adminListUsers: vi.fn().mockResolvedValue([]),
       adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
       adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      listMarketplaceSkills: vi.fn(async () => ({
+        sources: [{
+          id: marketplaceId,
+          source_type: 'agent',
+          location: 'swarm://instances/dancing-horizon-846-4b26de/skills',
+          is_default: false,
+        }],
+        skills: [{
+          marketplace_id: marketplaceId,
+          marketplace_name: 'Dancing Horizon skills',
+          name: 'massive-financial-analysis',
+          version: '0.1.0',
+          description: 'Analyze a large financial corpus.',
+          tags: ['agent-created'],
+          content_type: 'workspace',
+          author: {
+            name: 'Dancing Horizon',
+            instance_id: 'dancing-horizon-846-4b26de',
+            href: '#/i/dancing-horizon-846-4b26de/skills',
+          },
+        }],
+        errors: [],
+      })),
       adminPutSkillMarketplaceSource: vi.fn(),
       adminDeleteSkillMarketplaceSource: vi.fn(),
     };
@@ -61,8 +87,101 @@ describe('AdminView Docker MCP catalog', () => {
       </ApiProvider>,
     );
 
-    expect(await screen.findByRole('heading', { name: 'No skill marketplaces yet' }))
+    expect(await screen.findByText('No configured marketplace sources yet'))
       .toBeInTheDocument();
+    expect(await screen.findByText('Dancing Horizon skills')).toBeInTheDocument();
+    expect(screen.getByText(marketplaceId)).toBeInTheDocument();
+  });
+
+  test('virtual agent catalog renders read-only with badge count and links', async () => {
+    const marketplaceId = 'agent-dancing-horizon-846-4b26de';
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      listMarketplaceSkills: vi.fn(async () => ({
+        sources: [{
+          id: marketplaceId,
+          source_type: 'agent',
+          location: 'swarm://instances/dancing-horizon-846-4b26de/skills',
+          is_default: false,
+        }],
+        skills: [
+          {
+            marketplace_id: marketplaceId,
+            marketplace_name: 'Dancing Horizon skills',
+            name: 'massive-financial-analysis',
+            version: '0.1.0',
+            description: 'Analyze a large financial corpus.',
+            tags: ['agent-created'],
+            content_type: 'workspace',
+            author: {
+              name: 'Dancing Horizon',
+              instance_id: 'dancing-horizon-846-4b26de',
+              href: '#/i/dancing-horizon-846-4b26de/skills',
+            },
+          },
+          {
+            marketplace_id: marketplaceId,
+            marketplace_name: 'Dancing Horizon skills',
+            name: 'forecast-risk',
+            version: '0.1.0',
+            description: 'Forecast portfolio risk.',
+            tags: ['agent-created'],
+            content_type: 'workspace',
+            author: {
+              name: 'Dancing Horizon',
+              instance_id: 'dancing-horizon-846-4b26de',
+              href: '#/i/dancing-horizon-846-4b26de/skills',
+            },
+          },
+        ],
+        errors: [],
+      })),
+      adminPutSkillMarketplaceSource: vi.fn(),
+      adminDeleteSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView/>
+      </ApiProvider>,
+    );
+
+    const row = (await screen.findByText(marketplaceId)).closest('tr');
+    expect(within(row).getByText('Dancing Horizon skills')).toBeInTheDocument();
+    expect(within(row).getByText('Dancing Horizon')).toBeInTheDocument();
+    expect(within(row).getByText('dancing-horizon-846-4b26de')).toBeInTheDocument();
+    expect(within(row).getByText('2')).toBeInTheDocument();
+    expect(within(row).getByText('virtual')).toBeInTheDocument();
+    expect(within(row).getByText('from agent inventory')).toBeInTheDocument();
+    expect(within(row).getByRole('link', { name: 'browse' }))
+      .toHaveAttribute('href', `#/skills?source=${marketplaceId}`);
+    expect(within(row).getByRole('link', { name: 'agent skills' }))
+      .toHaveAttribute('href', '#/i/dancing-horizon-846-4b26de/skills');
+    expect(within(row).queryByRole('link', { name: 'edit' })).toBeNull();
+    expect(within(row).queryByRole('button', { name: 'delete' })).toBeNull();
+  });
+
+  test('fully empty skill marketplace panel renders both specific empty messages', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      listMarketplaceSkills: vi.fn(async () => ({ sources: [], skills: [], errors: [] })),
+      adminPutSkillMarketplaceSource: vi.fn(),
+      adminDeleteSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'No configured marketplace sources yet' }))
+      .toBeInTheDocument();
+    expect(screen.getByText('No live agent skill catalogs found')).toBeInTheDocument();
     expect(screen.getAllByRole('link', { name: 'add marketplace' }).length).toBeGreaterThan(0);
   });
 

@@ -214,8 +214,10 @@ const SKILL_MARKETPLACE_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function SkillMarketplaceSourcesPanel({ client }) {
   const [rows, setRows] = React.useState(null);
+  const [virtualRows, setVirtualRows] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
+  const [catalogErr, setCatalogErr] = React.useState(null);
 
   const available = Boolean(
     client.adminListSkillMarketplaces
@@ -226,9 +228,20 @@ function SkillMarketplaceSourcesPanel({ client }) {
   const refresh = React.useCallback(async () => {
     if (!available) return;
     setErr(null);
+    setCatalogErr(null);
     try {
+      const catalogPromise = typeof client.listMarketplaceSkills === 'function'
+        ? client.listMarketplaceSkills().catch(e => ({ __error: e }))
+        : Promise.resolve(null);
       const body = await client.adminListSkillMarketplaces();
       setRows(Array.isArray(body?.sources) ? body.sources : []);
+      const catalogBody = await catalogPromise;
+      if (catalogBody?.__error) {
+        setCatalogErr(catalogBody.__error?.detail || catalogBody.__error?.message || 'list agent skill catalogs failed');
+        setVirtualRows([]);
+      } else {
+        setVirtualRows(buildVirtualAgentCatalogRows(catalogBody));
+      }
     } catch (e) {
       setErr(e?.detail || e?.message || 'list skill marketplaces failed');
     }
@@ -252,7 +265,7 @@ function SkillMarketplaceSourcesPanel({ client }) {
   };
 
   return (
-    <section className="panel">
+    <section className="panel admin-skill-marketplaces-panel">
       <div className="panel-header">
         <div className="panel-title">skill marketplaces</div>
         <div className="panel-actions">
@@ -265,61 +278,166 @@ function SkillMarketplaceSourcesPanel({ client }) {
         </div>
       </div>
       {err ? <div className="error">{err}</div> : null}
-      {rows === null ? (
-        <p className="muted small">loading...</p>
-      ) : rows.length === 0 ? (
-        <div className="admin-empty-state">
-          <div className="admin-empty-mark">SK</div>
-          <div>
-            <h3>No skill marketplaces yet</h3>
-            <p className="muted">Curated skills will appear here once a source is connected.</p>
+      <div className="admin-marketplace-sections">
+        <section className="admin-marketplace-section">
+          <div className="admin-marketplace-section-head">
+            <div>
+              <h3>configured marketplace sources</h3>
+              <p className="muted small">Inline and HTTPS marketplace indexes stored in Swarm.</p>
+            </div>
           </div>
-          <a className="btn btn-primary btn-sm" href="#/admin/skill-marketplaces/new">add marketplace</a>
-        </div>
-      ) : (
-        <table className="rows">
-          <thead><tr>
-            <th>id</th><th>type</th><th>status</th><th>location</th><th>last fetch</th><th></th>
-          </tr></thead>
-          <tbody>
-            {rows.map(row => (
-              <tr key={row.id}>
-                <td data-label="id"><code className="mono-sm">{row.id}</code></td>
-                <td data-label="type">{row.source_type}</td>
-                <td data-label="status">
-                  <span className={`badge badge-${row.enabled === false ? 'faint' : 'ok'}`}>
-                    {row.enabled === false ? 'disabled' : 'enabled'}
-                  </span>
-                  {row.last_error ? (
-                    <div className="error small">{row.last_error}</div>
-                  ) : null}
-                </td>
-                <td data-label="location">
-                  <code className="mono-sm">{row.location}</code>
-                </td>
-                <td data-label="last fetch" className="muted small">{fmtTime(row.last_fetch_at)}</td>
-                <td className="row-actions">
-                  <a
-                    className="btn btn-ghost btn-sm"
-                    href={`#/admin/skill-marketplaces/${encodeURIComponent(row.id)}`}
-                  >
-                    edit
-                  </a>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => remove(row)}
-                    disabled={busy}
-                  >
-                    delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+          {rows === null ? (
+            <p className="muted small">loading...</p>
+          ) : rows.length === 0 ? (
+            <div className="admin-marketplace-empty">
+              <div>
+                <h4>No configured marketplace sources yet</h4>
+                <p className="muted small">Add an inline or HTTPS source when operators need a shared editable catalog.</p>
+              </div>
+              <a className="btn btn-primary btn-sm" href="#/admin/skill-marketplaces/new">add marketplace</a>
+            </div>
+          ) : (
+            <table className="rows">
+              <thead><tr>
+                <th>id</th><th>type</th><th>status</th><th>location</th><th>last fetch</th><th></th>
+              </tr></thead>
+              <tbody>
+                {rows.map(row => (
+                  <tr key={row.id}>
+                    <td data-label="id"><code className="mono-sm">{row.id}</code></td>
+                    <td data-label="type">{row.source_type}</td>
+                    <td data-label="status">
+                      <span className={`badge badge-${row.enabled === false ? 'faint' : 'ok'}`}>
+                        {row.enabled === false ? 'disabled' : 'enabled'}
+                      </span>
+                      {row.last_error ? (
+                        <div className="error small">{row.last_error}</div>
+                      ) : null}
+                    </td>
+                    <td data-label="location">
+                      <code className="mono-sm">{row.location}</code>
+                    </td>
+                    <td data-label="last fetch" className="muted small">{fmtTime(row.last_fetch_at)}</td>
+                    <td className="row-actions">
+                      <a
+                        className="btn btn-ghost btn-sm"
+                        href={`#/admin/skill-marketplaces/${encodeURIComponent(row.id)}`}
+                      >
+                        edit
+                      </a>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => remove(row)}
+                        disabled={busy}
+                      >
+                        delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+
+        <section className="admin-marketplace-section virtual-catalogs">
+          <div className="admin-marketplace-section-head">
+            <div>
+              <h3>agent skill catalogs</h3>
+              <p className="muted small">Read-only virtual catalogs discovered from live agent inventory.</p>
+            </div>
+          </div>
+          {catalogErr ? <div className="error">{catalogErr}</div> : null}
+          {virtualRows === null ? (
+            <p className="muted small">loading...</p>
+          ) : virtualRows.length === 0 ? (
+            <p className="muted small admin-marketplace-empty-line">No live agent skill catalogs found</p>
+          ) : (
+            <table className="rows virtual-catalog-table">
+              <thead><tr>
+                <th>catalog</th><th>marketplace id</th><th>live instance</th><th>skills</th><th>status</th><th></th>
+              </tr></thead>
+              <tbody>
+                {virtualRows.map(row => (
+                  <tr key={row.id} className="virtual-catalog-row">
+                    <td data-label="catalog">
+                      <div className="virtual-catalog-name">{row.name}</div>
+                    </td>
+                    <td data-label="marketplace id">
+                      <code className="mono-sm">{row.id}</code>
+                    </td>
+                    <td data-label="live instance">
+                      <div className="virtual-catalog-instance">
+                        <span>{row.instanceName}</span>
+                        <code className="mono-sm">{row.instanceId}</code>
+                      </div>
+                    </td>
+                    <td data-label="skills">
+                      <span className="badge badge-info">{row.skillCount}</span>
+                    </td>
+                    <td data-label="status">
+                      <span className="badge badge-info">virtual</span>
+                      <div className="muted small">from agent inventory</div>
+                    </td>
+                    <td className="row-actions virtual-catalog-actions">
+                      <a className="btn btn-ghost btn-sm" href={row.browseHref}>browse</a>
+                      <a className="btn btn-ghost btn-sm" href={row.agentHref}>agent skills</a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      </div>
     </section>
   );
+}
+
+function buildVirtualAgentCatalogRows(catalog) {
+  const sources = Array.isArray(catalog?.sources) ? catalog.sources : [];
+  const skills = Array.isArray(catalog?.skills) ? catalog.skills : [];
+  const sourceById = new Map(sources.map(source => [source.id, source]));
+  const ids = new Set(
+    sources
+      .filter(isVirtualAgentSource)
+      .map(source => source.id)
+      .filter(Boolean),
+  );
+  for (const skill of skills) {
+    if (isVirtualAgentMarketplaceId(skill.marketplace_id)) ids.add(skill.marketplace_id);
+  }
+  return [...ids].map(id => {
+    const source = sourceById.get(id) || { id };
+    const catalogSkills = skills.filter(skill => skill.marketplace_id === id);
+    const firstSkill = catalogSkills[0] || {};
+    const author = catalogSkills.map(skill => skill.author).find(Boolean) || {};
+    const instanceId = author.instance_id || instanceIdFromAgentSource(source) || id.replace(/^agent-/, '');
+    const instanceName = author.name || instanceId;
+    const name = firstSkill.marketplace_name || `${instanceName} skills`;
+    return {
+      id,
+      name,
+      instanceId,
+      instanceName,
+      skillCount: catalogSkills.length,
+      browseHref: `#/skills?source=${encodeURIComponent(id)}`,
+      agentHref: author.href || `#/i/${encodeURIComponent(instanceId)}/skills`,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+}
+
+function isVirtualAgentSource(source) {
+  return source?.source_type === 'agent' || isVirtualAgentMarketplaceId(source?.id);
+}
+
+function isVirtualAgentMarketplaceId(id) {
+  return String(id || '').startsWith('agent-');
+}
+
+function instanceIdFromAgentSource(source) {
+  const match = String(source?.location || '').match(/^swarm:\/\/instances\/([^/]+)\/skills$/);
+  return match ? match[1] : '';
 }
 
 function emptySkillMarketplaceSource() {
