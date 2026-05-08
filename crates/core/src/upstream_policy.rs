@@ -55,7 +55,7 @@ pub struct ValidatedOutboundUrl {
     pub resolved_addrs: Vec<SocketAddr>,
 }
 
-pub async fn validate_outbound_url(
+pub(crate) async fn validate_outbound_url(
     policy: &OutboundUrlPolicy,
     upstream: &str,
 ) -> Result<ValidatedOutboundUrl, OutboundUrlError> {
@@ -83,7 +83,9 @@ pub fn validate_cached_outbound_url(
     })
 }
 
-pub fn pinned_outbound_client_builder(validated: &ValidatedOutboundUrl) -> reqwest::ClientBuilder {
+pub(crate) fn pinned_outbound_client_builder(
+    validated: &ValidatedOutboundUrl,
+) -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     match validated.url.host_str() {
         Some(host) => builder.resolve_to_addrs(host, &validated.resolved_addrs),

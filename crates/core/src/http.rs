@@ -98,8 +98,12 @@ impl ExternalHttpClient {
     /// Validate URL, resolve host, build a pinned client for the resolved
     /// IPs, deny cross-IP redirects. Construct per-fetch.
     pub async fn for_url(&self, url: &str) -> Result<(reqwest::Client, Url), OutboundUrlError> {
-        let validated = validate_outbound_url(&self.policy, url).await?;
+        let validated = self.validate_url(url).await?;
         self.for_validated(&validated)
+    }
+
+    pub async fn validate_url(&self, url: &str) -> Result<ValidatedOutboundUrl, OutboundUrlError> {
+        validate_outbound_url(&self.policy, url).await
     }
 
     /// Build the same pinned client for a URL that was already validated.

@@ -1,11 +1,12 @@
 //! Operator policy for user-selected BYO upstream URLs.
 
+use std::sync::Arc;
+
+use dyson_swarm_core::http::ExternalHttpClient;
 pub use dyson_swarm_core::upstream_policy::{
     OutboundUrlError as ByoUpstreamError, ValidatedOutboundUrl as ValidatedByoUpstream,
 };
-use dyson_swarm_core::upstream_policy::{
-    OutboundUrlPolicy, validate_cached_outbound_url, validate_outbound_url,
-};
+use dyson_swarm_core::upstream_policy::{OutboundUrlPolicy, validate_cached_outbound_url};
 
 use crate::config::ByoConfig;
 
@@ -21,7 +22,9 @@ pub async fn validate_byo_upstream(
     policy: &ByoConfig,
     upstream: &str,
 ) -> Result<ValidatedByoUpstream, ByoUpstreamError> {
-    validate_outbound_url(&policy_from_byo(policy), upstream).await
+    ExternalHttpClient::new(Arc::new(policy_from_byo(policy)))
+        .validate_url(upstream)
+        .await
 }
 
 pub fn validate_cached_byo_upstream(
