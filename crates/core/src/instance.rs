@@ -92,7 +92,7 @@ use crate::now_secs;
 use crate::secrets::{UserSecretsService, compose_env};
 use crate::traits::{
     CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus, InstanceStore,
-    ListFilter, ProbeResult, TokenStore,
+    ListFilter, ProbeResult, SandboxInfo, TokenStore,
 };
 
 /// Sentinel `provider` value used for the per-instance shared proxy token.
@@ -367,6 +367,15 @@ struct RuntimeTokens {
     proxy: String,
     ingest: String,
     state_sync: String,
+}
+
+#[derive(Debug, Clone)]
+struct InPlaceSwapPlan {
+    source: InstanceRow,
+    old_sandbox_id: String,
+    target_template_id: String,
+    target_policy: NetworkPolicy,
+    resolved_policy: network_policy::ResolvedPolicy,
 }
 
 /// Anything that can push swarm-side identity/task/model state to a
@@ -950,6 +959,184 @@ impl InstanceService {
         })
     }
 
+    async fn build_in_place_swap_plan(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        new_template_id: &str,
+        new_network_policy: Option<NetworkPolicy>,
+        destroyed_error: &'static str,
+        missing_sandbox_error: &'static str,
+    ) -> Result<InPlaceSwapPlan, SwarmError> {
+        let target_template_id = new_template_id.trim();
+        if target_template_id.is_empty() {
+            return Err(SwarmError::BadRequest("template_id is required".into()));
+        }
+        let source = self
+            .instances
+            .get_for_owner(owner_id, instance_id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        if source.status == InstanceStatus::Destroyed {
+            return Err(SwarmError::BadRequest(destroyed_error.into()));
+        }
+        let old_sandbox_id = source
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| SwarmError::BadRequest(missing_sandbox_error.into()))?
+            .to_owned();
+        let target_policy = new_network_policy.unwrap_or_else(|| source.network_policy.clone());
+        let resolved_policy =
+            network_policy::resolve(&target_policy, self.llm_cidr.as_deref(), &*self.resolver)
+                .await?;
+        Ok(InPlaceSwapPlan {
+            source,
+            old_sandbox_id,
+            target_template_id: target_template_id.to_owned(),
+            target_policy,
+            resolved_policy,
+        })
+    }
+
+    async fn create_in_place_swap_sandbox(
+        &self,
+        plan: &InPlaceSwapPlan,
+        runtime_tokens: &RuntimeTokens,
+        from_snapshot_path: Option<std::path::PathBuf>,
+        disable_state_sync_until_configure: bool,
+    ) -> Result<SandboxInfo, SwarmError> {
+        let source = &plan.source;
+        let mut managed = managed_env(
+            &self.proxy_base,
+            &runtime_tokens.proxy,
+            &runtime_tokens.ingest,
+            &runtime_tokens.state_sync,
+            &source.id,
+            &source.bearer_token,
+            &source.name,
+            &source.task,
+            &plan.target_policy,
+        );
+        if disable_state_sync_until_configure {
+            managed.remove(ENV_STATE_SYNC_URL);
+            managed.remove(ENV_STATE_SYNC_TOKEN);
+        }
+        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
+        Ok(self
+            .cube
+            .create_sandbox(CreateSandboxArgs {
+                template_id: plan.target_template_id.clone(),
+                env,
+                from_snapshot_path,
+                resolved_policy: plan.resolved_policy.clone(),
+            })
+            .await?)
+    }
+
+    async fn replay_state_files_and_configure(
+        &self,
+        owner_id: &str,
+        source: &InstanceRow,
+        runtime_tokens: &RuntimeTokens,
+        sandbox_id: &str,
+        state_files: &crate::state_files::StateFileService,
+        allow_unreadable_rows: bool,
+        operation: &'static str,
+    ) -> Result<(), SwarmError> {
+        self.replay_state_files_to_sandbox(
+            owner_id,
+            &source.id,
+            sandbox_id,
+            state_files,
+            allow_unreadable_rows,
+        )
+        .await?;
+        let reconfigurer = self
+            .reconfigurer
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("dyson reconfigurer not configured".into()))?;
+        let mut body = self
+            .configure_body_for_existing_row(
+                owner_id,
+                source,
+                &runtime_tokens.proxy,
+                &runtime_tokens.ingest,
+                &runtime_tokens.state_sync,
+            )
+            .await;
+        self.clear_identity_fields_when_mirror_is_authoritative(
+            &mut body,
+            owner_id,
+            &source.id,
+            state_files,
+        )
+        .await?;
+        push_with_retry(reconfigurer.as_ref(), &source.id, sandbox_id, &body)
+            .await
+            .map_err(|err| {
+                SwarmError::Internal(format!(
+                    "{operation} configure-push failed after state replay: {err}"
+                ))
+            })
+    }
+
+    async fn push_configure_best_effort(
+        &self,
+        owner_id: &str,
+        source: &InstanceRow,
+        runtime_tokens: &RuntimeTokens,
+        sandbox_id: &str,
+        operation: &'static str,
+    ) {
+        let Some(reconfigurer) = self.reconfigurer.as_ref() else {
+            return;
+        };
+        let body = self
+            .configure_body_for_existing_row(
+                owner_id,
+                source,
+                &runtime_tokens.proxy,
+                &runtime_tokens.ingest,
+                &runtime_tokens.state_sync,
+            )
+            .await;
+        if let Err(err) =
+            push_with_retry(reconfigurer.as_ref(), &source.id, sandbox_id, &body).await
+        {
+            tracing::warn!(
+                instance = %source.id,
+                error = %err,
+                operation,
+                "in-place swap: configure-push failed; will be retried by next sweep"
+            );
+        }
+    }
+
+    async fn destroy_old_sandbox_after_in_place_swap(
+        &self,
+        source: &InstanceRow,
+        old_sandbox_id: &str,
+        operation: &'static str,
+    ) {
+        if let Err(err) = self.cube.destroy_sandbox(old_sandbox_id).await {
+            tracing::warn!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                error = %err,
+                operation,
+                "in-place swap: old cube destroy failed (orphan cube — janitor will sweep)"
+            );
+        } else {
+            tracing::info!(
+                instance = %source.id,
+                old_sandbox = %old_sandbox_id,
+                operation,
+                "in-place swap: old cube destroyed"
+            );
+        }
+    }
+
     fn configure_body_from_parts(
         &self,
         source: &InstanceRow,
@@ -1355,39 +1542,23 @@ impl InstanceService {
         new_template_id: &str,
         new_network_policy: Option<NetworkPolicy>,
     ) -> Result<InstanceRow, SwarmError> {
-        if new_template_id.trim().is_empty() {
-            return Err(SwarmError::BadRequest("template_id is required".into()));
-        }
-        let source = self
-            .instances
-            .get_for_owner(owner_id, instance_id)
-            .await?
-            .ok_or(SwarmError::NotFound)?;
-        if source.status == InstanceStatus::Destroyed {
-            return Err(SwarmError::BadRequest(
-                "cannot rotate a destroyed instance".into(),
-            ));
-        }
-        let old_sandbox_id = source
-            .cube_sandbox_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                SwarmError::BadRequest(
-                    "instance has no live cube sandbox; rotation requires a Live row".into(),
-                )
-            })?
-            .to_owned();
+        let plan = self
+            .build_in_place_swap_plan(
+                owner_id,
+                instance_id,
+                new_template_id,
+                new_network_policy,
+                "cannot rotate a destroyed instance",
+                "instance has no live cube sandbox; rotation requires a Live row",
+            )
+            .await?;
+        let source = &plan.source;
+        let old_sandbox_id = &plan.old_sandbox_id;
+        let target_policy = &plan.target_policy;
+        let resolved = &plan.resolved_policy;
 
-        // Pick the policy: caller override or the row's existing one.
-        // Validate before snapshotting — bad input must fail fast.
-        let target_policy = new_network_policy.unwrap_or(source.network_policy.clone());
-        let resolved =
-            network_policy::resolve(&target_policy, self.llm_cidr.as_deref(), &*self.resolver)
-                .await?;
-
-        let no_op_template = source.template_id == new_template_id;
-        let no_op_policy = source.network_policy == target_policy;
+        let no_op_template = source.template_id == plan.target_template_id;
+        let no_op_policy = source.network_policy == *target_policy;
         if no_op_template && no_op_policy {
             return Err(SwarmError::BadRequest(
                 "rotation is a no-op (same template, same network policy)".into(),
@@ -1397,7 +1568,7 @@ impl InstanceService {
         tracing::info!(
             instance = %source.id,
             from_template = %source.template_id,
-            to_template = %new_template_id,
+            to_template = %plan.target_template_id,
             from_policy = %source.network_policy.kind_str(),
             to_policy = %target_policy.kind_str(),
             "rotate-in-place: starting snapshot+swap+destroy pipeline"
@@ -1423,34 +1594,32 @@ impl InstanceService {
             const MAX_WAIT_SECS: u64 = 300; // 5 idle-checks
             let started = std::time::Instant::now();
             loop {
-                match reconfigurer.is_idle(&source.id, &old_sandbox_id).await {
-                    Ok((true, _)) => {
-                        match reconfigurer.quiesce(&source.id, &old_sandbox_id).await {
-                            Ok(true) => {
-                                quiesced = true;
-                                tracing::info!(
-                                    instance = %source.id,
-                                    sandbox = %old_sandbox_id,
-                                    "rotate-in-place: dyson quiesced"
-                                );
-                                break;
-                            }
-                            Ok(false) => {
-                                tracing::debug!(
-                                    instance = %source.id,
-                                    "rotate-in-place: quiesce 409'd (turn slipped in); retrying"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    instance = %source.id,
-                                    error = %err,
-                                    "rotate-in-place: quiesce errored; rotating without gate"
-                                );
-                                break;
-                            }
+                match reconfigurer.is_idle(&source.id, old_sandbox_id).await {
+                    Ok((true, _)) => match reconfigurer.quiesce(&source.id, old_sandbox_id).await {
+                        Ok(true) => {
+                            quiesced = true;
+                            tracing::info!(
+                                instance = %source.id,
+                                sandbox = %old_sandbox_id,
+                                "rotate-in-place: dyson quiesced"
+                            );
+                            break;
                         }
-                    }
+                        Ok(false) => {
+                            tracing::debug!(
+                                instance = %source.id,
+                                "rotate-in-place: quiesce 409'd (turn slipped in); retrying"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                instance = %source.id,
+                                error = %err,
+                                "rotate-in-place: quiesce errored; rotating without gate"
+                            );
+                            break;
+                        }
+                    },
                     Ok((false, in_flight)) => {
                         tracing::info!(
                             instance = %source.id,
@@ -1499,7 +1668,7 @@ impl InstanceService {
                 if quiesced {
                     if let Some(rc) = self.reconfigurer.as_ref() {
                         unquiesce_on_drop("snapshot failed", &e);
-                        let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
+                        let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
                     }
                 }
                 return Err(e);
@@ -1517,37 +1686,16 @@ impl InstanceService {
         // sibling token self-heal during rotation.
         let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
         let replay_state_files = self.state_files.clone();
-        let mut managed = managed_env(
-            &self.proxy_base,
-            &runtime_tokens.proxy,
-            &runtime_tokens.ingest,
-            &runtime_tokens.state_sync,
-            &source.id,
-            &source.bearer_token,
-            &source.name,
-            &source.task,
-            &target_policy,
-        );
-        if replay_state_files.is_some() {
-            // The fresh cube must not mirror a template-default or
-            // snapshot-stale chat tree back over the durable swarm copy
-            // before replay completes. The configure push after replay
-            // enables state sync with the same token.
-            managed.remove(ENV_STATE_SYNC_URL);
-            managed.remove(ENV_STATE_SYNC_TOKEN);
-        }
-        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
 
         // Phase 3: spin up a fresh cube under the new template using
         // the snapshot we just took.
         let info = match self
-            .cube
-            .create_sandbox(CreateSandboxArgs {
-                template_id: new_template_id.to_owned(),
-                env,
-                from_snapshot_path: Some(std::path::PathBuf::from(&snap.path)),
-                resolved_policy: resolved.clone(),
-            })
+            .create_in_place_swap_sandbox(
+                &plan,
+                &runtime_tokens,
+                Some(std::path::PathBuf::from(&snap.path)),
+                replay_state_files.is_some(),
+            )
             .await
         {
             Ok(i) => i,
@@ -1555,10 +1703,10 @@ impl InstanceService {
                 if quiesced {
                     if let Some(rc) = self.reconfigurer.as_ref() {
                         unquiesce_on_drop("cube create failed", &e);
-                        let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
+                        let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
                     }
                 }
-                return Err(e.into());
+                return Err(e);
             }
         };
         tracing::info!(
@@ -1570,55 +1718,25 @@ impl InstanceService {
 
         if let Some(state_files) = replay_state_files.as_ref() {
             if let Err(err) = self
-                .replay_state_files_to_sandbox(
+                .replay_state_files_and_configure(
                     owner_id,
-                    &source.id,
+                    source,
+                    &runtime_tokens,
                     &info.sandbox_id,
                     state_files,
                     true,
+                    "rotate",
                 )
                 .await
             {
                 if quiesced {
                     if let Some(rc) = self.reconfigurer.as_ref() {
                         unquiesce_on_drop("state replay failed", &err);
-                        let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
+                        let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
                     }
                 }
                 let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
                 return Err(err);
-            }
-
-            let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
-                SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
-            })?;
-            let mut body = self
-                .configure_body_for_existing_row(
-                    owner_id,
-                    &source,
-                    &runtime_tokens.proxy,
-                    &runtime_tokens.ingest,
-                    &runtime_tokens.state_sync,
-                )
-                .await;
-            self.clear_identity_fields_when_mirror_is_authoritative(
-                &mut body,
-                owner_id,
-                &source.id,
-                state_files,
-            )
-            .await?;
-            if let Err(err) =
-                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
-            {
-                if quiesced {
-                    unquiesce_on_drop("configure-push failed after state replay", &err);
-                    let _ = reconfigurer.unquiesce(&source.id, &old_sandbox_id).await;
-                }
-                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
-                return Err(SwarmError::Internal(format!(
-                    "rotate configure-push failed after state replay: {err}"
-                )));
             }
         }
 
@@ -1631,9 +1749,9 @@ impl InstanceService {
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
-                new_template_id,
-                &target_policy,
-                &row_policy_cidrs(&target_policy, &resolved),
+                &plan.target_template_id,
+                target_policy,
+                &row_policy_cidrs(target_policy, resolved),
                 now_secs(),
             )
             .await
@@ -1644,7 +1762,7 @@ impl InstanceService {
             if quiesced {
                 if let Some(rc) = self.reconfigurer.as_ref() {
                     unquiesce_on_drop("DB swap failed", &e);
-                    let _ = rc.unquiesce(&source.id, &old_sandbox_id).await;
+                    let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
                 }
             }
             if let Err(d) = self.cube.destroy_sandbox(&info.sandbox_id).await {
@@ -1665,27 +1783,15 @@ impl InstanceService {
         // pointing at a Live cube that hasn't been reconfigured yet;
         // the runtime config sync sweep will retry the non-identity
         // parts on the next swarm restart.
-        if replay_state_files.is_none()
-            && let Some(reconfigurer) = self.reconfigurer.as_ref()
-        {
-            let body = self
-                .configure_body_for_existing_row(
-                    owner_id,
-                    &source,
-                    &runtime_tokens.proxy,
-                    &runtime_tokens.ingest,
-                    &runtime_tokens.state_sync,
-                )
-                .await;
-            if let Err(err) =
-                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
-            {
-                tracing::warn!(
-                    instance = %source.id,
-                    error = %err,
-                    "rotate-in-place: configure-push failed; will be retried by next sweep"
-                );
-            }
+        if replay_state_files.is_none() {
+            self.push_configure_best_effort(
+                owner_id,
+                source,
+                &runtime_tokens,
+                &info.sandbox_id,
+                "rotate",
+            )
+            .await;
         }
 
         // Phase 6: destroy the old cube.  Force=true so a stuck
@@ -1694,20 +1800,8 @@ impl InstanceService {
         // row already points to the new sandbox, so subsequent
         // reads are correct; a leaked cube is a janitor problem,
         // not a correctness problem.
-        if let Err(err) = self.cube.destroy_sandbox(&old_sandbox_id).await {
-            tracing::warn!(
-                instance = %source.id,
-                old_sandbox = %old_sandbox_id,
-                error = %err,
-                "rotate-in-place: old cube destroy failed (orphan cube — janitor will sweep)"
-            );
-        } else {
-            tracing::info!(
-                instance = %source.id,
-                old_sandbox = %old_sandbox_id,
-                "rotate-in-place: old cube destroyed"
-            );
-        }
+        self.destroy_old_sandbox_after_in_place_swap(source, old_sandbox_id, "rotate")
+            .await;
 
         // Re-fetch so callers see the post-swap row state.
         self.instances
@@ -1878,71 +1972,36 @@ impl InstanceService {
         new_template_id: &str,
         new_network_policy: Option<NetworkPolicy>,
     ) -> Result<InstanceRow, SwarmError> {
-        if new_template_id.trim().is_empty() {
-            return Err(SwarmError::BadRequest("template_id is required".into()));
-        }
-        let source = self
-            .instances
-            .get_for_owner(owner_id, instance_id)
-            .await?
-            .ok_or(SwarmError::NotFound)?;
-        if source.status == InstanceStatus::Destroyed {
-            return Err(SwarmError::BadRequest(
-                "cannot recreate a destroyed instance".into(),
-            ));
-        }
-        let old_sandbox_id = source
-            .cube_sandbox_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                SwarmError::BadRequest(
-                    "instance has no live cube sandbox; recreate requires a Live row".into(),
-                )
-            })?
-            .to_owned();
-        let target_policy = new_network_policy.unwrap_or(source.network_policy.clone());
-        let resolved =
-            network_policy::resolve(&target_policy, self.llm_cidr.as_deref(), &*self.resolver)
-                .await?;
+        let plan = self
+            .build_in_place_swap_plan(
+                owner_id,
+                instance_id,
+                new_template_id,
+                new_network_policy,
+                "cannot recreate a destroyed instance",
+                "instance has no live cube sandbox; recreate requires a Live row",
+            )
+            .await?;
+        let source = &plan.source;
+        let old_sandbox_id = &plan.old_sandbox_id;
 
         tracing::warn!(
             instance = %source.id,
             from_template = %source.template_id,
-            to_template = %new_template_id,
+            to_template = %plan.target_template_id,
             state_replay = self.state_files.is_some(),
             "recreate-in-place: starting clean swap"
         );
 
         let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
         let replay_state_files = self.state_files.clone();
-        let mut managed = managed_env(
-            &self.proxy_base,
-            &runtime_tokens.proxy,
-            &runtime_tokens.ingest,
-            &runtime_tokens.state_sync,
-            &source.id,
-            &source.bearer_token,
-            &source.name,
-            &source.task,
-            &target_policy,
-        );
-        if replay_state_files.is_some() {
-            // Keep the clean cube from syncing template-default state
-            // back over the durable mirror before replay lands.
-            managed.remove(ENV_STATE_SYNC_URL);
-            managed.remove(ENV_STATE_SYNC_TOKEN);
-        }
-        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
-
         let info = self
-            .cube
-            .create_sandbox(CreateSandboxArgs {
-                template_id: new_template_id.to_owned(),
-                env,
-                from_snapshot_path: None,
-                resolved_policy: resolved.clone(),
-            })
+            .create_in_place_swap_sandbox(
+                &plan,
+                &runtime_tokens,
+                None,
+                replay_state_files.is_some(),
+            )
             .await?;
         tracing::info!(
             instance = %source.id,
@@ -1953,45 +2012,19 @@ impl InstanceService {
 
         if let Some(state_files) = replay_state_files.as_ref() {
             if let Err(err) = self
-                .replay_state_files_to_sandbox(
+                .replay_state_files_and_configure(
                     owner_id,
-                    &source.id,
+                    source,
+                    &runtime_tokens,
                     &info.sandbox_id,
                     state_files,
                     false,
+                    "recreate",
                 )
                 .await
             {
                 let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
                 return Err(err);
-            }
-
-            let reconfigurer = self.reconfigurer.as_ref().ok_or_else(|| {
-                SwarmError::PolicyDenied("dyson reconfigurer not configured".into())
-            })?;
-            let mut body = self
-                .configure_body_for_existing_row(
-                    owner_id,
-                    &source,
-                    &runtime_tokens.proxy,
-                    &runtime_tokens.ingest,
-                    &runtime_tokens.state_sync,
-                )
-                .await;
-            self.clear_identity_fields_when_mirror_is_authoritative(
-                &mut body,
-                owner_id,
-                &source.id,
-                state_files,
-            )
-            .await?;
-            if let Err(err) =
-                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
-            {
-                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
-                return Err(SwarmError::Internal(format!(
-                    "recreate configure-push failed after state replay: {err}"
-                )));
             }
         }
 
@@ -1999,50 +2032,26 @@ impl InstanceService {
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
-                new_template_id,
-                &target_policy,
-                &row_policy_cidrs(&target_policy, &resolved),
+                &plan.target_template_id,
+                &plan.target_policy,
+                &row_policy_cidrs(&plan.target_policy, &plan.resolved_policy),
                 now_secs(),
             )
             .await?;
 
-        if replay_state_files.is_none()
-            && let Some(reconfigurer) = self.reconfigurer.as_ref()
-        {
-            let body = self
-                .configure_body_for_existing_row(
-                    owner_id,
-                    &source,
-                    &runtime_tokens.proxy,
-                    &runtime_tokens.ingest,
-                    &runtime_tokens.state_sync,
-                )
-                .await;
-            if let Err(err) =
-                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
-            {
-                tracing::warn!(
-                    instance = %source.id,
-                    error = %err,
-                    "recreate-in-place: configure-push failed; will be retried by next sweep"
-                );
-            }
+        if replay_state_files.is_none() {
+            self.push_configure_best_effort(
+                owner_id,
+                source,
+                &runtime_tokens,
+                &info.sandbox_id,
+                "recreate",
+            )
+            .await;
         }
 
-        if let Err(err) = self.cube.destroy_sandbox(&old_sandbox_id).await {
-            tracing::warn!(
-                instance = %source.id,
-                old_sandbox = %old_sandbox_id,
-                error = %err,
-                "recreate-in-place: old cube destroy failed (orphan cube — janitor will sweep)"
-            );
-        } else {
-            tracing::info!(
-                instance = %source.id,
-                old_sandbox = %old_sandbox_id,
-                "recreate-in-place: old cube destroyed"
-            );
-        }
+        self.destroy_old_sandbox_after_in_place_swap(source, old_sandbox_id, "recreate")
+            .await;
 
         self.instances
             .get_for_owner(owner_id, &source.id)
@@ -2062,71 +2071,29 @@ impl InstanceService {
         new_template_id: &str,
         state_files: &crate::state_files::StateFileService,
     ) -> Result<InstanceRow, SwarmError> {
-        if new_template_id.trim().is_empty() {
-            return Err(SwarmError::BadRequest("template_id is required".into()));
-        }
-        let source = self
-            .instances
-            .get_for_owner(owner_id, instance_id)
-            .await?
-            .ok_or(SwarmError::NotFound)?;
-        if source.status == InstanceStatus::Destroyed {
-            return Err(SwarmError::BadRequest(
-                "cannot reset a destroyed instance".into(),
-            ));
-        }
-        let old_sandbox_id = source
-            .cube_sandbox_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                SwarmError::BadRequest(
-                    "instance has no live cube sandbox; reset requires a Live row".into(),
-                )
-            })?
-            .to_owned();
-        let resolved = network_policy::resolve(
-            &source.network_policy,
-            self.llm_cidr.as_deref(),
-            &*self.resolver,
-        )
-        .await?;
+        let plan = self
+            .build_in_place_swap_plan(
+                owner_id,
+                instance_id,
+                new_template_id,
+                None,
+                "cannot reset a destroyed instance",
+                "instance has no live cube sandbox; reset requires a Live row",
+            )
+            .await?;
+        let source = &plan.source;
+        let old_sandbox_id = &plan.old_sandbox_id;
 
         tracing::info!(
             instance = %source.id,
             from_template = %source.template_id,
-            to_template = %new_template_id,
+            to_template = %plan.target_template_id,
             "reset-in-place: starting clean rebuild with sealed state replay"
         );
 
         let runtime_tokens = self.runtime_tokens_for_instance(&source.id).await?;
-        let mut managed = managed_env(
-            &self.proxy_base,
-            &runtime_tokens.proxy,
-            &runtime_tokens.ingest,
-            &runtime_tokens.state_sync,
-            &source.id,
-            &source.bearer_token,
-            &source.name,
-            &source.task,
-            &source.network_policy,
-        );
-        // The clean cube must not mirror its template-default workspace
-        // back over the durable swarm copy before replay completes.  The
-        // final configure push below enables state sync after the files
-        // have landed.
-        managed.remove(ENV_STATE_SYNC_URL);
-        managed.remove(ENV_STATE_SYNC_TOKEN);
-        let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
-
         let info = self
-            .cube
-            .create_sandbox(CreateSandboxArgs {
-                template_id: new_template_id.to_owned(),
-                env,
-                from_snapshot_path: None,
-                resolved_policy: resolved.clone(),
-            })
+            .create_in_place_swap_sandbox(&plan, &runtime_tokens, None, true)
             .await?;
         tracing::info!(
             instance = %source.id,
@@ -2136,12 +2103,14 @@ impl InstanceService {
         );
 
         if let Err(err) = self
-            .replay_state_files_to_sandbox(
+            .replay_state_files_and_configure(
                 owner_id,
-                &source.id,
+                source,
+                &runtime_tokens,
                 &info.sandbox_id,
                 state_files,
                 true,
+                "reset",
             )
             .await
         {
@@ -2149,46 +2118,14 @@ impl InstanceService {
             return Err(err);
         }
 
-        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let mut body = self
-                .configure_body_for_existing_row(
-                    owner_id,
-                    &source,
-                    &runtime_tokens.proxy,
-                    &runtime_tokens.ingest,
-                    &runtime_tokens.state_sync,
-                )
-                .await;
-            self.clear_identity_fields_when_mirror_is_authoritative(
-                &mut body,
-                owner_id,
-                &source.id,
-                state_files,
-            )
-            .await?;
-            if let Err(err) =
-                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
-            {
-                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
-                return Err(SwarmError::Internal(format!(
-                    "reset configure-push failed after state replay: {err}"
-                )));
-            }
-        } else {
-            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
-            return Err(SwarmError::PolicyDenied(
-                "dyson reconfigurer not configured".into(),
-            ));
-        }
-
         if let Err(err) = self
             .instances
             .replace_cube_sandbox(
                 &source.id,
                 &info.sandbox_id,
-                new_template_id,
-                &source.network_policy,
-                &row_policy_cidrs(&source.network_policy, &resolved),
+                &plan.target_template_id,
+                &plan.target_policy,
+                &row_policy_cidrs(&plan.target_policy, &plan.resolved_policy),
                 now_secs(),
             )
             .await
@@ -2197,20 +2134,8 @@ impl InstanceService {
             return Err(err.into());
         }
 
-        if let Err(err) = self.cube.destroy_sandbox(&old_sandbox_id).await {
-            tracing::warn!(
-                instance = %source.id,
-                old_sandbox = %old_sandbox_id,
-                error = %err,
-                "reset-in-place: old cube destroy failed (orphan cube — janitor will sweep)"
-            );
-        } else {
-            tracing::info!(
-                instance = %source.id,
-                old_sandbox = %old_sandbox_id,
-                "reset-in-place: old cube destroyed"
-            );
-        }
+        self.destroy_old_sandbox_after_in_place_swap(source, old_sandbox_id, "reset")
+            .await;
 
         self.instances
             .get_for_owner(owner_id, &source.id)
