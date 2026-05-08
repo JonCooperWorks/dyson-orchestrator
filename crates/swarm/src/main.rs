@@ -180,11 +180,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
     ));
+    let skill_marketplace_store = Arc::new(
+        dyson_swarm::db::skill_marketplace::SqlxSkillMarketplaceSourceStore::new(pool.clone()),
+    );
     let skill_marketplace = Arc::new(
-        dyson_swarm::skill_marketplace::SkillMarketplaceService::new(
-            cfg.skill_marketplace.clone(),
-            cfg.backup.local_cache_dir.clone(),
-        ),
+        dyson_swarm::skill_marketplace::SkillMarketplaceService::new(skill_marketplace_store),
     );
 
     // Dyson agents inside cube sandboxes can't reach swarm's bind

@@ -306,10 +306,7 @@ async fn build() -> Fixture {
         artefact_cache,
         state_files,
         skill_marketplace: Arc::new(
-            dyson_swarm::skill_marketplace::SkillMarketplaceService::new(
-                dyson_swarm::skill_marketplace::SkillMarketplaceConfig::default(),
-                cache_dir.path().to_path_buf(),
-            ),
+            dyson_swarm::skill_marketplace::SkillMarketplaceService::empty(),
         ),
         mcp_runtime_socket: None,
     };

@@ -7,18 +7,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::db::skill_marketplace::{SkillMarketplaceSourceRow, SqlxSkillMarketplaceSourceStore};
+use crate::error::StoreError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const DEFAULT_INDEX_REL: &str = "skill-marketplaces/marketplace.json";
 const MAX_INDEX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SKILL_BYTES: usize = 64 * 1024;
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SkillMarketplaceConfig {
-    #[serde(default)]
-    pub marketplaces: Vec<SkillMarketplaceSourceConfig>,
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -54,7 +49,22 @@ pub struct SkillMarketplaceSourceView {
     pub id: String,
     pub source_type: String,
     pub location: String,
+    /// Kept for older Dyson clients. DB-backed marketplaces are never
+    /// implicit defaults, so this is always false.
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SkillMarketplaceAdminSourceView {
+    pub id: String,
+    pub source_type: String,
+    pub location: String,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_fetch_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,12 +164,13 @@ pub enum SkillMarketplaceError {
     Io(String),
     #[error("marketplace HTTP: {0}")]
     Http(String),
+    #[error("marketplace store: {0}")]
+    Store(String),
 }
 
 #[derive(Clone)]
 pub struct SkillMarketplaceService {
-    sources: Arc<Vec<SkillMarketplaceSourceConfig>>,
-    data_dir: PathBuf,
+    store: Option<Arc<SqlxSkillMarketplaceSourceStore>>,
     http: reqwest::Client,
 }
 
@@ -169,37 +180,83 @@ struct LoadedIndex {
 }
 
 impl SkillMarketplaceService {
-    pub fn new(config: SkillMarketplaceConfig, data_dir: PathBuf) -> Self {
+    pub fn new(store: Arc<SqlxSkillMarketplaceSourceStore>) -> Self {
+        Self::from_store(Some(store))
+    }
+
+    pub fn empty() -> Self {
+        Self::from_store(None)
+    }
+
+    fn from_store(store: Option<Arc<SqlxSkillMarketplaceSourceStore>>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self {
-            sources: Arc::new(config.marketplaces),
-            data_dir,
-            http,
-        }
+        Self { store, http }
     }
 
-    pub fn source_views(&self) -> Vec<SkillMarketplaceSourceView> {
-        self.sources()
+    pub async fn source_views(
+        &self,
+    ) -> Result<Vec<SkillMarketplaceSourceView>, SkillMarketplaceError> {
+        Ok(self
+            .enabled_source_rows()
+            .await?
             .into_iter()
-            .map(|(source, is_default)| SkillMarketplaceSourceView {
-                id: source.id().to_string(),
-                source_type: source.source_type().to_string(),
-                location: source.location(),
-                is_default,
-            })
-            .collect()
+            .map(|row| source_view(&row.source))
+            .collect())
+    }
+
+    pub async fn admin_source_views(
+        &self,
+    ) -> Result<Vec<SkillMarketplaceAdminSourceView>, SkillMarketplaceError> {
+        Ok(self
+            .source_rows()
+            .await?
+            .into_iter()
+            .map(|row| admin_source_view(&row))
+            .collect())
+    }
+
+    pub async fn upsert_source(
+        &self,
+        source: SkillMarketplaceSourceConfig,
+        enabled: bool,
+    ) -> Result<SkillMarketplaceAdminSourceView, SkillMarketplaceError> {
+        let store = self.store()?;
+        let row = store.upsert(&source, enabled).await.map_err(store_err)?;
+        Ok(admin_source_view(&row))
+    }
+
+    pub async fn delete_source(&self, id: &str) -> Result<bool, SkillMarketplaceError> {
+        let store = self.store()?;
+        store.delete(id).await.map_err(store_err)
     }
 
     pub async fn catalog(&self) -> CatalogListing {
-        let sources = self.source_views();
+        let rows = match self.enabled_source_rows().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                return CatalogListing {
+                    sources: Vec::new(),
+                    skills: Vec::new(),
+                    errors: vec![CatalogError {
+                        marketplace_id: "database".into(),
+                        error: e.to_string(),
+                    }],
+                };
+            }
+        };
+        let sources = rows
+            .iter()
+            .map(|row| source_view(&row.source))
+            .collect::<Vec<_>>();
         let mut skills = Vec::new();
         let mut errors = Vec::new();
 
-        for (source, _) in self.sources() {
-            match self.load_index(&source).await {
+        for row in rows {
+            let source = row.source;
+            match self.load_index_recording(&source).await {
                 Ok(loaded) => {
                     for package in &loaded.index.skills {
                         match catalog_skill(&loaded.index.marketplace, package) {
@@ -288,38 +345,74 @@ impl SkillMarketplaceService {
         })
     }
 
-    fn sources(&self) -> Vec<(SkillMarketplaceSourceConfig, bool)> {
-        if self.sources.is_empty() {
-            let path = self.data_dir.join(DEFAULT_INDEX_REL);
-            if path.is_file() {
-                return vec![(
-                    SkillMarketplaceSourceConfig::File {
-                        id: "local".into(),
-                        path,
-                    },
-                    true,
-                )];
-            }
-        }
-        self.sources
-            .iter()
-            .cloned()
-            .map(|source| (source, false))
-            .collect()
-    }
-
     async fn load_marketplace(
         &self,
         marketplace: &str,
     ) -> Result<LoadedIndex, SkillMarketplaceError> {
-        for (source, _) in self.sources() {
+        for row in self.enabled_source_rows().await? {
+            let source = row.source;
             if source.id() == marketplace {
-                return self.load_index(&source).await;
+                return self.load_index_recording(&source).await;
             }
         }
         Err(SkillMarketplaceError::MarketplaceNotFound(
             marketplace.to_string(),
         ))
+    }
+
+    fn store(&self) -> Result<&Arc<SqlxSkillMarketplaceSourceStore>, SkillMarketplaceError> {
+        self.store.as_ref().ok_or_else(|| {
+            SkillMarketplaceError::Store("skill marketplace source store is not configured".into())
+        })
+    }
+
+    async fn source_rows(&self) -> Result<Vec<SkillMarketplaceSourceRow>, SkillMarketplaceError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        store.list().await.map_err(store_err)
+    }
+
+    async fn enabled_source_rows(
+        &self,
+    ) -> Result<Vec<SkillMarketplaceSourceRow>, SkillMarketplaceError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        store.list_enabled().await.map_err(store_err)
+    }
+
+    async fn load_index_recording(
+        &self,
+        source: &SkillMarketplaceSourceConfig,
+    ) -> Result<LoadedIndex, SkillMarketplaceError> {
+        let loaded = self.load_index(source).await;
+        if let Some(store) = self.store.as_ref() {
+            match &loaded {
+                Ok(_) => {
+                    if let Err(err) = store.record_fetch_success(source.id()).await {
+                        tracing::warn!(
+                            error = %err,
+                            marketplace = source.id(),
+                            "skill marketplace fetch status update failed"
+                        );
+                    }
+                }
+                Err(fetch_err) => {
+                    if let Err(err) = store
+                        .record_fetch_error(source.id(), &fetch_err.to_string())
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %err,
+                            marketplace = source.id(),
+                            "skill marketplace fetch error update failed"
+                        );
+                    }
+                }
+            }
+        }
+        loaded
     }
 
     async fn load_index(
@@ -431,6 +524,33 @@ impl SkillMarketplaceService {
     }
 }
 
+fn source_view(source: &SkillMarketplaceSourceConfig) -> SkillMarketplaceSourceView {
+    SkillMarketplaceSourceView {
+        id: source.id().to_string(),
+        source_type: source.source_type().to_string(),
+        location: source.location(),
+        is_default: false,
+    }
+}
+
+fn admin_source_view(row: &SkillMarketplaceSourceRow) -> SkillMarketplaceAdminSourceView {
+    SkillMarketplaceAdminSourceView {
+        id: row.source.id().to_string(),
+        source_type: row.source.source_type().to_string(),
+        location: row.source.location(),
+        enabled: row.enabled,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        last_fetch_at: row.last_fetch_at,
+        last_success_at: row.last_success_at,
+        last_error: row.last_error.clone(),
+    }
+}
+
+fn store_err(err: StoreError) -> SkillMarketplaceError {
+    SkillMarketplaceError::Store(err.to_string())
+}
+
 fn catalog_skill(
     marketplace: &MarketplaceInfo,
     package: &MarketplaceSkillPackage,
@@ -481,6 +601,31 @@ fn validate_index(
     validate_marketplace_id(&index.marketplace.id)?;
     for package in &index.skills {
         validate_skill_name(&package.name)?;
+    }
+    Ok(())
+}
+
+pub fn validate_marketplace_source_config(
+    source: &SkillMarketplaceSourceConfig,
+) -> Result<(), SkillMarketplaceError> {
+    validate_marketplace_id(source.id())?;
+    match source {
+        SkillMarketplaceSourceConfig::File { path, .. } => {
+            if path.as_os_str().is_empty() {
+                return Err(SkillMarketplaceError::Invalid(
+                    "file marketplace path is empty".into(),
+                ));
+            }
+        }
+        SkillMarketplaceSourceConfig::Http { url, .. } => {
+            let url = reqwest::Url::parse(url)
+                .map_err(|e| SkillMarketplaceError::Invalid(format!("bad URL: {e}")))?;
+            if url.scheme() != "https" {
+                return Err(SkillMarketplaceError::Invalid(
+                    "HTTP marketplace indexes must use https".into(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -580,6 +725,7 @@ fn preview(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::open_in_memory;
 
     fn index_json(skill_md: &str, sha256: Option<&str>) -> String {
         let mut value = serde_json::json!({
@@ -615,15 +761,19 @@ mod tests {
             index_json(skill, Some(&hash)),
         )
         .unwrap();
-        let svc = SkillMarketplaceService::new(
-            SkillMarketplaceConfig {
-                marketplaces: vec![SkillMarketplaceSourceConfig::File {
+        let pool = open_in_memory().await.unwrap();
+        let store = Arc::new(SqlxSkillMarketplaceSourceStore::new(pool));
+        store
+            .upsert(
+                &SkillMarketplaceSourceConfig::File {
                     id: "local".into(),
                     path: dir.path().join("marketplace.json"),
-                }],
-            },
-            dir.path().to_path_buf(),
-        );
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        let svc = SkillMarketplaceService::new(store);
 
         let listing = svc.catalog().await;
         assert!(listing.errors.is_empty());
@@ -632,6 +782,34 @@ mod tests {
         let body = svc.content("local", "code-review").await.unwrap();
         assert_eq!(body.skill_md, skill);
         assert_eq!(body.computed_sha256, hash);
+    }
+
+    #[tokio::test]
+    async fn disabled_db_sources_do_not_feed_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("marketplace.json"),
+            index_json("body", None),
+        )
+        .unwrap();
+        let pool = open_in_memory().await.unwrap();
+        let store = Arc::new(SqlxSkillMarketplaceSourceStore::new(pool));
+        store
+            .upsert(
+                &SkillMarketplaceSourceConfig::File {
+                    id: "local".into(),
+                    path: dir.path().join("marketplace.json"),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let svc = SkillMarketplaceService::new(store);
+
+        let listing = svc.catalog().await;
+        assert!(listing.sources.is_empty());
+        assert!(listing.skills.is_empty());
+        assert!(listing.errors.is_empty());
     }
 
     #[tokio::test]

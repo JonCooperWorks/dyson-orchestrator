@@ -146,6 +146,31 @@
   white-space: pre;
 }
 
+.admin-skill-marketplace-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 190px) minmax(90px, 120px) minmax(280px, 1fr) auto auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.admin-skill-marketplace-location {
+  min-width: 0;
+}
+
+.admin-skill-marketplace-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+@media (max-width: 900px) {
+  .admin-skill-marketplace-form {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}
+
 .admin-catalog-token-workbench {
   display: flex;
   flex-direction: column;

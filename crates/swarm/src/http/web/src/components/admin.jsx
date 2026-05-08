@@ -73,6 +73,7 @@ export function AdminView({ view = { name: 'admin' } }) {
         <h2>admin</h2>
       </header>
       <DockerCatalogPanel client={client}/>
+      <SkillMarketplaceSourcesPanel client={client}/>
       <UsersPanel client={client}/>
       <ProxyTokensPanel client={client}/>
     </main>
@@ -198,6 +199,220 @@ function DockerCatalogPanel({ client }) {
       )}
     </section>
   );
+}
+
+// ─── Skill marketplace sources panel ─────────────────────────────
+
+const SKILL_MARKETPLACE_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+function SkillMarketplaceSourcesPanel({ client }) {
+  const [rows, setRows] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const [form, setForm] = React.useState(emptySkillMarketplaceSource());
+  const [editingId, setEditingId] = React.useState(null);
+
+  const available = Boolean(
+    client.adminListSkillMarketplaces
+      && client.adminPutSkillMarketplaceSource
+      && client.adminDeleteSkillMarketplaceSource,
+  );
+
+  const refresh = React.useCallback(async () => {
+    if (!available) return;
+    setErr(null);
+    try {
+      const body = await client.adminListSkillMarketplaces();
+      setRows(Array.isArray(body?.sources) ? body.sources : []);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'list skill marketplaces failed');
+    }
+  }, [available, client]);
+
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  if (!available) return null;
+
+  const resetForm = () => {
+    setForm(emptySkillMarketplaceSource());
+    setEditingId(null);
+    setErr(null);
+  };
+
+  const save = async (e) => {
+    e.preventDefault();
+    const id = form.id.trim();
+    const location = form.location.trim();
+    if (!SKILL_MARKETPLACE_ID_RE.test(id)) {
+      setErr('marketplace id must be lowercase words separated by hyphens');
+      return;
+    }
+    if (!location) {
+      setErr('marketplace location is required');
+      return;
+    }
+    setBusy(true); setErr(null);
+    try {
+      await client.adminPutSkillMarketplaceSource(id, {
+        source_type: form.source_type,
+        location,
+        enabled: form.enabled,
+      });
+      await refresh();
+      resetForm();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'save skill marketplace failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const edit = (row) => {
+    setEditingId(row.id);
+    setForm({
+      id: row.id,
+      source_type: row.source_type || 'http',
+      location: row.location || '',
+      enabled: row.enabled !== false,
+    });
+    setErr(null);
+  };
+
+  const remove = async (row) => {
+    if (!confirm(`delete skill marketplace ${row.id}?`)) return;
+    setBusy(true); setErr(null);
+    try {
+      await client.adminDeleteSkillMarketplaceSource(row.id);
+      await refresh();
+      if (editingId === row.id) resetForm();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'delete skill marketplace failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">skill marketplaces</div>
+        <div className="panel-actions">
+          <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={busy}>
+            refresh
+          </button>
+        </div>
+      </div>
+      {err ? <div className="error">{err}</div> : null}
+      <form className="form admin-skill-marketplace-form" onSubmit={save}>
+        <label className="field">
+          <span>id</span>
+          <input
+            value={form.id}
+            onChange={e => setForm(curr => ({ ...curr, id: e.target.value }))}
+            placeholder="team-skills"
+            disabled={busy || Boolean(editingId)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="field">
+          <span>type</span>
+          <select
+            value={form.source_type}
+            onChange={e => setForm(curr => ({ ...curr, source_type: e.target.value }))}
+            disabled={busy}
+          >
+            <option value="http">http</option>
+            <option value="file">file</option>
+          </select>
+        </label>
+        <label className="field admin-skill-marketplace-location">
+          <span>location</span>
+          <input
+            value={form.location}
+            onChange={e => setForm(curr => ({ ...curr, location: e.target.value }))}
+            placeholder={form.source_type === 'http' ? 'https://example.com/marketplace.json' : '/var/lib/dyson-swarm/marketplace.json'}
+            disabled={busy}
+            autoComplete="off"
+          />
+        </label>
+        <label className="field check">
+          <input
+            type="checkbox"
+            checked={form.enabled}
+            onChange={e => setForm(curr => ({ ...curr, enabled: e.target.checked }))}
+            disabled={busy}
+          />
+          <span>enabled</span>
+        </label>
+        <div className="admin-skill-marketplace-actions">
+          <button className="btn btn-primary btn-sm" type="submit" disabled={busy}>
+            {editingId ? 'save source' : 'add source'}
+          </button>
+          {editingId ? (
+            <button className="btn btn-ghost btn-sm" type="button" onClick={resetForm} disabled={busy}>
+              cancel
+            </button>
+          ) : null}
+        </div>
+      </form>
+      {rows === null ? (
+        <p className="muted small">loading...</p>
+      ) : rows.length === 0 ? (
+        <p className="muted small">no skill marketplaces.</p>
+      ) : (
+        <table className="rows">
+          <thead><tr>
+            <th>id</th><th>type</th><th>status</th><th>location</th><th>last fetch</th><th></th>
+          </tr></thead>
+          <tbody>
+            {rows.map(row => (
+              <tr key={row.id}>
+                <td data-label="id"><code className="mono-sm">{row.id}</code></td>
+                <td data-label="type">{row.source_type}</td>
+                <td data-label="status">
+                  <span className={`badge badge-${row.enabled === false ? 'faint' : 'ok'}`}>
+                    {row.enabled === false ? 'disabled' : 'enabled'}
+                  </span>
+                  {row.last_error ? (
+                    <div className="error small">{row.last_error}</div>
+                  ) : null}
+                </td>
+                <td data-label="location">
+                  <code className="mono-sm">{row.location}</code>
+                </td>
+                <td data-label="last fetch" className="muted small">{fmtTime(row.last_fetch_at)}</td>
+                <td className="row-actions">
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => edit(row)}
+                    disabled={busy}
+                  >
+                    edit
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => remove(row)}
+                    disabled={busy}
+                  >
+                    delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+function emptySkillMarketplaceSource() {
+  return {
+    id: '',
+    source_type: 'http',
+    location: '',
+    enabled: true,
+  };
 }
 
 function emptyDockerCatalogPreset() {

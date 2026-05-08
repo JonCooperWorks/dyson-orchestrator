@@ -80,8 +80,6 @@ pub struct Config {
     pub cube: CubeConfig,
     #[serde(default)]
     pub mcp_runtime: Option<McpRuntimeConfig>,
-    #[serde(default)]
-    pub skill_marketplace: crate::skill_marketplace::SkillMarketplaceConfig,
     pub default_policy: DefaultPolicy,
     #[serde(default)]
     pub providers: Providers,

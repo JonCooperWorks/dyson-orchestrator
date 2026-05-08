@@ -546,6 +546,23 @@ export class SwarmClient {
       method: 'DELETE',
     });
   }
+  adminListSkillMarketplaces() {
+    return this._json('/v1/admin/skill-marketplaces', {
+      headers: { Accept: 'application/json' },
+    });
+  }
+  adminPutSkillMarketplaceSource(id, { source_type, location, enabled = true }) {
+    return this._json(`/v1/admin/skill-marketplaces/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_type, location, enabled }),
+    });
+  }
+  adminDeleteSkillMarketplaceSource(id) {
+    return this._json(`/v1/admin/skill-marketplaces/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
 
   requestMcpDockerCatalogServer(id, { label, description = null, template, placeholders = [] }) {
     return this._json(`/v1/mcp/docker-catalog/requests/${encodeURIComponent(id)}`, {

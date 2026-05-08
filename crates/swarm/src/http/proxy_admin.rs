@@ -223,10 +223,7 @@ mod tests {
             shares: shares_svc,
             artefact_cache,
             state_files,
-            skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::new(
-                crate::skill_marketplace::SkillMarketplaceConfig::default(),
-                cache_dir.path().to_path_buf(),
-            )),
+            skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::empty()),
             mcp_runtime_socket: None,
         };
         (state, tokens_store, token)

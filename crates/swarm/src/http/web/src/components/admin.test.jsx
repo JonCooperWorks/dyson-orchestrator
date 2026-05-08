@@ -12,6 +12,52 @@ afterEach(() => {
 });
 
 describe('AdminView Docker MCP catalog', () => {
+  test('manages DB-backed skill marketplace sources in the admin panel', async () => {
+    let sources = [{
+      id: 'team-skills',
+      source_type: 'http',
+      location: 'https://example.test/marketplace.json',
+      enabled: true,
+      created_at: 1,
+      updated_at: 2,
+      last_fetch_at: null,
+      last_success_at: null,
+      last_error: null,
+    }];
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources })),
+      adminPutSkillMarketplaceSource: vi.fn(async (id, payload) => {
+        sources = [{ id, ...payload, created_at: 1, updated_at: 3 }];
+        return sources[0];
+      }),
+      adminDeleteSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByText('skill marketplaces')).toBeInTheDocument();
+    expect(await screen.findByText('team-skills')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'edit' })[0]);
+    expect(screen.getByLabelText('location')).toHaveValue('https://example.test/marketplace.json');
+    fireEvent.change(screen.getByLabelText('location'), {
+      target: { value: 'https://example.test/marketplace-v2.json' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'save source' }));
+
+    await waitFor(() => expect(client.adminPutSkillMarketplaceSource).toHaveBeenCalledTimes(1));
+    expect(client.adminPutSkillMarketplaceSource).toHaveBeenCalledWith('team-skills', {
+      source_type: 'http',
+      location: 'https://example.test/marketplace-v2.json',
+      enabled: true,
+    });
+  });
+
   test('links add and edit actions to dedicated catalog pages', async () => {
     const client = {
       adminListUsers: vi.fn().mockResolvedValue([]),

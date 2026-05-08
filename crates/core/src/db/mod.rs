@@ -24,6 +24,7 @@ pub mod policies;
 pub mod runtime_migrations;
 pub mod secrets;
 pub mod shares;
+pub mod skill_marketplace;
 pub mod snapshots;
 pub mod state_files;
 pub mod tokens;

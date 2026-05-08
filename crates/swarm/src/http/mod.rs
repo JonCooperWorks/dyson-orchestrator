@@ -177,6 +177,7 @@ pub fn router(
     let admin_handlers = proxy_admin::router(state.clone())
         .merge(crate::http::admin_users::router(state.clone()))
         .merge(instances::admin_router(state.clone()))
+        .merge(skill_marketplace::admin_router(state.clone()))
         .merge(mcp_admin_router);
     let admin = if auth.dangerous_no_auth {
         admin_handlers.layer(middleware::from_fn_with_state(
@@ -408,10 +409,7 @@ mod tests {
             shares: shares_svc,
             artefact_cache,
             state_files,
-            skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::new(
-                crate::skill_marketplace::SkillMarketplaceConfig::default(),
-                cache_dir.path().to_path_buf(),
-            )),
+            skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::empty()),
             mcp_runtime_socket: None,
         };
         (state, users_store)

@@ -398,10 +398,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         artefact_cache,
         state_files,
         skill_marketplace: Arc::new(
-            dyson_swarm::skill_marketplace::SkillMarketplaceService::new(
-                dyson_swarm::skill_marketplace::SkillMarketplaceConfig::default(),
-                cache_dir.path().to_path_buf(),
-            ),
+            dyson_swarm::skill_marketplace::SkillMarketplaceService::empty(),
         ),
         mcp_runtime_socket: None,
     };

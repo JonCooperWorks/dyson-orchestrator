@@ -150,6 +150,30 @@ describe('SwarmClient', () => {
     expect(fetchImpl.mock.calls[3][1].method).toBe('DELETE');
   });
 
+  test('admin skill marketplace methods use DB-backed admin routes', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.adminListSkillMarketplaces();
+    await client.adminPutSkillMarketplaceSource('team/skills', {
+      source_type: 'http',
+      location: 'https://example.test/marketplace.json',
+      enabled: false,
+    });
+    await client.adminDeleteSkillMarketplaceSource('team/skills');
+
+    expect(fetchImpl.mock.calls[0][0]).toBe('/v1/admin/skill-marketplaces');
+    expect(fetchImpl.mock.calls[0][1].headers.get('accept')).toBe('application/json');
+    expect(fetchImpl.mock.calls[1][0]).toBe('/v1/admin/skill-marketplaces/team%2Fskills');
+    expect(fetchImpl.mock.calls[1][1].method).toBe('PUT');
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({
+      source_type: 'http',
+      location: 'https://example.test/marketplace.json',
+      enabled: false,
+    });
+    expect(fetchImpl.mock.calls[2][0]).toBe('/v1/admin/skill-marketplaces/team%2Fskills');
+    expect(fetchImpl.mock.calls[2][1].method).toBe('DELETE');
+  });
+
   test('artifact cache methods use the artifact-spelled API routes', async () => {
     const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse([])));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
