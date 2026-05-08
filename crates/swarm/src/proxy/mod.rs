@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::{ByoConfig, ProviderConfig, Providers};
 use crate::proxy::policy_check::{InstancePolicy, UsageSnapshot};
+use crate::proxy::upstream_policy::policy_from_byo;
 use crate::traits::{AuditStore, InstanceStore, PolicyStore, ProviderAdapter, TokenStore};
+use dyson_swarm_core::http::ExternalHttpClient;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// Wires the proxy together. Cheap to clone — every field is `Arc` or
@@ -40,6 +42,7 @@ pub struct ProxyService {
     pub providers: Providers,
     pub adapters: HashMap<&'static str, Arc<dyn ProviderAdapter>>,
     pub http: reqwest::Client,
+    pub external_http: Arc<ExternalHttpClient>,
     pub default_policy: InstancePolicy,
     /// Optional Stage-6 per-user OpenRouter bearer resolver.  When
     /// set, requests to `/llm/openrouter/...` substitute the user's
@@ -79,6 +82,9 @@ impl ProxyService {
             providers,
             adapters: adapters::registry(),
             http,
+            external_http: Arc::new(ExternalHttpClient::new(Arc::new(policy_from_byo(
+                &ByoConfig::default(),
+            )))),
             default_policy,
             user_or_keys: None,
             user_secrets: None,
@@ -107,6 +113,7 @@ impl ProxyService {
     }
 
     pub fn with_byo_config(mut self, byo: ByoConfig) -> Self {
+        self.external_http = Arc::new(ExternalHttpClient::new(Arc::new(policy_from_byo(&byo))));
         self.byo = byo;
         self
     }

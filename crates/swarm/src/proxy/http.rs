@@ -33,7 +33,7 @@ use crate::proxy::byok::{self, KeySource};
 use crate::proxy::policy_check::{EnforceContext, enforce};
 use crate::proxy::recording_body::RecordingBody;
 use crate::proxy::upstream_policy::{
-    ByoUpstreamError, ValidatedByoUpstream, pinned_byo_client_builder, validate_cached_byo_upstream,
+    ByoUpstreamError, ValidatedByoUpstream, validate_cached_byo_upstream,
 };
 use crate::traits::{AuditEntry, TokenRecord};
 
@@ -44,11 +44,14 @@ fn elapsed_ms(started: Instant) -> i64 {
 }
 
 fn build_pinned_byo_client(
+    state: &ProxyService,
     validated: &ValidatedByoUpstream,
-) -> Result<reqwest::Client, reqwest::Error> {
-    pinned_byo_client_builder(validated)
-        .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
-        .build()
+) -> Result<reqwest::Client, String> {
+    state
+        .external_http
+        .for_validated(validated)
+        .map(|(client, _)| client)
+        .map_err(|e| e.to_string())
 }
 
 /// Build the `/llm/*` router. Carries its own state and per-instance-bearer
@@ -194,7 +197,7 @@ async fn handle(
         Some(u) if provider == "byo" => {
             match validate_cached_byo_upstream(&state.byo, &u.upstream, &u.resolved_addrs) {
                 Ok(validated) => {
-                    pinned_byo_client = match build_pinned_byo_client(&validated) {
+                    pinned_byo_client = match build_pinned_byo_client(&state, &validated) {
                         Ok(client) => Some(client),
                         Err(err) => {
                             tracing::warn!(error = %err, "byo upstream client build failed");

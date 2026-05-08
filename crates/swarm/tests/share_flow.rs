@@ -301,6 +301,9 @@ async fn build() -> Fixture {
         user_or_keys: None,
         providers: Arc::new(Providers::default()),
         byo: Arc::new(dyson_swarm::config::ByoConfig::default()),
+        external_http: Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(Arc::new(
+            dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
+        ))),
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

@@ -5,10 +5,11 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::db::skill_marketplace::{SkillMarketplaceSourceRow, SqlxSkillMarketplaceSourceStore};
 use crate::error::StoreError;
+use crate::http::ExternalHttpClient;
+use crate::upstream_policy::OutboundUrlPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -180,7 +181,7 @@ pub enum SkillMarketplaceError {
 #[derive(Clone)]
 pub struct SkillMarketplaceService {
     store: Option<Arc<SqlxSkillMarketplaceSourceStore>>,
-    http: reqwest::Client,
+    external_http: ExternalHttpClient,
 }
 
 struct LoadedIndex {
@@ -190,19 +191,34 @@ struct LoadedIndex {
 
 impl SkillMarketplaceService {
     pub fn new(store: Arc<SqlxSkillMarketplaceSourceStore>) -> Self {
-        Self::from_store(Some(store))
+        Self::from_store(
+            Some(store),
+            ExternalHttpClient::new(Arc::new(OutboundUrlPolicy::default())),
+        )
+    }
+
+    pub fn new_with_external_client(
+        store: Arc<SqlxSkillMarketplaceSourceStore>,
+        external_http: ExternalHttpClient,
+    ) -> Self {
+        Self::from_store(Some(store), external_http)
     }
 
     pub fn empty() -> Self {
-        Self::from_store(None)
+        Self::from_store(
+            None,
+            ExternalHttpClient::new(Arc::new(OutboundUrlPolicy::default())),
+        )
     }
 
-    fn from_store(store: Option<Arc<SqlxSkillMarketplaceSourceStore>>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { store, http }
+    fn from_store(
+        store: Option<Arc<SqlxSkillMarketplaceSourceStore>>,
+        external_http: ExternalHttpClient,
+    ) -> Self {
+        Self {
+            store,
+            external_http,
+        }
     }
 
     pub async fn source_views(
@@ -436,15 +452,17 @@ impl SkillMarketplaceService {
                     .map_err(|e| SkillMarketplaceError::Io(format!("{}: {e}", path.display())))?
             }
             SkillMarketplaceSourceConfig::Http { url, .. } => {
-                let url = reqwest::Url::parse(url)
+                let (http, url) = self
+                    .external_http
+                    .for_url(url)
+                    .await
                     .map_err(|e| SkillMarketplaceError::Invalid(format!("bad URL: {e}")))?;
                 if url.scheme() != "https" {
                     return Err(SkillMarketplaceError::Invalid(
                         "HTTP marketplace indexes must use https".into(),
                     ));
                 }
-                let resp = self
-                    .http
+                let resp = http
                     .get(url)
                     .send()
                     .await
@@ -507,8 +525,12 @@ impl SkillMarketplaceService {
                             "HTTP marketplace content URLs must use https".into(),
                         ));
                     }
-                    let resp = self
-                        .http
+                    let (http, resolved) = self
+                        .external_http
+                        .for_url(resolved.as_str())
+                        .await
+                        .map_err(|e| SkillMarketplaceError::Invalid(format!("content URL: {e}")))?;
+                    let resp = http
                         .get(resolved)
                         .send()
                         .await

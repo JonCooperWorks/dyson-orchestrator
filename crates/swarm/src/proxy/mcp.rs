@@ -34,9 +34,8 @@ use crate::mcp_servers::{
 };
 use crate::secrets::UserSecretsService;
 use crate::traits::{InstanceStatus, InstanceStore, ListFilter, TokenStore};
-use crate::upstream_policy::{
-    OutboundUrlPolicy, pinned_outbound_client_builder, validate_outbound_url,
-};
+use crate::upstream_policy::OutboundUrlPolicy;
+use dyson_swarm_core::http::ExternalHttpClient;
 
 /// Wires the MCP routers.  Cheap to clone — every field is `Arc`.
 #[derive(Clone)]
@@ -45,7 +44,7 @@ pub struct McpService {
     pub instances: Arc<dyn InstanceStore>,
     pub user_secrets: Arc<UserSecretsService>,
     pub flows: OAuthFlowCache,
-    pub http: reqwest::Client,
+    pub external_http: Arc<ExternalHttpClient>,
     /// Public origin of the swarm (e.g. `https://swarm.example.com`).
     /// Used to build the OAuth redirect URI that the upstream provider
     /// sees — must be reachable from the user's browser, which is why
@@ -89,9 +88,9 @@ impl McpService {
             instances,
             user_secrets,
             flows: OAuthFlowCache::new(),
-            http: reqwest::Client::builder()
-                .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
-                .build()?,
+            external_http: Arc::new(ExternalHttpClient::new(Arc::new(
+                OutboundUrlPolicy::default(),
+            ))),
             public_origin,
             instance_svc: None,
             runtime_socket_path: None,
@@ -131,6 +130,7 @@ impl McpService {
     }
 
     pub fn with_mcp_upstream_policy(mut self, policy: OutboundUrlPolicy) -> Self {
+        self.external_http = Arc::new(ExternalHttpClient::new(Arc::new(policy)));
         self.mcp_upstream_policy = policy;
         self
     }
@@ -267,19 +267,26 @@ async fn pinned_remote_mcp_client(
     svc: &McpService,
     entry: &McpServerEntry,
 ) -> Result<reqwest::Client, String> {
-    let validated = validate_outbound_url(&svc.mcp_upstream_policy, &entry.url)
+    external_mcp_client_for_url(svc, &entry.url)
         .await
-        .map_err(|e| format!("mcp upstream URL rejected: {e}"))?;
-    pinned_outbound_client_builder(&validated)
-        .build()
-        .map_err(|e| format!("mcp upstream client build failed: {e}"))
+        .map(|(client, _)| client)
 }
 
 async fn validate_remote_mcp_url(svc: &McpService, url: &str) -> Result<(), String> {
-    validate_outbound_url(&svc.mcp_upstream_policy, url)
+    external_mcp_client_for_url(svc, url)
         .await
         .map(|_| ())
         .map_err(|e| format!("mcp upstream URL rejected: {e}"))
+}
+
+async fn external_mcp_client_for_url(
+    svc: &McpService,
+    url: &str,
+) -> Result<(reqwest::Client, reqwest::Url), String> {
+    svc.external_http
+        .for_url(url)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn validate_remote_mcp_auth_urls(svc: &McpService, auth: &McpAuthSpec) -> Result<(), String> {
@@ -537,13 +544,15 @@ async fn ensure_fresh_oauth(
         .refresh_token
         .as_deref()
         .ok_or("token expired and no refresh_token available")?;
-    validate_remote_mcp_url(svc, &tokens.token_url).await?;
+    let (http, token_url) = external_mcp_client_for_url(svc, &tokens.token_url)
+        .await
+        .map_err(|e| format!("mcp token URL rejected: {e}"))?;
     let resp = mcp_servers::refresh_token(
-        &tokens.token_url,
+        token_url.as_str(),
         refresh,
         &tokens.client_id,
         tokens.client_secret.as_deref(),
-        &svc.http,
+        &http,
     )
     .await?;
 
@@ -1196,12 +1205,20 @@ async fn oauth_start(
             token_endpoint: t.clone(),
             registration_endpoint: registration_url_override.clone(),
         },
-        _ => mcp_servers::discover_metadata(&entry.url, &svc.http)
-            .await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "mcp: discovery failed");
-                error_resp(StatusCode::BAD_GATEWAY, "oauth discovery failed")
-            })?,
+        _ => {
+            let (http, discovery_url) = external_mcp_client_for_url(&svc, &entry.url)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "mcp: discovery upstream rejected");
+                    error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed")
+                })?;
+            mcp_servers::discover_metadata(discovery_url.as_str(), &http)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "mcp: discovery failed");
+                    error_resp(StatusCode::BAD_GATEWAY, "oauth discovery failed")
+                })?
+        }
     };
     for url in [
         Some(&metadata.authorization_endpoint),
@@ -1231,8 +1248,15 @@ async fn oauth_start(
                         "no client_id and no registration endpoint",
                     )
                 })?;
+            let (http, reg_url) =
+                external_mcp_client_for_url(&svc, &reg_url)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "mcp: DCR upstream rejected");
+                        error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed")
+                    })?;
             let dcr = mcp_servers::register_client(
-                &reg_url,
+                reg_url.as_str(),
                 &DcrRequest {
                     client_name: "dyson-swarm".into(),
                     redirect_uris: vec![redirect_uri.clone()],
@@ -1248,7 +1272,7 @@ async fn oauth_start(
                         Some(scopes.join(" "))
                     },
                 },
-                &svc.http,
+                &http,
             )
             .await
             .map_err(|e| {
@@ -1324,19 +1348,22 @@ async fn oauth_callback(State(svc): State<Arc<McpService>>, uri: Uri) -> Respons
     let Some(flow) = svc.flows.take(&state) else {
         return callback_html(StatusCode::BAD_REQUEST, "unknown or expired state");
     };
-    if let Err(err) = validate_remote_mcp_url(&svc, &flow.token_url).await {
-        tracing::warn!(error = %err, "mcp: callback token URL rejected");
-        return callback_html(StatusCode::FORBIDDEN, "mcp upstream not allowed");
-    }
+    let (http, token_url) = match external_mcp_client_for_url(&svc, &flow.token_url).await {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::warn!(error = %err, "mcp: callback token URL rejected");
+            return callback_html(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+        }
+    };
 
     let token_resp = match mcp_servers::exchange_code(
-        &flow.token_url,
+        token_url.as_str(),
         &code,
         &flow.pkce_verifier,
         &flow.client_id,
         flow.client_secret.as_deref(),
         &flow.redirect_uri,
-        &svc.http,
+        &http,
     )
     .await
     {

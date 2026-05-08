@@ -101,6 +101,9 @@ pub struct AppState {
     pub providers: Arc<crate::config::Providers>,
     /// Operator startup gate for user-selected `byo` upstream hosts.
     pub byo: Arc<crate::config::ByoConfig>,
+    /// Shared constructor for admin/user-controlled outbound URLs. Each
+    /// request still gets its own IP-pinned reqwest client.
+    pub external_http: Arc<dyson_swarm_core::http::ExternalHttpClient>,
     /// Per-instance webhook ("tasks") service — backs both the
     /// management routes under `/v1/instances/:id/webhooks` and the
     /// public delivery endpoint `/webhooks/:id/:name`.
@@ -399,6 +402,9 @@ mod tests {
             user_or_keys: None,
             providers: Arc::new(crate::config::Providers::default()),
             byo: Arc::new(crate::config::ByoConfig::default()),
+            external_http: Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(Arc::new(
+                dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
+            ))),
             webhooks: webhooks_svc,
             shares: shares_svc,
             artefact_cache,

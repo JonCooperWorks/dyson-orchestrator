@@ -180,11 +180,22 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         cfg.backup.local_cache_dir.clone(),
         cipher_dir.clone(),
     ));
+    let outbound_policy = Arc::new(dyson_swarm_core::upstream_policy::OutboundUrlPolicy {
+        enabled: cfg.byo.enabled,
+        allow_localhost: cfg.byo.allow_localhost,
+        allow_internal: cfg.byo.allow_internal,
+    });
+    let external_http = Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(
+        outbound_policy.clone(),
+    ));
     let skill_marketplace_store = Arc::new(
         dyson_swarm::db::skill_marketplace::SqlxSkillMarketplaceSourceStore::new(pool.clone()),
     );
     let skill_marketplace = Arc::new(
-        dyson_swarm::skill_marketplace::SkillMarketplaceService::new(skill_marketplace_store),
+        dyson_swarm::skill_marketplace::SkillMarketplaceService::new_with_external_client(
+            skill_marketplace_store,
+            (*external_http).clone(),
+        ),
     );
 
     // Dyson agents inside cube sandboxes can't reach swarm's bind
@@ -715,6 +726,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         user_or_keys,
         providers: providers_for_app,
         byo: Arc::new(cfg.byo.clone()),
+        external_http,
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

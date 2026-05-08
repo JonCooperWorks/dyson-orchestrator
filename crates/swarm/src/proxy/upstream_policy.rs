@@ -2,7 +2,6 @@
 
 pub use dyson_swarm_core::upstream_policy::{
     OutboundUrlError as ByoUpstreamError, ValidatedOutboundUrl as ValidatedByoUpstream,
-    pinned_outbound_client_builder as pinned_byo_client_builder,
 };
 use dyson_swarm_core::upstream_policy::{
     OutboundUrlPolicy, validate_cached_outbound_url, validate_outbound_url,
@@ -10,7 +9,7 @@ use dyson_swarm_core::upstream_policy::{
 
 use crate::config::ByoConfig;
 
-fn policy_from_byo(policy: &ByoConfig) -> OutboundUrlPolicy {
+pub(crate) fn policy_from_byo(policy: &ByoConfig) -> OutboundUrlPolicy {
     OutboundUrlPolicy {
         enabled: policy.enabled,
         allow_localhost: policy.allow_localhost,

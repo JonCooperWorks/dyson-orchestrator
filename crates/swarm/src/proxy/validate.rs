@@ -15,12 +15,10 @@
 //! - byo → `GET <user_upstream>/v1/models` with Bearer (assume OpenAI-
 //!   compatible).
 
-use std::time::Duration;
-
 use crate::config::ProviderConfig;
-use crate::proxy::upstream_policy::{ValidatedByoUpstream, pinned_byo_client_builder};
+use crate::proxy::upstream_policy::ValidatedByoUpstream;
+use dyson_swarm_core::http::ExternalHttpClient;
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const ANTHROPIC_DEFAULT_VERSION: &str = "2023-06-01";
 
 #[derive(Debug, thiserror::Error)]
@@ -43,11 +41,12 @@ pub enum ValidateResult {
 }
 
 pub fn build_pinned_byo_validation_client(
+    external_http: &ExternalHttpClient,
     validated: &ValidatedByoUpstream,
 ) -> Result<reqwest::Client, ValidateError> {
-    pinned_byo_client_builder(validated)
-        .timeout(PROBE_TIMEOUT)
-        .build()
+    external_http
+        .for_validated(validated)
+        .map(|(client, _)| client)
         .map_err(|e| ValidateError::Client(e.to_string()))
 }
 
@@ -60,13 +59,16 @@ pub async fn validate_key(
     key: &str,
     upstream: &str,
     version: Option<&str>,
+    external_http: &ExternalHttpClient,
 ) -> Result<ValidateResult, ValidateError> {
-    let http = reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
+    if !is_supported_provider(provider) {
+        return Err(ValidateError::UnknownProvider(provider.to_owned()));
+    }
+    let (http, upstream) = external_http
+        .for_url(upstream)
+        .await
         .map_err(|e| ValidateError::Client(e.to_string()))?;
-    validate_key_with_client(provider, key, upstream, version, &http).await
+    validate_key_with_client(provider, key, upstream.as_str(), version, &http).await
 }
 
 pub async fn validate_key_with_client(
@@ -128,18 +130,35 @@ pub async fn validate_key_with_client(
     }
 }
 
+fn is_supported_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "openai"
+            | "openrouter"
+            | "groq"
+            | "deepseek"
+            | "xai"
+            | "ollama"
+            | "byo"
+            | "gemini"
+            | "anthropic"
+    )
+}
+
 /// Convenience: pull the upstream + version out of a `ProviderConfig`
 /// when validating a non-`byo` key.
 pub async fn validate_known_provider(
     provider: &str,
     key: &str,
     cfg: &ProviderConfig,
+    external_http: &ExternalHttpClient,
 ) -> Result<ValidateResult, ValidateError> {
     validate_key(
         provider,
         key,
         &cfg.upstream,
         cfg.anthropic_version.as_deref(),
+        external_http,
     )
     .await
 }
@@ -150,7 +169,10 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_provider_errors() {
-        let err = validate_key("nope", "k", "http://x", None)
+        let external_http = ExternalHttpClient::new(std::sync::Arc::new(
+            dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
+        ));
+        let err = validate_key("nope", "k", "http://x", None, &external_http)
             .await
             .unwrap_err();
         assert!(matches!(err, ValidateError::UnknownProvider(_)));

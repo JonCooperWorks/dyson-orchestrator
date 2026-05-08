@@ -216,7 +216,7 @@ async fn put_byok(
     // 3. Probe-on-paste.  Network failures bubble up as 502 — we
     //    can't tell if the key is bad or just unreachable.
     let validation = if let Some(byo) = byo_upstream.as_ref() {
-        match build_pinned_byo_validation_client(byo) {
+        match build_pinned_byo_validation_client(&state.external_http, byo) {
             Ok(http) => {
                 validate_key_with_client(
                     &provider,
@@ -235,6 +235,7 @@ async fn put_byok(
             &body.key,
             &upstream_for_validate,
             version_for_validate.as_deref(),
+            &state.external_http,
         )
         .await
     };
@@ -516,6 +517,13 @@ mod tests {
                 allow_localhost: false,
                 allow_internal: true,
             }),
+            external_http: Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(Arc::new(
+                dyson_swarm_core::upstream_policy::OutboundUrlPolicy {
+                    enabled: true,
+                    allow_localhost: false,
+                    allow_internal: true,
+                },
+            ))),
             webhooks: webhooks_svc,
             shares: shares_svc,
             artefact_cache,

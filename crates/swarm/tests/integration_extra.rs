@@ -436,6 +436,9 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         user_or_keys: Some(user_or_keys.clone()),
         providers: Arc::new(dyson_swarm::config::Providers::default()),
         byo: Arc::new(dyson_swarm::config::ByoConfig::default()),
+        external_http: Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(Arc::new(
+            dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
+        ))),
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

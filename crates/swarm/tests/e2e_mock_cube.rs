@@ -321,6 +321,9 @@ async fn full_walkthrough() {
         user_or_keys: None,
         providers: std::sync::Arc::new(dyson_swarm::config::Providers::default()),
         byo: std::sync::Arc::new(dyson_swarm::config::ByoConfig::default()),
+        external_http: std::sync::Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(
+            std::sync::Arc::new(dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default()),
+        )),
         webhooks: webhooks_svc,
         shares: shares_svc,
         artefact_cache,

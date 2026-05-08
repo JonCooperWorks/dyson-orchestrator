@@ -78,6 +78,16 @@ impl ExternalHttpClient {
     /// IPs, deny cross-IP redirects. Construct per-fetch.
     pub async fn for_url(&self, url: &str) -> Result<(reqwest::Client, Url), OutboundUrlError> {
         let validated = validate_outbound_url(&self.policy, url).await?;
+        self.for_validated(&validated)
+    }
+
+    /// Build the same pinned client for a URL that was already validated.
+    /// This is used by paths that persist validated socket addresses and must
+    /// avoid a second DNS lookup on the request path.
+    pub fn for_validated(
+        &self,
+        validated: &ValidatedOutboundUrl,
+    ) -> Result<(reqwest::Client, Url), OutboundUrlError> {
         let client = shared_defaults(pinned_outbound_client_builder(&validated))
             .redirect(redirect_pinned_to(&validated))
             .build()
