@@ -107,7 +107,6 @@ pub struct Config {
     /// no longer applies.  Field kept for back-compat with existing
     /// config TOMLs; value is ignored.
     #[serde(default, alias = "rotate_binary_on_startup")]
-    #[allow(dead_code)]
     pub rotate_binary_on_startup: bool,
 }
 

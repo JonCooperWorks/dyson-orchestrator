@@ -101,10 +101,10 @@ mod tests {
             Ok(())
         }
         async fn snapshot_sandbox(&self, _: &str, _: &str) -> Result<SnapshotInfo, CubeError> {
-            unimplemented!()
+            unimplemented!("ttl tests don't exercise snapshots")
         }
         async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), CubeError> {
-            unimplemented!()
+            unimplemented!("ttl tests don't exercise snapshot deletion")
         }
     }
 

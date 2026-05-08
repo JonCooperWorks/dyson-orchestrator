@@ -16,7 +16,6 @@
 //! at the router layer) and stamps an `X-Swarm-Insecure: 1` header
 //! on every response so callers can't mistake the deployment posture.
 
-use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::Next;
@@ -112,15 +111,6 @@ pub fn caller_has_role(caller: &CallerIdentity, claim_name: &str, wanted: &str) 
         return false;
     };
     arr.iter().any(|v| v.as_str() == Some(wanted))
-}
-
-/// Body-less response that hooks for tests; kept private.
-#[allow(dead_code)]
-fn body_only(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .body(Body::empty())
-        .expect("static response build")
 }
 
 #[cfg(test)]

@@ -37,13 +37,13 @@ struct StubCube;
 #[async_trait]
 impl CubeClient for StubCube {
     async fn create_sandbox(&self, _: CreateSandboxArgs) -> Result<SandboxInfo, CubeError> {
-        unimplemented!()
+        unimplemented!("backup S3 MinIO tests don't create sandboxes")
     }
     async fn destroy_sandbox(&self, _: &str) -> Result<(), CubeError> {
-        unimplemented!()
+        unimplemented!("backup S3 MinIO tests don't destroy sandboxes")
     }
     async fn snapshot_sandbox(&self, _: &str, _: &str) -> Result<SnapshotInfo, CubeError> {
-        unimplemented!()
+        unimplemented!("backup S3 MinIO tests don't create snapshots")
     }
     async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), CubeError> {
         // Deliberately a no-op so the test can run against MinIO without a
