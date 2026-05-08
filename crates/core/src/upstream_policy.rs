@@ -55,10 +55,10 @@ pub async fn validate_outbound_url(
     policy: &OutboundUrlPolicy,
     upstream: &str,
 ) -> Result<ValidatedOutboundUrl, OutboundUrlError> {
-    let url = parse_outbound_url(policy, upstream)?;
+    let url = parse_outbound_url(*policy, upstream)?;
     let host = url.host_str().ok_or(OutboundUrlError::MissingHost)?;
     let resolved_addrs = resolve_addrs(host, url.port_or_known_default()).await?;
-    validate_resolved_addrs(policy, &url, &resolved_addrs)?;
+    validate_resolved_addrs(*policy, &url, &resolved_addrs)?;
     Ok(ValidatedOutboundUrl {
         url,
         resolved_addrs,
@@ -70,9 +70,9 @@ pub fn validate_cached_outbound_url(
     upstream: &str,
     cached_addrs: &[String],
 ) -> Result<ValidatedOutboundUrl, OutboundUrlError> {
-    let url = parse_outbound_url(policy, upstream)?;
+    let url = parse_outbound_url(*policy, upstream)?;
     let resolved_addrs = cached_or_literal_addrs(&url, cached_addrs)?;
-    validate_resolved_addrs(policy, &url, &resolved_addrs)?;
+    validate_resolved_addrs(*policy, &url, &resolved_addrs)?;
     Ok(ValidatedOutboundUrl {
         url,
         resolved_addrs,
@@ -88,7 +88,7 @@ pub fn pinned_outbound_client_builder(validated: &ValidatedOutboundUrl) -> reqwe
 }
 
 fn parse_outbound_url(
-    policy: &OutboundUrlPolicy,
+    policy: OutboundUrlPolicy,
     upstream: &str,
 ) -> Result<reqwest::Url, OutboundUrlError> {
     if !policy.enabled {
@@ -115,7 +115,7 @@ fn parse_outbound_url(
 }
 
 fn validate_resolved_addrs(
-    policy: &OutboundUrlPolicy,
+    policy: OutboundUrlPolicy,
     url: &reqwest::Url,
     resolved_addrs: &[SocketAddr],
 ) -> Result<(), OutboundUrlError> {

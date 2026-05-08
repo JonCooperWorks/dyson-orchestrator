@@ -280,7 +280,7 @@ impl DeliveryStore for SqlxDeliveryStore {
 
         let mut query = sqlx::query(&sql).bind(instance_id);
         if let Some(name) = webhook_name {
-            query = query.bind(name.to_string());
+            query = query.bind(name.to_owned());
         }
         if let Some(before) = before {
             query = query.bind(before);

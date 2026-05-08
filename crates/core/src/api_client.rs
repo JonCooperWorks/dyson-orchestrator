@@ -83,7 +83,7 @@ impl ApiClient {
 }
 
 fn normalize_base(s: String) -> String {
-    s.trim_end_matches('/').to_string()
+    s.trim_end_matches('/').to_owned()
 }
 
 fn check(status: StatusCode) -> Result<(), ApiError> {

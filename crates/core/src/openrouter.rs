@@ -147,7 +147,7 @@ impl OpenRouterProvisioning {
         // "alice@x · <user_id>".
         let combined = match label {
             Some(l) if !l.is_empty() => format!("{l} · {name}"),
-            _ => name.to_string(),
+            _ => name.to_owned(),
         };
         let body = CreateKeyBody {
             name: &combined,
@@ -331,7 +331,7 @@ impl UserOrKeyResolver {
         // awaiting on the per-user mutex.
         let lock = {
             let mut map = self.mint_locks.lock().expect("mint_locks poisoned");
-            map.entry(user_id.to_string())
+            map.entry(user_id.to_owned())
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };

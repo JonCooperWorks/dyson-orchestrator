@@ -1659,7 +1659,7 @@ fn user_slug(owner_id: &str) -> String {
         .map(|c| c.to_ascii_lowercase())
         .take(USER_SLUG_LEN)
         .collect();
-    if s.is_empty() { "anon".to_string() } else { s }
+    if s.is_empty() { "anon".to_owned() } else { s }
 }
 
 /// Mint a candidate id for `owner_id`.  Pure (modulo `rand::thread_rng`)

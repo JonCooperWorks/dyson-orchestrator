@@ -63,7 +63,7 @@ async fn handle_mcp(
     let incoming_session = headers
         .get("Mcp-Session-Id")
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+        .map(str::to_owned);
     let method = body
         .get("method")
         .and_then(serde_json::Value::as_str)

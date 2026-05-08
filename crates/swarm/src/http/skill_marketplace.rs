@@ -363,9 +363,9 @@ fn agent_catalog_skill(
 }
 
 fn agent_skill_tags(origin_kind: &str) -> Vec<String> {
-    let mut tags = vec!["agent-created".to_string()];
+    let mut tags = vec!["agent-created".to_owned()];
     if !origin_kind.trim().is_empty() && origin_kind != "local" {
-        tags.push(origin_kind.to_string());
+        tags.push(origin_kind.to_owned());
     }
     tags
 }
@@ -411,7 +411,7 @@ async fn load_agent_skill(
     skill: &str,
 ) -> Result<(CatalogSkill, String), SkillMarketplaceError> {
     let instance_id = agent_marketplace_instance_id(marketplace)
-        .ok_or_else(|| SkillMarketplaceError::MarketplaceNotFound(marketplace.to_string()))?;
+        .ok_or_else(|| SkillMarketplaceError::MarketplaceNotFound(marketplace.to_owned()))?;
     validate_skill_name(skill)?;
     let instance = state
         .instances
@@ -420,7 +420,7 @@ async fn load_agent_skill(
         .map_err(|e| skill_marketplace_error_for_instance_lookup(e, marketplace))?;
     if !matches!(instance.status, InstanceStatus::Live) {
         return Err(SkillMarketplaceError::MarketplaceNotFound(
-            marketplace.to_string(),
+            marketplace.to_owned(),
         ));
     }
     let rows =
@@ -431,8 +431,8 @@ async fn load_agent_skill(
         .into_iter()
         .find(|row| row.skill == skill && is_agent_created_skill(row))
         .ok_or_else(|| SkillMarketplaceError::SkillNotFound {
-            marketplace: marketplace.to_string(),
-            skill: skill.to_string(),
+            marketplace: marketplace.to_owned(),
+            skill: skill.to_owned(),
         })?;
     let body = crate::skill_inventory::read_instance_skill_body(
         state.state_files.as_ref(),
@@ -442,8 +442,8 @@ async fn load_agent_skill(
     .await
     .map_err(|e| SkillMarketplaceError::Store(e.to_string()))?
     .ok_or_else(|| SkillMarketplaceError::SkillNotFound {
-        marketplace: marketplace.to_string(),
-        skill: skill.to_string(),
+        marketplace: marketplace.to_owned(),
+        skill: skill.to_owned(),
     })?;
     validate_skill_body(&body)?;
     Ok((agent_catalog_skill(&instance, &row)?, body))
@@ -454,7 +454,7 @@ fn skill_marketplace_error_for_instance_lookup(
     marketplace: &str,
 ) -> SkillMarketplaceError {
     match err {
-        SwarmError::NotFound => SkillMarketplaceError::MarketplaceNotFound(marketplace.to_string()),
+        SwarmError::NotFound => SkillMarketplaceError::MarketplaceNotFound(marketplace.to_owned()),
         other => SkillMarketplaceError::Store(other.to_string()),
     }
 }
@@ -482,7 +482,7 @@ fn agent_display_name(instance: &InstanceRow) -> String {
     if name.is_empty() {
         instance.id.clone()
     } else {
-        name.to_string()
+        name.to_owned()
     }
 }
 

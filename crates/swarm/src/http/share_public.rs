@@ -415,12 +415,12 @@ async fn lookup_title_and_kind(
                     .get("title")
                     .and_then(|v| v.as_str())
                     .unwrap_or("Artefact")
-                    .to_string();
+                    .to_owned();
                 let kind = item
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("other")
-                    .to_string();
+                    .to_owned();
                 return (title, kind);
             }
         }
@@ -434,8 +434,8 @@ fn fallback_title_kind(verified: &crate::shares::service::VerifiedShare) -> (Str
             .row
             .label
             .clone()
-            .unwrap_or_else(|| "Artefact".to_string()),
-        "other".to_string(),
+            .unwrap_or_else(|| "Artefact".to_owned()),
+        "other".to_owned(),
     )
 }
 

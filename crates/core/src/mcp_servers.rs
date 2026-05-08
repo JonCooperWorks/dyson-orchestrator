@@ -15,7 +15,7 @@
 //! with the per-instance proxy_token; [`crate::proxy::mcp`] handles the
 //! handshake, refresh, and forward.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -340,7 +340,7 @@ pub fn entry_from_vscode_config(
                 headers.retain(|k, _| !k.eq_ignore_ascii_case("authorization"));
             }
             McpServerEntry {
-                url: url.to_string(),
+                url: url.to_owned(),
                 auth,
                 headers,
                 runtime: None,
@@ -370,7 +370,7 @@ pub fn entry_from_vscode_config(
                 auth: McpAuthSpec::None,
                 headers: HashMap::new(),
                 runtime: Some(McpRuntimeSpec::DockerStdio {
-                    command: command.to_string(),
+                    command: command.to_owned(),
                     args,
                     env,
                 }),
@@ -444,7 +444,7 @@ fn resolve_catalog_placeholders(
     supplied: &BTreeMap<String, String>,
     previous: Option<&McpDockerCatalogBinding>,
 ) -> Result<ResolvedCatalogPlaceholders, String> {
-    let mut ids = BTreeMap::new();
+    let mut ids = BTreeSet::new();
     for field in &catalog.placeholders {
         if !is_safe_server_name(&field.id) {
             return Err(format!(
@@ -452,7 +452,7 @@ fn resolve_catalog_placeholders(
                 catalog.id, field.id
             ));
         }
-        if ids.insert(field.id.clone(), ()).is_some() {
+        if !ids.insert(field.id.clone()) {
             return Err(format!(
                 "catalog `{}` defines placeholder `{}` more than once",
                 catalog.id, field.id
@@ -460,7 +460,7 @@ fn resolve_catalog_placeholders(
         }
     }
     for key in supplied.keys() {
-        if !ids.contains_key(key) {
+        if !ids.contains(key) {
             return Err(format!(
                 "catalog `{}` does not define placeholder `{key}`",
                 catalog.id
@@ -560,9 +560,9 @@ fn render_catalog_template_string(
     }
 }
 
-fn server_map_from_config<'a>(
-    obj: &'a serde_json::Map<String, serde_json::Value>,
-) -> Result<&'a serde_json::Map<String, serde_json::Value>, String> {
+fn server_map_from_config(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<&serde_json::Map<String, serde_json::Value>, String> {
     let servers = object_field(obj, "servers")?;
     let mcp_servers = object_field(obj, "mcpServers")?;
     match (servers, mcp_servers) {
@@ -605,7 +605,7 @@ fn parse_string_array(
     arr.iter()
         .map(|v| {
             v.as_str()
-                .map(ToString::to_string)
+                .map(str::to_owned)
                 .ok_or_else(|| format!("`{field}` must contain only strings"))
         })
         .collect()
@@ -624,7 +624,7 @@ fn parse_string_map(
     obj.iter()
         .map(|(k, v)| {
             v.as_str()
-                .map(|s| (k.clone(), s.to_string()))
+                .map(|s| (k.clone(), s.to_owned()))
                 .ok_or_else(|| format!("`{field}` values must be strings"))
         })
         .collect()
@@ -637,7 +637,7 @@ fn auth_from_headers(headers: &HashMap<String, String>) -> McpAuthSpec {
         .and_then(|(_, v)| v.trim().strip_prefix("Bearer "))
         .filter(|token| !token.trim().is_empty())
         .map(|token| McpAuthSpec::Bearer {
-            token: token.trim().to_string(),
+            token: token.trim().to_owned(),
         })
         .unwrap_or(McpAuthSpec::None)
 }
@@ -1327,10 +1327,10 @@ fn origin_of(url: &str) -> Result<String, String> {
 /// failure isn't worth panicking over.
 pub fn domain_of(url: &str) -> String {
     let Ok(parsed) = reqwest::Url::parse(url) else {
-        return "<unparseable url>".to_string();
+        return "<unparseable url>".to_owned();
     };
     let Some(host) = parsed.host_str() else {
-        return "<unparseable url>".to_string();
+        return "<unparseable url>".to_owned();
     };
     let scheme = parsed.scheme();
     match parsed.port() {

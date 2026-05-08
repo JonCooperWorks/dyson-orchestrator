@@ -238,7 +238,7 @@ impl Authenticator for OidcAuthenticator {
             .get("sub")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AuthError::Invalid("missing sub".into()))?
-            .to_string();
+            .to_owned();
         Ok(UserIdentity {
             subject,
             email: claims

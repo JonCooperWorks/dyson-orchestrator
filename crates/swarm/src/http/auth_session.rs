@@ -60,19 +60,19 @@ async fn clear(State(state): State<AppState>) -> Response {
 fn build_cookie(state: &AppState, token: &str, expires_at: Option<i64>, clear: bool) -> String {
     let mut parts = vec![
         format!("{COOKIE_NAME}={token}"),
-        "Path=/".to_string(),
-        "SameSite=Strict".to_string(),
-        "HttpOnly".to_string(),
+        "Path=/".to_owned(),
+        "SameSite=Strict".to_owned(),
+        "HttpOnly".to_owned(),
     ];
     if state.hostname.is_some() {
-        parts.push("Secure".to_string());
+        parts.push("Secure".to_owned());
     }
     if let Some(domain) = cookie_domain(state.hostname.as_deref()) {
         parts.push(format!("Domain={domain}"));
     }
     if clear {
-        parts.push("Max-Age=0".to_string());
-        parts.push("Expires=Thu, 01 Jan 1970 00:00:00 GMT".to_string());
+        parts.push("Max-Age=0".to_owned());
+        parts.push("Expires=Thu, 01 Jan 1970 00:00:00 GMT".to_owned());
     } else if let Some(exp) = expires_at {
         let max_age = exp.saturating_sub(crate::now_secs()).max(0);
         parts.push(format!("Max-Age={max_age}"));

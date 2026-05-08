@@ -123,7 +123,7 @@ impl From<UserRow> for UserView {
 /// safe under malformed data.
 fn mask_email(email: &str) -> String {
     let Some((local, domain)) = email.split_once('@') else {
-        return "***".to_string();
+        return "***".to_owned();
     };
     let mut chars = local.chars();
     match chars.next() {

@@ -159,7 +159,7 @@ impl CliDockerController {
         }
         let output = tokio::time::timeout(Duration::from_secs(10), ps.output())
             .await
-            .map_err(|_| "docker ps timed out".to_string())?
+            .map_err(|_| "docker ps timed out".to_owned())?
             .map_err(|e| format!("docker ps: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -181,7 +181,7 @@ impl CliDockerController {
         rm.args(["rm", "-f"]).args(ids.iter().copied());
         let output = tokio::time::timeout(Duration::from_secs(20), rm.output())
             .await
-            .map_err(|_| "docker rm timed out".to_string())?
+            .map_err(|_| "docker rm timed out".to_owned())?
             .map_err(|e| format!("docker rm: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -299,7 +299,7 @@ impl Runtime {
         let spawn_lock = {
             let mut locks = self.spawn_locks.lock().await;
             locks
-                .entry(key.to_string())
+                .entry(key.to_owned())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
@@ -338,7 +338,7 @@ impl Runtime {
         self.sessions
             .lock()
             .await
-            .insert(key.to_string(), Arc::clone(&session));
+            .insert(key.to_owned(), Arc::clone(&session));
         Ok(session)
     }
 
@@ -560,7 +560,7 @@ impl DockerStdioSession {
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = Arc::clone(&pending);
-        let server_name = server_name.to_string();
+        let server_name = server_name.to_owned();
         let reader = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -626,10 +626,10 @@ impl McpSession for DockerStdioSession {
         };
         match tokio::time::timeout(Duration::from_secs(120), rx).await {
             Ok(Ok(body)) => Ok(Some(body)),
-            Ok(Err(_)) => Err("MCP server exited before responding".to_string()),
+            Ok(Err(_)) => Err("MCP server exited before responding".to_owned()),
             Err(_) => {
                 remove_pending(&self.pending, pending_id.as_deref()).await;
-                Err("MCP server response timed out".to_string())
+                Err("MCP server response timed out".to_owned())
             }
         }
     }
@@ -718,7 +718,7 @@ impl McpSession for HttpStreamableSession {
 
         let resp = tokio::time::timeout(Duration::from_secs(120), req.body(request_json).send())
             .await
-            .map_err(|_| "HTTP MCP server response timed out".to_string())?
+            .map_err(|_| "HTTP MCP server response timed out".to_owned())?
             .map_err(|e| {
                 format!(
                     "send: {}",
@@ -734,7 +734,7 @@ impl McpSession for HttpStreamableSession {
             .to_lowercase();
         let bytes = tokio::time::timeout(Duration::from_secs(120), resp.bytes())
             .await
-            .map_err(|_| "HTTP MCP server body timed out".to_string())?
+            .map_err(|_| "HTTP MCP server body timed out".to_owned())?
             .map_err(|e| format!("read body: {e}"))?;
 
         if status == reqwest::StatusCode::ACCEPTED && bytes.is_empty() {
@@ -762,7 +762,7 @@ impl McpSession for HttpStreamableSession {
                 .get("Mcp-Session-Id")
                 .or_else(|| headers.get("mcp-session-id"))
                 .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
+                .map(str::to_owned)
             {
                 *self.session_id.lock().await = Some(session_id);
             }
@@ -771,7 +771,7 @@ impl McpSession for HttpStreamableSession {
                 .and_then(|r| r.get("protocolVersion"))
                 .and_then(serde_json::Value::as_str)
             {
-                *self.protocol_version.lock().await = Some(protocol_version.to_string());
+                *self.protocol_version.lock().await = Some(protocol_version.to_owned());
             }
         }
 
@@ -1019,20 +1019,20 @@ fn docker_run_launch(
     };
 
     let mut out = vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "-i".to_string(),
-        "--cap-drop=ALL".to_string(),
-        "--security-opt".to_string(),
-        "no-new-privileges".to_string(),
-        "--network".to_string(),
-        "bridge".to_string(),
-        "--memory=512m".to_string(),
-        "--cpus=1".to_string(),
-        "--pids-limit=256".to_string(),
-        "--label".to_string(),
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "-i".to_owned(),
+        "--cap-drop=ALL".to_owned(),
+        "--security-opt".to_owned(),
+        "no-new-privileges".to_owned(),
+        "--network".to_owned(),
+        "bridge".to_owned(),
+        "--memory=512m".to_owned(),
+        "--cpus=1".to_owned(),
+        "--pids-limit=256".to_owned(),
+        "--label".to_owned(),
         format!("{DOCKER_INSTANCE_LABEL}={instance_id}"),
-        "--label".to_string(),
+        "--label".to_owned(),
         format!("{DOCKER_SERVER_LABEL}={server_name}"),
     ];
     out.extend(user_args);
@@ -1108,15 +1108,15 @@ fn sanitized_docker_user_args(
 fn capture_secret_env_arg(arg: &str, secrets: &mut BTreeMap<String, String>) -> Option<String> {
     let Some((name, value)) = arg.split_once('=') else {
         if is_env_name(arg) {
-            return Some(arg.to_string());
+            return Some(arg.to_owned());
         }
         return None;
     };
     if !is_env_name(name) {
         return None;
     }
-    secrets.insert(name.to_string(), value.to_string());
-    Some(name.to_string())
+    secrets.insert(name.to_owned(), value.to_owned());
+    Some(name.to_owned())
 }
 
 fn inject_secret_wrapper(
@@ -1187,7 +1187,7 @@ fn split_docker_user_args(user_args: &[String]) -> Result<DockerUserArgs, String
             continue;
         }
         if let Some(value) = arg.strip_prefix("--entrypoint=") {
-            entrypoint = Some(value.to_string());
+            entrypoint = Some(value.to_owned());
             i += 1;
             continue;
         }
@@ -1320,7 +1320,7 @@ fn wrapped_image_command(
 
     let mut out = Vec::new();
     if let Some(entrypoint) = entrypoint_override {
-        out.push(entrypoint.to_string());
+        out.push(entrypoint.to_owned());
         if command.is_empty() {
             out.extend(defaults.cmd);
         } else {
@@ -1548,7 +1548,7 @@ async fn main() -> std::process::ExitCode {
     let runtime = Runtime::with_docker_and_secrets(
         Duration::from_secs(args.idle_seconds),
         Arc::new(CliDockerController {
-            command: "docker".to_string(),
+            command: "docker".to_owned(),
         }),
         args.secrets_dir.clone(),
     );

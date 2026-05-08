@@ -278,7 +278,7 @@ impl SkillMarketplaceService {
                     }
                 }
                 Err(e) => errors.push(CatalogError {
-                    marketplace_id: source.id().to_string(),
+                    marketplace_id: source.id().to_owned(),
                     error: e.to_string(),
                 }),
             }
@@ -304,8 +304,8 @@ impl SkillMarketplaceService {
         let loaded = self.load_marketplace(marketplace).await?;
         let package = find_package(&loaded.index, skill).ok_or_else(|| {
             SkillMarketplaceError::SkillNotFound {
-                marketplace: marketplace.to_string(),
-                skill: skill.to_string(),
+                marketplace: marketplace.to_owned(),
+                skill: skill.to_owned(),
             }
         })?;
         let skill = catalog_skill(&loaded.index.marketplace, package)?;
@@ -327,8 +327,8 @@ impl SkillMarketplaceService {
         let loaded = self.load_marketplace(marketplace).await?;
         let package = find_package(&loaded.index, skill).ok_or_else(|| {
             SkillMarketplaceError::SkillNotFound {
-                marketplace: marketplace.to_string(),
-                skill: skill.to_string(),
+                marketplace: marketplace.to_owned(),
+                skill: skill.to_owned(),
             }
         })?;
         validate_skill_name(&package.name)?;
@@ -365,7 +365,7 @@ impl SkillMarketplaceService {
             }
         }
         Err(SkillMarketplaceError::MarketplaceNotFound(
-            marketplace.to_string(),
+            marketplace.to_owned(),
         ))
     }
 
@@ -535,8 +535,8 @@ impl SkillMarketplaceService {
 
 fn source_view(source: &SkillMarketplaceSourceConfig) -> SkillMarketplaceSourceView {
     SkillMarketplaceSourceView {
-        id: source.id().to_string(),
-        source_type: source.source_type().to_string(),
+        id: source.id().to_owned(),
+        source_type: source.source_type().to_owned(),
         location: source.location(),
         is_default: false,
     }
@@ -544,8 +544,8 @@ fn source_view(source: &SkillMarketplaceSourceConfig) -> SkillMarketplaceSourceV
 
 fn admin_source_view(row: &SkillMarketplaceSourceRow) -> SkillMarketplaceAdminSourceView {
     SkillMarketplaceAdminSourceView {
-        id: row.source.id().to_string(),
-        source_type: row.source.source_type().to_string(),
+        id: row.source.id().to_owned(),
+        source_type: row.source.source_type().to_owned(),
         location: row.source.location(),
         enabled: row.enabled,
         created_at: row.created_at,
@@ -731,7 +731,7 @@ fn preview(body: &str) -> String {
 pub fn skill_body_preview(body: &str) -> String {
     const MAX_PREVIEW: usize = 4096;
     if body.len() <= MAX_PREVIEW {
-        return body.to_string();
+        return body.to_owned();
     }
     let mut end = MAX_PREVIEW;
     while !body.is_char_boundary(end) {

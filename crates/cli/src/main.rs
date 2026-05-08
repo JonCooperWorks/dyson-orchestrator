@@ -357,7 +357,7 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
                 .backup
                 .s3
                 .as_ref()
-                .ok_or_else(|| "s3 backup sink selected but [backup.s3] missing".to_string())?;
+                .ok_or_else(|| "s3 backup sink selected but [backup.s3] missing".to_owned())?;
             Arc::new(
                 S3BackupSink::new(s3cfg, cfg.backup.local_cache_dir.clone(), cube.clone())
                     .map_err(|e| format!("s3 backup sink: {e:#}"))?,
@@ -555,7 +555,7 @@ fn write_manifest_atomic(
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| "manifest path must have a UTF-8 file name".to_string())?;
+        .ok_or_else(|| "manifest path must have a UTF-8 file name".to_owned())?;
     let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
     let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| format!("encode json: {e}"))?;
     std::fs::write(&tmp, bytes).map_err(|e| format!("write tmp: {e}"))?;

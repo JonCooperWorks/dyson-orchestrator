@@ -68,7 +68,7 @@ pub async fn list_instance_skills(
         let Some((skill, kind)) = classify_skill_path(&row.path) else {
             continue;
         };
-        let parts = grouped.entry(skill.to_string()).or_default();
+        let parts = grouped.entry(skill.to_owned()).or_default();
         match kind {
             SkillFileKind::Body => parts.body_row = Some(row),
             SkillFileKind::Metadata => parts.metadata_row = Some(row),
@@ -95,15 +95,15 @@ pub async fn list_instance_skills(
             .filter(|s| !s.trim().is_empty())
             .or_else(|| body.as_deref().and_then(skill_description))
             .unwrap_or_default();
-        let origin_kind = if !has_body {
-            "unknown".to_string()
-        } else {
+        let origin_kind = if has_body {
             metadata
                 .as_ref()
                 .and_then(|m| m.origin.as_ref())
                 .and_then(|o| o.kind.clone())
                 .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "local".to_string())
+                .unwrap_or_else(|| "local".to_owned())
+        } else {
+            "unknown".to_owned()
         };
         let marketplace_id = metadata
             .as_ref()
@@ -135,7 +135,7 @@ pub async fn list_instance_skills(
             .max()
             .unwrap_or_default();
         out.push(SkillInventoryEntry {
-            instance_id: instance_id.to_string(),
+            instance_id: instance_id.to_owned(),
             skill: skill.clone(),
             description,
             origin_kind,
@@ -215,7 +215,7 @@ fn skill_description(body: &str) -> Option<String> {
             {
                 let value = value.trim();
                 if !value.is_empty() {
-                    return Some(value.to_string());
+                    return Some(value.to_owned());
                 }
             }
         }
@@ -224,7 +224,7 @@ fn skill_description(body: &str) -> Option<String> {
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && *line != "---")
-        .map(|line| line.trim_start_matches('#').trim().to_string())
+        .map(|line| line.trim_start_matches('#').trim().to_owned())
         .filter(|s| !s.is_empty())
 }
 

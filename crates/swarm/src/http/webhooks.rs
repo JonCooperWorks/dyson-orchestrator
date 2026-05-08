@@ -89,7 +89,7 @@ impl WebhookView {
         Self {
             name: r.name,
             description: r.description,
-            auth_scheme: r.auth_scheme.as_str().to_string(),
+            auth_scheme: r.auth_scheme.as_str().to_owned(),
             signature_header: r.signature_header,
             enabled: r.enabled,
             created_at: r.created_at,
@@ -537,7 +537,7 @@ fn qs_decode(s: &str) -> String {
             }
         }
     }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+    String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
 }
 
 /// Public webhook delivery.  Strictly POST.  Body is buffered up to
@@ -587,7 +587,7 @@ fn readable_header_values(h: &HeaderMap) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (k, v) in h {
         if let Ok(val) = v.to_str() {
-            out.push((k.as_str().to_ascii_lowercase(), val.to_string()));
+            out.push((k.as_str().to_ascii_lowercase(), val.to_owned()));
         }
     }
     out
@@ -613,7 +613,7 @@ fn forward_header_subset(h: &HeaderMap) -> Vec<(String, String)> {
         if ALLOW.contains(&name.as_str())
             && let Ok(val) = v.to_str()
         {
-            out.push((name, val.to_string()));
+            out.push((name, val.to_owned()));
         }
     }
     out

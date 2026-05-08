@@ -131,7 +131,7 @@ pub fn extract_instance_subdomain(host: &str, base: &str) -> Option<String> {
     if prefix.is_empty() || prefix.contains('.') {
         return None;
     }
-    Some(prefix.to_string())
+    Some(prefix.to_owned())
 }
 
 fn canonical_host(host: &str) -> String {
@@ -285,7 +285,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     let runtime_model_selection_path = path.to_owned();
     let path_with_query = match parts.uri.query() {
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
-        _ => path.to_string(),
+        _ => path.to_owned(),
     };
     let cube_port = std::env::var("SWARM_CUBE_INTERNAL_PORT")
         .ok()

@@ -121,10 +121,10 @@ impl UnreachableCounters {
     /// emit a `tracing::warn!`.
     fn observe(&mut self, instance_id: &str, result: &ProbeResult) -> bool {
         if let ProbeResult::Unreachable { .. } = result {
-            let n = self.counts.entry(instance_id.to_string()).or_insert(0);
+            let n = self.counts.entry(instance_id.to_owned()).or_insert(0);
             *n += 1;
             if *n >= 3 && !self.warned.get(instance_id).copied().unwrap_or(false) {
-                self.warned.insert(instance_id.to_string(), true);
+                self.warned.insert(instance_id.to_owned(), true);
                 return true;
             }
             false

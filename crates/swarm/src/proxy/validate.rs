@@ -106,7 +106,7 @@ pub async fn validate_key_with_client(
             .send()
             .await
             .map_err(|e| ValidateError::Network(e.to_string()))?,
-        other => return Err(ValidateError::UnknownProvider(other.to_string())),
+        other => return Err(ValidateError::UnknownProvider(other.to_owned())),
     };
 
     let status = resp.status();

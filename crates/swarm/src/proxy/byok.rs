@@ -213,7 +213,7 @@ pub async fn resolve(
     //    TOML field is still parseable (for back-compat with
     //    deployments mid-migration) but never reaches an upstream.
     if state.provider_config(provider).is_none() {
-        return Err(ResolveError::UnknownProvider(provider.to_string()));
+        return Err(ResolveError::UnknownProvider(provider.to_owned()));
     }
     Err(ResolveError::NoKey)
 }

@@ -29,7 +29,7 @@ impl ProviderAdapter for GeminiAdapter {
 
         // Strip any inbound `key=` so we don't forward the client's
         // value (or our own, if anything upstream of us re-attached it).
-        let path = url.path().to_string();
+        let path = url.path().to_owned();
         let cleaned = strip_key_param(url.query().unwrap_or(""));
         let pq = if cleaned.is_empty() {
             path

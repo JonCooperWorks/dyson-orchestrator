@@ -764,7 +764,7 @@ async fn overlay_provider_keys(
     mut providers: config::Providers,
     secrets: &dyson_swarm::secrets::SystemSecretsService,
 ) -> Result<config::Providers, String> {
-    let names: Vec<String> = providers.names().map(str::to_string).collect();
+    let names: Vec<String> = providers.names().map(str::to_owned).collect();
     for name in names {
         let Some(cfg) = providers.get_mut(&name) else {
             continue;
@@ -836,7 +836,7 @@ async fn resolve_or_provisioning_async(
         .as_ref()
         .and_then(|o| o.upstream.clone())
         .or_else(|| cfg.providers.get("openrouter").map(|p| p.upstream.clone()))
-        .unwrap_or_else(|| "https://openrouter.ai/api".to_string());
+        .unwrap_or_else(|| "https://openrouter.ai/api".to_owned());
     dyson_swarm::openrouter::OpenRouterProvisioning::new(upstream, key)
         .map(Some)
         .map_err(|e| format!("openrouter client build: {e}"))

@@ -180,16 +180,10 @@ pub fn router(
         .merge(skill_marketplace::admin_router(state.clone()))
         .merge(mcp_admin_router);
     let admin = if auth.dangerous_no_auth {
-        admin_handlers.layer(middleware::from_fn_with_state(
-            auth.clone(),
-            require_admin_role,
-        ))
+        admin_handlers.layer(middleware::from_fn_with_state(auth, require_admin_role))
     } else {
         admin_handlers
-            .layer(middleware::from_fn_with_state(
-                auth.clone(),
-                require_admin_role,
-            ))
+            .layer(middleware::from_fn_with_state(auth, require_admin_role))
             .layer(middleware::from_fn_with_state(
                 user_auth.clone(),
                 user_middleware,
@@ -258,7 +252,7 @@ pub fn router(
             dyson_proxy::dispatch,
         ))
         .layer(middleware::from_fn_with_state(
-            state.clone(),
+            state,
             share_public::dispatch,
         ))
 }

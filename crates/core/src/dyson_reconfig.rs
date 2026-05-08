@@ -159,12 +159,15 @@ impl ConfigureResponse {
             ),
             (
                 "ingest",
-                paired_runtime_target(&body.ingest_url, &body.ingest_token),
+                paired_runtime_target(body.ingest_url.as_deref(), body.ingest_token.as_deref()),
                 self.ingest_applied.or(self.ingest_updated),
             ),
             (
                 "state_sync",
-                paired_runtime_target(&body.state_sync_url, &body.state_sync_token),
+                paired_runtime_target(
+                    body.state_sync_url.as_deref(),
+                    body.state_sync_token.as_deref(),
+                ),
                 self.state_sync_applied.or(self.state_sync_updated),
             ),
         ] {
@@ -174,24 +177,26 @@ impl ConfigureResponse {
     }
 }
 
-fn has_text(value: &Option<String>) -> bool {
-    value.as_deref().is_some_and(|s| !s.is_empty())
+fn has_text(value: Option<&str>) -> bool {
+    value.is_some_and(|s| !s.is_empty())
 }
 
 fn provider_requested(body: &ReconfigureBody) -> bool {
-    !body.models.is_empty() || has_text(&body.proxy_token) || has_text(&body.proxy_base)
+    !body.models.is_empty()
+        || has_text(body.proxy_token.as_deref())
+        || has_text(body.proxy_base.as_deref())
 }
 
 fn image_generation_requested(body: &ReconfigureBody) -> bool {
-    has_text(&body.image_provider_name)
+    has_text(body.image_provider_name.as_deref())
         || body.image_provider_block.is_some()
-        || has_text(&body.image_generation_provider)
-        || has_text(&body.image_generation_model)
+        || has_text(body.image_generation_provider.as_deref())
+        || has_text(body.image_generation_model.as_deref())
 }
 
-fn paired_runtime_target(url: &Option<String>, token: &Option<String>) -> bool {
+fn paired_runtime_target(url: Option<&str>, token: Option<&str>) -> bool {
     matches!(
-        (url.as_deref(), token.as_deref()),
+        (url, token),
         (Some(u), Some(t)) if (!u.is_empty() && !t.is_empty()) || (u.is_empty() && t.is_empty())
     )
 }
@@ -276,7 +281,7 @@ impl DysonReconfigurerHttp {
             .map_err(|e| e.to_string())?
         {
             return String::from_utf8(plain)
-                .map_err(|_| "non-utf8 configure secret in system_secrets".to_string());
+                .map_err(|_| "non-utf8 configure secret in system_secrets".to_owned());
         }
         // Slow path: serialise on the per-instance mint lock so two
         // concurrent first-pushes don't mint two distinct UUIDs.
@@ -284,7 +289,7 @@ impl DysonReconfigurerHttp {
         // if a caller previously panicked while holding the map.
         let lock = {
             let mut map = self.mint_locks.lock();
-            map.entry(instance_id.to_string())
+            map.entry(instance_id.to_owned())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
@@ -298,7 +303,7 @@ impl DysonReconfigurerHttp {
             .map_err(|e| e.to_string())?
         {
             return String::from_utf8(plain)
-                .map_err(|_| "non-utf8 configure secret in system_secrets".to_string());
+                .map_err(|_| "non-utf8 configure secret in system_secrets".to_owned());
         }
         let s = uuid::Uuid::new_v4().simple().to_string();
         self.system_secrets

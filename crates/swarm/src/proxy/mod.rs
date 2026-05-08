@@ -166,7 +166,7 @@ struct RateWindow {
 impl RateWindow {
     fn observe(&self, subject: &str) -> u32 {
         let mut m = self.buckets.lock().expect("rate window poisoned");
-        let q = m.entry(subject.to_string()).or_default();
+        let q = m.entry(subject.to_owned()).or_default();
         let now = Instant::now();
         q.push_back(now);
         prune(q, now);

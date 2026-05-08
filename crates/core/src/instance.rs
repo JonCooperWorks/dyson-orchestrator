@@ -731,9 +731,9 @@ impl ImageGenDefaults {
     /// constant change in two known files.
     pub fn openrouter_gemini3_image() -> Self {
         Self {
-            provider_name: "openrouter-image".to_string(),
-            provider_type: "openrouter".to_string(),
-            model: "google/gemini-3-pro-image-preview".to_string(),
+            provider_name: "openrouter-image".to_owned(),
+            provider_type: "openrouter".to_owned(),
+            model: "google/gemini-3-pro-image-preview".to_owned(),
         }
     }
 
@@ -991,9 +991,7 @@ impl InstanceService {
         proxy_token: &str,
         clear_when_empty: bool,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let Some(secrets) = self.mcp_secrets.as_ref() else {
-            return None;
-        };
+        let secrets = self.mcp_secrets.as_ref()?;
         let names = match mcp_servers::list_names(secrets, owner_id, instance_id).await {
             Ok(names) if !names.is_empty() => names,
             Ok(_) if clear_when_empty => return Some(serde_json::Map::new()),
@@ -3357,10 +3355,11 @@ impl InstanceService {
             let entry = mcp_servers::get(secrets, owner_id, id, name)
                 .await
                 .map_err(|e| SwarmError::Internal(format!("mcp get: {e}")))?;
-            if matches!(
-                entry.as_ref().and_then(|e| e.raw_vscode_config.as_ref()),
-                Some(_)
-            ) {
+            if entry
+                .as_ref()
+                .and_then(|e| e.raw_vscode_config.as_ref())
+                .is_some()
+            {
                 delete_entry = entry.map(|entry| (name.clone(), entry));
                 break;
             }
@@ -3389,8 +3388,8 @@ impl InstanceService {
             tracing::warn!(error = %err, instance = %id, "mcp vscode delete: sync_mcp_to_dyson failed");
         }
         Ok(Some(DeletedMcpServer {
-            owner_id: owner_id.to_string(),
-            instance_id: id.to_string(),
+            owner_id: owner_id.to_owned(),
+            instance_id: id.to_owned(),
             name: delete_name,
             runtime: delete_entry.runtime,
         }))
@@ -3446,9 +3445,9 @@ impl InstanceService {
             tracing::warn!(error = %err, instance = %id, "mcp delete: sync_mcp_to_dyson failed");
         }
         Ok(deleted_entry.map(|entry| DeletedMcpServer {
-            owner_id: owner_id.to_string(),
-            instance_id: id.to_string(),
-            name: name.to_string(),
+            owner_id: owner_id.to_owned(),
+            instance_id: id.to_owned(),
+            name: name.to_owned(),
             runtime: entry.runtime,
         }))
     }

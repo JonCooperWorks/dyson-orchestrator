@@ -809,7 +809,7 @@ fn runtime_transport_for_entry<'a>(
                     let tokens = entry
                         .oauth_tokens
                         .as_ref()
-                        .ok_or_else(|| "oauth not authorised yet".to_string())?;
+                        .ok_or_else(|| "oauth not authorised yet".to_owned())?;
                     runtime_headers.insert(
                         "Authorization".into(),
                         format!("Bearer {}", tokens.access_token),
@@ -854,7 +854,7 @@ async fn call_runtime(
         reader.read_line(&mut out),
     )
     .await
-    .map_err(|_| "runtime response timed out".to_string())?
+    .map_err(|_| "runtime response timed out".to_owned())?
     .map_err(|e| format!("read response: {e}"))?;
     if n == 0 {
         return Err("runtime closed without response".into());
@@ -1500,10 +1500,7 @@ async fn admin_list_docker_catalog(
         .map_err(store_err_to_resp)?;
     Ok(Json(AdminDockerCatalogResponse {
         allow_raw_json: svc.allow_user_docker_json,
-        servers: rows
-            .iter()
-            .map(|row| admin_docker_catalog_summary(row))
-            .collect(),
+        servers: rows.iter().map(admin_docker_catalog_summary).collect(),
     }))
 }
 
@@ -2106,7 +2103,7 @@ async fn check_server(
         Ok(c) => c,
         Err(err) => {
             entry.last_check_error = Some(mcp_servers::McpCheckError {
-                message: err.to_string(),
+                message: err.clone(),
                 checked_at: crate::now_secs(),
             });
             if let Err(write_err) =
@@ -2227,7 +2224,7 @@ async fn run_tools_list(
     let tools: Vec<McpToolSummary> = tools_value
         .iter()
         .filter_map(|t| {
-            let name = t.get("name").and_then(|n| n.as_str())?.to_string();
+            let name = t.get("name").and_then(|n| n.as_str())?.to_owned();
             if name.is_empty() {
                 return None;
             }
@@ -2455,7 +2452,7 @@ fn store_err_to_resp(err: StoreError) -> Response<Body> {
 fn peek_jsonrpc(bytes: &[u8]) -> Option<(String, serde_json::Value, serde_json::Value)> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let obj = value.as_object()?;
-    let method = obj.get("method")?.as_str()?.to_string();
+    let method = obj.get("method")?.as_str()?.to_owned();
     let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
     let params = obj
         .get("params")

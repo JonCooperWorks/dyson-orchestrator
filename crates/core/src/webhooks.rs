@@ -236,7 +236,7 @@ impl HttpWebhookDispatcher {
             .await
             .map_err(|e| format!("list-conversations parse: {e}"))?;
         if let Some(existing) = find_webhook_chat(&conversations, &target_id, &target_title) {
-            return Ok(existing.to_string());
+            return Ok(existing.to_owned());
         }
 
         let create_resp = self
@@ -457,18 +457,18 @@ impl WebhookService {
     /// or whenever the scheme is being switched.  On update with the
     /// same scheme, `None` leaves the existing secret in place.
     pub async fn put(&self, owner_id: &str, spec: WebhookSpec) -> Result<WebhookRow, WebhookError> {
-        validate_webhook_name(&spec.name).map_err(|m| WebhookError::BadRequest(m.to_string()))?;
+        validate_webhook_name(&spec.name).map_err(|m| WebhookError::BadRequest(m.to_owned()))?;
         self.ensure_owner(owner_id, &spec.instance_id).await?;
 
         let now = crate::now_secs();
         let existing = self.webhooks.get(&spec.instance_id, &spec.name).await?;
         let signature_header = match spec.signature_header.as_deref() {
             Some(raw) => validate_signature_header(raw)
-                .map_err(|m| WebhookError::BadRequest(m.to_string()))?,
+                .map_err(|m| WebhookError::BadRequest(m.to_owned()))?,
             None => existing
                 .as_ref()
                 .map(|r| r.signature_header.clone())
-                .unwrap_or_else(|| DEFAULT_SIGNATURE_HEADER.to_string()),
+                .unwrap_or_else(|| DEFAULT_SIGNATURE_HEADER.to_owned()),
         };
 
         // Resolve the secret pointer.  When the scheme needs a key,
@@ -725,8 +725,8 @@ impl WebhookService {
             };
             let row = DeliveryRow {
                 id: Uuid::new_v4().simple().to_string(),
-                instance_id: instance_id.to_string(),
-                webhook_name: name.to_string(),
+                instance_id: instance_id.to_owned(),
+                webhook_name: name.to_owned(),
                 fired_at: crate::now_secs(),
                 status_code,
                 latency_ms: elapsed_ms,

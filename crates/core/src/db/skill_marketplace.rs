@@ -141,7 +141,7 @@ impl SqlxSkillMarketplaceSourceStore {
 
     pub async fn record_fetch_error(&self, id: &str, error: &str) -> Result<(), StoreError> {
         let now = now_secs();
-        let mut msg = error.to_string();
+        let mut msg = error.to_owned();
         msg.truncate(2048);
         sqlx::query(
             "UPDATE skill_marketplace_sources \
