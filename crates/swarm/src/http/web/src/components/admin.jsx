@@ -11,6 +11,7 @@
 
 import React from 'react';
 import { useApi } from '../hooks/useApi.jsx';
+import { JsonEditor } from './json-editor.jsx';
 import { MarkdownBody } from './markdown.jsx';
 
 const DOCKER_CATALOG_TEMPLATE_PLACEHOLDER = JSON.stringify({
@@ -324,7 +325,7 @@ function SkillMarketplaceSourcesPanel({ client }) {
 function emptySkillMarketplaceSource() {
   return {
     id: '',
-    source_type: 'http',
+    source_type: 'inline',
     location: '',
     enabled: true,
   };
@@ -412,23 +413,46 @@ function SkillMarketplaceSourceForm({ mode, initial, busy, onCancel, onSave }) {
   const isEdit = mode === 'edit';
   const [form, setForm] = React.useState(initial || emptySkillMarketplaceSource());
   const [err, setErr] = React.useState(null);
+  const editorRef = React.useRef(null);
 
   const submit = (e) => {
     e.preventDefault();
     const id = form.id.trim();
+    const sourceType = form.source_type === 'http' ? 'http' : 'inline';
     const location = form.location.trim();
     if (!SKILL_MARKETPLACE_ID_RE.test(id)) {
       setErr('marketplace id must be lowercase words separated by hyphens');
       return;
     }
     if (!location) {
-      setErr('marketplace location is required');
+      setErr(sourceType === 'http' ? 'marketplace url is required' : 'marketplace index JSON is required');
       return;
+    }
+    if (sourceType === 'inline') {
+      const parsed = editorRef.current?.parse();
+      if (!parsed?.ok) {
+        setErr(parsed?.error || 'invalid JSON');
+        return;
+      }
+    } else {
+      try {
+        const parsed = new URL(location);
+        if (parsed.protocol !== 'https:') {
+          setErr('marketplace url must use https');
+          return;
+        }
+      } catch {
+        setErr('marketplace url is invalid');
+        return;
+      }
+    }
+    if (form.source_type !== sourceType) {
+      setForm(curr => ({ ...curr, source_type: sourceType }));
     }
     setErr(null);
     onSave({
       id,
-      source_type: form.source_type,
+      source_type: sourceType,
       location,
       enabled: form.enabled !== false,
     });
@@ -438,6 +462,9 @@ function SkillMarketplaceSourceForm({ mode, initial, busy, onCancel, onSave }) {
     <section className="panel admin-catalog-form-panel admin-skill-marketplace-form-panel">
       <form className="form admin-catalog-form" onSubmit={submit}>
         {err ? <div className="error">{err}</div> : null}
+        <p className="muted small admin-catalog-page-subtitle">
+          Inline pastes the index directly. HTTP fetches it from a URL Swarm can reach.
+        </p>
         <label className="field">
           <span>id</span>
           <input
@@ -456,20 +483,40 @@ function SkillMarketplaceSourceForm({ mode, initial, busy, onCancel, onSave }) {
             onChange={e => setForm(curr => ({ ...curr, source_type: e.target.value }))}
             disabled={busy}
           >
+            <option value="inline">inline</option>
             <option value="http">http</option>
-            <option value="file">file</option>
           </select>
         </label>
-        <label className="field">
-          <span>location</span>
-          <input
-            value={form.location}
-            onChange={e => setForm(curr => ({ ...curr, location: e.target.value }))}
-            placeholder={form.source_type === 'http' ? 'https://example.com/marketplace.json' : '/var/lib/dyson-swarm/marketplace.json'}
-            disabled={busy}
-            autoComplete="off"
-          />
-        </label>
+        {form.source_type === 'http' ? (
+          <label className="field">
+            <span>url</span>
+            <input
+              value={form.location}
+              onChange={e => setForm(curr => ({ ...curr, location: e.target.value }))}
+              placeholder="https://example.com/marketplace.json"
+              disabled={busy}
+              autoComplete="off"
+            />
+          </label>
+        ) : (
+          <label className="field">
+            <span>index json</span>
+            <JsonEditor
+              ref={editorRef}
+              value={form.location}
+              onChange={next => setForm(curr => ({ ...curr, location: next }))}
+              rows={16}
+              placeholder='{ "schema_version": 1, "marketplace": { "id": "team-skills", "name": "Team skills" }, "skills": [] }'
+              disabled={busy}
+              ariaLabel="marketplace index JSON"
+              validate={parsed => {
+                const skills = Array.isArray(parsed?.skills) ? parsed.skills : null;
+                if (!skills) return { ok: false, message: 'missing skills[] array' };
+                return { ok: true, message: `valid (${skills.length} skill${skills.length === 1 ? '' : 's'})` };
+              }}
+            />
+          </label>
+        )}
         <label className="field check">
           <input
             type="checkbox"

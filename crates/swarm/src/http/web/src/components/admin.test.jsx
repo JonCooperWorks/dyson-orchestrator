@@ -96,7 +96,8 @@ describe('AdminView Docker MCP catalog', () => {
     expect(await screen.findByRole('heading', { name: 'add skill marketplace' }))
       .toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('id'), { target: { value: 'team-skills' } });
-    fireEvent.change(screen.getByLabelText('location'), {
+    fireEvent.change(screen.getByLabelText('type'), { target: { value: 'http' } });
+    fireEvent.change(screen.getByLabelText('url'), {
       target: { value: 'https://example.test/marketplace.json' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
@@ -117,8 +118,8 @@ describe('AdminView Docker MCP catalog', () => {
 
     expect(await screen.findByRole('heading', { name: 'edit team-skills' }))
       .toBeInTheDocument();
-    expect(screen.getByLabelText('location')).toHaveValue('https://example.test/marketplace.json');
-    fireEvent.change(screen.getByLabelText('location'), {
+    expect(screen.getByLabelText('url')).toHaveValue('https://example.test/marketplace.json');
+    fireEvent.change(screen.getByLabelText('url'), {
       target: { value: 'https://example.test/marketplace-v2.json' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
@@ -128,6 +129,106 @@ describe('AdminView Docker MCP catalog', () => {
       location: 'https://example.test/marketplace-v2.json',
       enabled: true,
     }));
+  });
+
+  test('file source_type is no longer in the dropdown', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      adminPutSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-skill-marketplace-new' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'add skill marketplace' }))
+      .toBeInTheDocument();
+    const type = screen.getByLabelText('type');
+    expect(within(type).getByRole('option', { name: 'inline' })).toBeInTheDocument();
+    expect(within(type).getByRole('option', { name: 'http' })).toBeInTheDocument();
+    expect(within(type).queryByRole('option', { name: 'file' })).toBeNull();
+  });
+
+  test('inline marketplace with malformed JSON shows parse error and does not POST', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      adminPutSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-skill-marketplace-new' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'add skill marketplace' }))
+      .toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('id'), { target: { value: 'team-skills' } });
+    const editor = screen.getByLabelText('marketplace index JSON');
+    fireEvent.change(editor, { target: { value: '{ broken' } });
+    fireEvent.blur(editor);
+    expect(await screen.findByText(/parse error:/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    expect(client.adminPutSkillMarketplaceSource).not.toHaveBeenCalled();
+  });
+
+  test('inline marketplace with valid JSON sends source_type=inline and the JSON as location', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      adminPutSkillMarketplaceSource: vi.fn(),
+    };
+    const indexJson = '{"schema_version":1,"marketplace":{"id":"team-skills","name":"Team skills"},"skills":[]}';
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-skill-marketplace-new' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'add skill marketplace' }))
+      .toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('id'), { target: { value: 'team-skills' } });
+    fireEvent.change(screen.getByLabelText('marketplace index JSON'), {
+      target: { value: indexJson },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.adminPutSkillMarketplaceSource).toHaveBeenCalledWith('team-skills', {
+      source_type: 'inline',
+      location: indexJson,
+      enabled: true,
+    }));
+  });
+
+  test('http marketplace rejects non-https URL on submit', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      adminPutSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-skill-marketplace-new' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'add skill marketplace' }))
+      .toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('id'), { target: { value: 'team-skills' } });
+    fireEvent.change(screen.getByLabelText('type'), { target: { value: 'http' } });
+    fireEvent.change(screen.getByLabelText('url'), {
+      target: { value: 'http://example.test/marketplace.json' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    expect(screen.getByText('marketplace url must use https')).toBeInTheDocument();
+    expect(client.adminPutSkillMarketplaceSource).not.toHaveBeenCalled();
   });
 
   test('links add and edit actions to dedicated catalog pages', async () => {
