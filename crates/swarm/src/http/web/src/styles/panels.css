@@ -146,28 +146,55 @@
   white-space: pre;
 }
 
-.admin-skill-marketplace-form {
+.admin-skill-marketplace-form-panel {
+  max-width: 720px;
+}
+
+.admin-empty-state {
+  min-height: 180px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, var(--accent));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent 55%),
+    var(--bg-1);
   display: grid;
-  grid-template-columns: minmax(140px, 190px) minmax(90px, 120px) minmax(280px, 1fr) auto auto;
-  gap: 10px;
-  align-items: end;
-  margin-bottom: 14px;
-}
-
-.admin-skill-marketplace-location {
-  min-width: 0;
-}
-
-.admin-skill-marketplace-actions {
-  display: flex;
-  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 18px;
   align-items: center;
+  padding: 24px;
 }
 
-@media (max-width: 900px) {
-  .admin-skill-marketplace-form {
+.admin-empty-state h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.admin-empty-state p {
+  margin: 0;
+  max-width: 52ch;
+}
+
+.admin-empty-mark {
+  width: 48px;
+  height: 48px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--bg-2);
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .admin-empty-state {
     grid-template-columns: 1fr;
-    align-items: stretch;
+    align-items: start;
   }
 }
 

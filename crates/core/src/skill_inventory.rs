@@ -152,6 +152,22 @@ pub async fn list_instance_skills(
     Ok(out)
 }
 
+pub async fn read_instance_skill_body(
+    state_files: &StateFileService,
+    instance_id: &str,
+    skill: &str,
+) -> Result<Option<String>, SkillInventoryError> {
+    let body_path = format!("skills/{skill}/SKILL.md");
+    if classify_skill_path(&body_path).is_none() {
+        return Ok(None);
+    }
+    let rows = state_files.list_for_instance(instance_id).await?;
+    let row = rows
+        .iter()
+        .find(|row| row.namespace == "workspace" && row.path == body_path);
+    read_utf8(state_files, row).await
+}
+
 enum SkillFileKind {
     Body,
     Metadata,
@@ -299,5 +315,17 @@ mod tests {
         assert_eq!(skills[0].marketplace_id.as_deref(), Some("official"));
         assert_eq!(skills[1].skill, "debug");
         assert_eq!(skills[1].origin_kind, "local");
+
+        let body = read_instance_skill_body(&svc, "inst-a", "debug")
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_deref(),
+            Some("Debug runtime failures.\n\nUse logs first.")
+        );
+        let invalid = read_instance_skill_body(&svc, "inst-a", "../debug")
+            .await
+            .unwrap();
+        assert!(invalid.is_none());
     }
 }

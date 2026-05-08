@@ -37,6 +37,11 @@ const initial = {
   shares: {
     byInstance: {},
   },
+  // Per-instance mirrored skills. Backs the skills tab badge and the
+  // per-agent skills page with the same swept workspace inventory.
+  skills: {
+    byInstance: {},
+  },
 };
 
 export const store = createStore(initial);
@@ -190,6 +195,22 @@ export function removeShare(instanceId, jti) {
   });
 }
 
+// ─── skills ───────────────────────────────────────────────────────
+
+export function setSkillsFor(instanceId, rows) {
+  if (!instanceId) return;
+  store.dispatch(s => ({
+    ...s,
+    skills: {
+      ...s.skills,
+      byInstance: {
+        ...s.skills.byInstance,
+        [instanceId]: { rows: Array.isArray(rows) ? rows : [], loadedAt: Date.now() },
+      },
+    },
+  }));
+}
+
 // ─── hash routing ──────────────────────────────────────────────────
 //
 // Hash paths the SPA understands (mirrors what Dyson does — keeps a
@@ -287,6 +308,17 @@ export function parseHashView() {
       name: 'admin-mcp-catalog-edit',
       id: null,
       catalogId: decodeURIComponent(adminCatalogEdit[1]),
+    };
+  }
+  if (h.startsWith('#/admin/skill-marketplaces/new')) {
+    return { name: 'admin-skill-marketplace-new', id: null };
+  }
+  const adminSkillMarketplaceEdit = h.match(/^#\/admin\/skill-marketplaces\/([^/?#]+)/);
+  if (adminSkillMarketplaceEdit) {
+    return {
+      name: 'admin-skill-marketplace-edit',
+      id: null,
+      marketplaceId: decodeURIComponent(adminSkillMarketplaceEdit[1]),
     };
   }
   if (h.startsWith('#/admin')) return { name: 'admin', id: null };

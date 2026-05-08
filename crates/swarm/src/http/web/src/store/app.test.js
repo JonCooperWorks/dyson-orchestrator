@@ -59,6 +59,13 @@ describe('parseHashView', () => {
       id: null,
       catalogId: 'github',
     });
+
+    window.history.pushState(null, '', '/admin/skill-marketplaces/team-skills');
+    expect(parseHashView()).toEqual({
+      name: 'admin-skill-marketplace-edit',
+      id: null,
+      marketplaceId: 'team-skills',
+    });
   });
 
   test('hash routes win when both path and hash are present', () => {
@@ -90,6 +97,18 @@ describe('parseHashView', () => {
   test('"#/admin" routes to the admin view', () => {
     window.location.hash = '#/admin';
     expect(parseHashView()).toEqual({ name: 'admin', id: null });
+  });
+
+  test('"#/admin/skill-marketplaces/*" routes to marketplace editor pages', () => {
+    window.location.hash = '#/admin/skill-marketplaces/new';
+    expect(parseHashView()).toEqual({ name: 'admin-skill-marketplace-new', id: null });
+
+    window.location.hash = '#/admin/skill-marketplaces/team%2Dskills';
+    expect(parseHashView()).toEqual({
+      name: 'admin-skill-marketplace-edit',
+      id: null,
+      marketplaceId: 'team-skills',
+    });
   });
 
   test('unknown paths fall back to the instances list', () => {

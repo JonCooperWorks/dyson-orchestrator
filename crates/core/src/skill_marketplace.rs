@@ -118,6 +118,15 @@ pub struct CatalogSkill {
     pub min_dyson_version: Option<String>,
     pub sha256: Option<String>,
     pub content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<CatalogSkillAuthor>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CatalogSkillAuthor {
+    pub name: String,
+    pub instance_id: String,
+    pub href: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -302,7 +311,7 @@ impl SkillMarketplaceService {
         let skill = catalog_skill(&loaded.index.marketplace, package)?;
         let body = self.fetch_skill_body(&loaded.source, package).await?;
         let preview = preview(&body);
-        let computed_sha256 = sha256_hex(body.as_bytes());
+        let computed_sha256 = skill_body_sha256(&body);
         Ok(SkillPackageDetail {
             skill,
             preview,
@@ -325,7 +334,7 @@ impl SkillMarketplaceService {
         validate_skill_name(&package.name)?;
         let skill_md = self.fetch_skill_body(&loaded.source, package).await?;
         validate_skill_body(&skill_md)?;
-        let computed_sha256 = sha256_hex(skill_md.as_bytes());
+        let computed_sha256 = skill_body_sha256(&skill_md);
         if let Some(declared) = package.sha256.as_deref()
             && !declared.eq_ignore_ascii_case(&computed_sha256)
         {
@@ -571,6 +580,7 @@ fn catalog_skill(
             SkillPackageContent::Url { .. } => "url",
         }
         .into(),
+        author: None,
     })
 }
 
@@ -640,7 +650,7 @@ fn validate_marketplace_id(id: &str) -> Result<(), SkillMarketplaceError> {
     }
 }
 
-fn validate_skill_name(name: &str) -> Result<(), SkillMarketplaceError> {
+pub fn validate_skill_name(name: &str) -> Result<(), SkillMarketplaceError> {
     if is_valid_slug(name) {
         Ok(())
     } else {
@@ -659,7 +669,7 @@ fn is_valid_slug(value: &str) -> bool {
         && !value.ends_with('-')
 }
 
-fn validate_skill_body(body: &str) -> Result<(), SkillMarketplaceError> {
+pub fn validate_skill_body(body: &str) -> Result<(), SkillMarketplaceError> {
     if body.trim().is_empty() {
         return Err(SkillMarketplaceError::Invalid(
             "SKILL.md body is empty".into(),
@@ -710,7 +720,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+pub fn skill_body_sha256(body: &str) -> String {
+    sha256_hex(body.as_bytes())
+}
+
 fn preview(body: &str) -> String {
+    skill_body_preview(body)
+}
+
+pub fn skill_body_preview(body: &str) -> String {
     const MAX_PREVIEW: usize = 4096;
     if body.len() <= MAX_PREVIEW {
         return body.to_string();

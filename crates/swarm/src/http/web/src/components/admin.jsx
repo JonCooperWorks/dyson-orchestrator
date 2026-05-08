@@ -66,6 +66,12 @@ export function AdminView({ view = { name: 'admin' } }) {
   if (view.name === 'admin-mcp-catalog-edit') {
     return <DockerCatalogEditorPage client={client} mode="edit" catalogId={view.catalogId}/>;
   }
+  if (view.name === 'admin-skill-marketplace-new') {
+    return <SkillMarketplaceSourceEditorPage client={client} mode="new"/>;
+  }
+  if (view.name === 'admin-skill-marketplace-edit') {
+    return <SkillMarketplaceSourceEditorPage client={client} mode="edit" marketplaceId={view.marketplaceId}/>;
+  }
 
   return (
     <main className="admin-pane">
@@ -209,8 +215,6 @@ function SkillMarketplaceSourcesPanel({ client }) {
   const [rows, setRows] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
-  const [form, setForm] = React.useState(emptySkillMarketplaceSource());
-  const [editingId, setEditingId] = React.useState(null);
 
   const available = Boolean(
     client.adminListSkillMarketplaces
@@ -233,58 +237,12 @@ function SkillMarketplaceSourcesPanel({ client }) {
 
   if (!available) return null;
 
-  const resetForm = () => {
-    setForm(emptySkillMarketplaceSource());
-    setEditingId(null);
-    setErr(null);
-  };
-
-  const save = async (e) => {
-    e.preventDefault();
-    const id = form.id.trim();
-    const location = form.location.trim();
-    if (!SKILL_MARKETPLACE_ID_RE.test(id)) {
-      setErr('marketplace id must be lowercase words separated by hyphens');
-      return;
-    }
-    if (!location) {
-      setErr('marketplace location is required');
-      return;
-    }
-    setBusy(true); setErr(null);
-    try {
-      await client.adminPutSkillMarketplaceSource(id, {
-        source_type: form.source_type,
-        location,
-        enabled: form.enabled,
-      });
-      await refresh();
-      resetForm();
-    } catch (e) {
-      setErr(e?.detail || e?.message || 'save skill marketplace failed');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const edit = (row) => {
-    setEditingId(row.id);
-    setForm({
-      id: row.id,
-      source_type: row.source_type || 'http',
-      location: row.location || '',
-      enabled: row.enabled !== false,
-    });
-    setErr(null);
-  };
-
   const remove = async (row) => {
     if (!confirm(`delete skill marketplace ${row.id}?`)) return;
     setBusy(true); setErr(null);
     try {
       await client.adminDeleteSkillMarketplaceSource(row.id);
       await refresh();
-      if (editingId === row.id) resetForm();
     } catch (e) {
       setErr(e?.detail || e?.message || 'delete skill marketplace failed');
     } finally {
@@ -297,68 +255,26 @@ function SkillMarketplaceSourcesPanel({ client }) {
       <div className="panel-header">
         <div className="panel-title">skill marketplaces</div>
         <div className="panel-actions">
+          <a className={`btn btn-sm ${busy ? 'disabled' : ''}`} href="#/admin/skill-marketplaces/new">
+            add marketplace
+          </a>
           <button className="btn btn-ghost btn-sm" onClick={refresh} disabled={busy}>
             refresh
           </button>
         </div>
       </div>
       {err ? <div className="error">{err}</div> : null}
-      <form className="form admin-skill-marketplace-form" onSubmit={save}>
-        <label className="field">
-          <span>id</span>
-          <input
-            value={form.id}
-            onChange={e => setForm(curr => ({ ...curr, id: e.target.value }))}
-            placeholder="team-skills"
-            disabled={busy || Boolean(editingId)}
-            autoComplete="off"
-          />
-        </label>
-        <label className="field">
-          <span>type</span>
-          <select
-            value={form.source_type}
-            onChange={e => setForm(curr => ({ ...curr, source_type: e.target.value }))}
-            disabled={busy}
-          >
-            <option value="http">http</option>
-            <option value="file">file</option>
-          </select>
-        </label>
-        <label className="field admin-skill-marketplace-location">
-          <span>location</span>
-          <input
-            value={form.location}
-            onChange={e => setForm(curr => ({ ...curr, location: e.target.value }))}
-            placeholder={form.source_type === 'http' ? 'https://example.com/marketplace.json' : '/var/lib/dyson-swarm/marketplace.json'}
-            disabled={busy}
-            autoComplete="off"
-          />
-        </label>
-        <label className="field check">
-          <input
-            type="checkbox"
-            checked={form.enabled}
-            onChange={e => setForm(curr => ({ ...curr, enabled: e.target.checked }))}
-            disabled={busy}
-          />
-          <span>enabled</span>
-        </label>
-        <div className="admin-skill-marketplace-actions">
-          <button className="btn btn-primary btn-sm" type="submit" disabled={busy}>
-            {editingId ? 'save source' : 'add source'}
-          </button>
-          {editingId ? (
-            <button className="btn btn-ghost btn-sm" type="button" onClick={resetForm} disabled={busy}>
-              cancel
-            </button>
-          ) : null}
-        </div>
-      </form>
       {rows === null ? (
         <p className="muted small">loading...</p>
       ) : rows.length === 0 ? (
-        <p className="muted small">no skill marketplaces.</p>
+        <div className="admin-empty-state">
+          <div className="admin-empty-mark">SK</div>
+          <div>
+            <h3>No skill marketplaces yet</h3>
+            <p className="muted">Curated skills will appear here once a source is connected.</p>
+          </div>
+          <a className="btn btn-primary btn-sm" href="#/admin/skill-marketplaces/new">add marketplace</a>
+        </div>
       ) : (
         <table className="rows">
           <thead><tr>
@@ -382,13 +298,12 @@ function SkillMarketplaceSourcesPanel({ client }) {
                 </td>
                 <td data-label="last fetch" className="muted small">{fmtTime(row.last_fetch_at)}</td>
                 <td className="row-actions">
-                  <button
+                  <a
                     className="btn btn-ghost btn-sm"
-                    onClick={() => edit(row)}
-                    disabled={busy}
+                    href={`#/admin/skill-marketplaces/${encodeURIComponent(row.id)}`}
                   >
                     edit
-                  </button>
+                  </a>
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => remove(row)}
@@ -413,6 +328,168 @@ function emptySkillMarketplaceSource() {
     location: '',
     enabled: true,
   };
+}
+
+function SkillMarketplaceSourceEditorPage({ client, mode, marketplaceId }) {
+  const isEdit = mode === 'edit';
+  const [initial, setInitial] = React.useState(isEdit ? null : emptySkillMarketplaceSource());
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!isEdit) {
+      setInitial(emptySkillMarketplaceSource());
+      return () => { cancelled = true; };
+    }
+    setInitial(null);
+    (async () => {
+      setErr(null);
+      try {
+        const body = await client.adminListSkillMarketplaces();
+        const row = (body?.sources || []).find(source => source.id === marketplaceId);
+        if (!cancelled) {
+          setInitial(row ? {
+            id: row.id,
+            source_type: row.source_type || 'http',
+            location: row.location || '',
+            enabled: row.enabled !== false,
+          } : null);
+          if (!row) setErr(`No skill marketplace named ${marketplaceId}.`);
+        }
+      } catch (e) {
+        if (!cancelled) setErr(e?.detail || e?.message || 'load skill marketplace failed');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client, isEdit, marketplaceId]);
+
+  const save = async (source) => {
+    setBusy(true); setErr(null);
+    try {
+      await client.adminPutSkillMarketplaceSource(source.id, {
+        source_type: source.source_type,
+        location: source.location,
+        enabled: source.enabled,
+      });
+      window.location.hash = '#/admin';
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'save skill marketplace failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="admin-pane admin-catalog-page">
+      <header className="admin-header">
+        <div>
+          <h2>{isEdit ? `edit ${marketplaceId}` : 'add skill marketplace'}</h2>
+          <p className="muted small admin-catalog-page-subtitle">
+            Connect a marketplace index that Swarm can publish to Dyson agents.
+          </p>
+        </div>
+        <a className="btn btn-ghost btn-sm" href="#/admin">back</a>
+      </header>
+      {err ? <div className="error">{err}</div> : null}
+      {!initial && isEdit && !err ? (
+        <p className="muted small">loading...</p>
+      ) : initial ? (
+        <SkillMarketplaceSourceForm
+          key={`${mode}:${initial.id || 'new'}`}
+          mode={mode}
+          initial={initial}
+          busy={busy}
+          onCancel={() => { window.location.hash = '#/admin'; }}
+          onSave={save}
+        />
+      ) : null}
+    </main>
+  );
+}
+
+function SkillMarketplaceSourceForm({ mode, initial, busy, onCancel, onSave }) {
+  const isEdit = mode === 'edit';
+  const [form, setForm] = React.useState(initial || emptySkillMarketplaceSource());
+  const [err, setErr] = React.useState(null);
+
+  const submit = (e) => {
+    e.preventDefault();
+    const id = form.id.trim();
+    const location = form.location.trim();
+    if (!SKILL_MARKETPLACE_ID_RE.test(id)) {
+      setErr('marketplace id must be lowercase words separated by hyphens');
+      return;
+    }
+    if (!location) {
+      setErr('marketplace location is required');
+      return;
+    }
+    setErr(null);
+    onSave({
+      id,
+      source_type: form.source_type,
+      location,
+      enabled: form.enabled !== false,
+    });
+  };
+
+  return (
+    <section className="panel admin-catalog-form-panel admin-skill-marketplace-form-panel">
+      <form className="form admin-catalog-form" onSubmit={submit}>
+        {err ? <div className="error">{err}</div> : null}
+        <label className="field">
+          <span>id</span>
+          <input
+            value={form.id}
+            onChange={e => setForm(curr => ({ ...curr, id: e.target.value }))}
+            placeholder="team-skills"
+            disabled={busy || isEdit}
+            autoComplete="off"
+            autoFocus={!isEdit}
+          />
+        </label>
+        <label className="field">
+          <span>type</span>
+          <select
+            value={form.source_type}
+            onChange={e => setForm(curr => ({ ...curr, source_type: e.target.value }))}
+            disabled={busy}
+          >
+            <option value="http">http</option>
+            <option value="file">file</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>location</span>
+          <input
+            value={form.location}
+            onChange={e => setForm(curr => ({ ...curr, location: e.target.value }))}
+            placeholder={form.source_type === 'http' ? 'https://example.com/marketplace.json' : '/var/lib/dyson-swarm/marketplace.json'}
+            disabled={busy}
+            autoComplete="off"
+          />
+        </label>
+        <label className="field check">
+          <input
+            type="checkbox"
+            checked={form.enabled !== false}
+            onChange={e => setForm(curr => ({ ...curr, enabled: e.target.checked }))}
+            disabled={busy}
+          />
+          <span>enabled</span>
+        </label>
+        <div className="form-actions">
+          <button className="btn btn-primary" type="submit" disabled={busy}>
+            save
+          </button>
+          <button className="btn btn-ghost" type="button" onClick={onCancel} disabled={busy}>
+            cancel
+          </button>
+        </div>
+      </form>
+    </section>
+  );
 }
 
 function emptyDockerCatalogPreset() {

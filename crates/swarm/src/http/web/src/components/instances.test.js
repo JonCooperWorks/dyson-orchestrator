@@ -10,7 +10,7 @@ import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/re
 import '@testing-library/jest-dom/vitest';
 
 import { ApiProvider } from '../hooks/useApi.jsx';
-import { setInstances, setSharesFor, setWebhooksFor } from '../store/app.js';
+import { setInstances, setSharesFor, setSkillsFor, setWebhooksFor } from '../store/app.js';
 import {
   profileLabel,
   serializeMcpServers,
@@ -39,6 +39,7 @@ afterEach(() => {
   setInstances([]);
   setWebhooksFor('a', []);
   setSharesFor('a', []);
+  setSkillsFor('a', []);
 });
 
 describe('instance section rail routing', () => {
@@ -91,6 +92,7 @@ describe('instance section rail routing', () => {
       listInstances: () => Promise.resolve([row]),
       listWebhooks: () => Promise.resolve([]),
       listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
     };
 
     render(
@@ -123,6 +125,7 @@ describe('instance section rail routing', () => {
       listInstances: () => Promise.resolve([row]),
       listWebhooks: () => Promise.resolve([]),
       listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
       listSnapshotsForInstance: () => Promise.resolve([]),
       listSecrets: () => Promise.resolve([]),
       listMcpServers: () => Promise.resolve([]),
@@ -158,6 +161,7 @@ describe('instance section rail routing', () => {
       listInstances: () => Promise.resolve([row]),
       listWebhooks: () => Promise.resolve([]),
       listShares: () => Promise.resolve([{ jti: 'jti', artifact_id: 'art', active: true, revoked_at: null }]),
+      listInstanceSkills: () => Promise.resolve([]),
     };
 
     render(
@@ -169,6 +173,41 @@ describe('instance section rail routing', () => {
     const artifacts = screen.getByRole('tab', { name: /artifacts/i });
     expect(artifacts).toHaveAttribute('aria-selected', 'false');
     expect(screen.getByLabelText('1 active shared')).toBeInTheDocument();
+  });
+
+  test('shows swept skill count on the skills section badge', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+    };
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([
+        { instance_id: 'a', skill: 'debug-logs' },
+        { instance_id: 'a', skill: 'code-review' },
+      ]),
+    };
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance', id: 'a' } }),
+      ),
+    );
+
+    expect(await screen.findByLabelText('2 skills')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /skills/i }))
+      .toHaveAttribute('href', '#/i/a/skills');
   });
 });
 

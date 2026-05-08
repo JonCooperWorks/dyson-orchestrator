@@ -71,6 +71,8 @@ function renderView(view) {
     case 'admin':
     case 'admin-mcp-catalog-new':
     case 'admin-mcp-catalog-edit':
+    case 'admin-skill-marketplace-new':
+    case 'admin-skill-marketplace-edit':
       return <AdminView view={view}/>;
     case 'byok':
       return <ByokView/>;

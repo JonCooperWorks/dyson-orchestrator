@@ -18,7 +18,7 @@ import { useApi } from '../hooks/useApi.jsx';
 import { useAppState } from '../hooks/useAppState.js';
 import {
   upsertInstance, removeInstance, selectInstance, setLoadError, setInstances,
-  setWebhooksFor, setSharesFor,
+  setWebhooksFor, setSharesFor, setSkillsFor,
 } from '../store/app.js';
 import { TasksListPage, TaskFormPage, AuditListPage, AuditDetailPage } from './tasks.jsx';
 import { InstanceArtifactsPage, ArtifactPage } from './artifacts.jsx';
@@ -2462,6 +2462,17 @@ function InstanceDetail({ id, onNew, view }) {
     return () => { cancelled = true; };
   }, [client, id]);
 
+  // Skills list — fed into the skills nav badge. Quiet here; the
+  // skills section itself shows load errors when opened.
+  React.useEffect(() => {
+    if (!id || typeof client.listInstanceSkills !== 'function') return;
+    let cancelled = false;
+    client.listInstanceSkills(id).then(list => {
+      if (!cancelled) setSkillsFor(id, list || []);
+    }).catch(() => { /* silent — badge falls back to hidden */ });
+    return () => { cancelled = true; };
+  }, [client, id]);
+
   // Background TLS warm-up for `<id>.<hostname>` whenever the detail
   // page first appears for an instance.  Caddy fronts each Dyson with
   // on_demand TLS, so the very first request to a fresh subdomain
@@ -2546,6 +2557,11 @@ function DetailSectionNav({ row, activeSection }) {
     if (!slot) return null;
     return slot.rows.filter(r => r.active).length;
   });
+  const skillCount = useAppState(s => {
+    const slot = id ? s.skills.byInstance[id] : null;
+    if (!slot) return null;
+    return slot.rows.length;
+  });
   const onSelect = (e) => { window.location.hash = sectionHref(id, e.target.value); };
   return (
     <nav className="detail-section-nav" aria-label="agent sections">
@@ -2560,7 +2576,9 @@ function DetailSectionNav({ row, activeSection }) {
             ? ` (${enabledTaskCount})`
             : s.key === 'artifacts' && activeShareCount > 0
               ? ` (${activeShareCount})`
-              : '';
+              : s.key === 'skills' && skillCount > 0
+                ? ` (${skillCount})`
+                : '';
           return <option key={s.key} value={s.key}>{s.label}{suffix}</option>;
         })}
       </select>
@@ -2571,7 +2589,9 @@ function DetailSectionNav({ row, activeSection }) {
             ? <span className="btn-count-badge" aria-label={`${enabledTaskCount} enabled`}>{enabledTaskCount}</span>
             : s.key === 'artifacts' && activeShareCount > 0
               ? <span className="btn-count-badge" aria-label={`${activeShareCount} active shared`}>{activeShareCount}</span>
-              : null;
+              : s.key === 'skills' && skillCount > 0
+                ? <span className="btn-count-badge" aria-label={`${skillCount} skills`}>{skillCount}</span>
+                : null;
           return (
             <a
               key={s.key}
@@ -2769,20 +2789,21 @@ function InstanceAuxiliaryRoute({ view, instanceId }) {
 
 function SkillsSection({ instance }) {
   const { client } = useApi();
-  const [rows, setRows] = React.useState(null);
+  const cached = useAppState(s => s.skills.byInstance[instance.id] || null);
   const [err, setErr] = React.useState('');
 
   React.useEffect(() => {
     let cancelled = false;
-    setRows(null);
     setErr('');
     client.listInstanceSkills(instance.id).then(list => {
-      if (!cancelled) setRows(Array.isArray(list) ? list : []);
+      if (!cancelled) setSkillsFor(instance.id, list || []);
     }).catch(e => {
       if (!cancelled) setErr(e?.detail || e?.message || 'skills load failed');
     });
     return () => { cancelled = true; };
   }, [client, instance.id]);
+
+  const rows = cached ? cached.rows : null;
 
   return (
     <section className="panel">

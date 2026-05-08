@@ -12,8 +12,8 @@ afterEach(() => {
 });
 
 describe('AdminView Docker MCP catalog', () => {
-  test('manages DB-backed skill marketplace sources in the admin panel', async () => {
-    let sources = [{
+  test('links DB-backed skill marketplace sources to dedicated pages', async () => {
+    const sources = [{
       id: 'team-skills',
       source_type: 'http',
       location: 'https://example.test/marketplace.json',
@@ -28,10 +28,7 @@ describe('AdminView Docker MCP catalog', () => {
       adminListUsers: vi.fn().mockResolvedValue([]),
       adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
       adminListSkillMarketplaces: vi.fn(async () => ({ sources })),
-      adminPutSkillMarketplaceSource: vi.fn(async (id, payload) => {
-        sources = [{ id, ...payload, created_at: 1, updated_at: 3 }];
-        return sources[0];
-      }),
+      adminPutSkillMarketplaceSource: vi.fn(),
       adminDeleteSkillMarketplaceSource: vi.fn(),
     };
 
@@ -43,19 +40,94 @@ describe('AdminView Docker MCP catalog', () => {
 
     expect(await screen.findByText('skill marketplaces')).toBeInTheDocument();
     expect(await screen.findByText('team-skills')).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'edit' })[0]);
+    expect(screen.getByRole('link', { name: 'add marketplace' }))
+      .toHaveAttribute('href', '#/admin/skill-marketplaces/new');
+    expect(screen.getByRole('link', { name: 'edit' }))
+      .toHaveAttribute('href', '#/admin/skill-marketplaces/team-skills');
+  });
+
+  test('shows an empty state for skill marketplaces', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources: [] })),
+      adminPutSkillMarketplaceSource: vi.fn(),
+      adminDeleteSkillMarketplaceSource: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'No skill marketplaces yet' }))
+      .toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'add marketplace' }).length).toBeGreaterThan(0);
+  });
+
+  test('adds and edits skill marketplace sources on the full page', async () => {
+    let sources = [{
+      id: 'team-skills',
+      source_type: 'http',
+      location: 'https://example.test/marketplace.json',
+      enabled: true,
+      created_at: 1,
+      updated_at: 2,
+      last_fetch_at: null,
+      last_success_at: null,
+      last_error: null,
+    }];
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListSkillMarketplaces: vi.fn(async () => ({ sources })),
+      adminPutSkillMarketplaceSource: vi.fn(async (id, payload) => {
+        sources = [{ id, ...payload, created_at: 1, updated_at: 3 }];
+        return sources[0];
+      }),
+    };
+
+    const { rerender } = render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-skill-marketplace-new' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'add skill marketplace' }))
+      .toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('id'), { target: { value: 'team-skills' } });
+    fireEvent.change(screen.getByLabelText('location'), {
+      target: { value: 'https://example.test/marketplace.json' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => expect(client.adminPutSkillMarketplaceSource).toHaveBeenCalledWith('team-skills', {
+      source_type: 'http',
+      location: 'https://example.test/marketplace.json',
+      enabled: true,
+    }));
+    expect(window.location.hash).toBe('#/admin');
+
+    window.location.hash = '';
+    rerender(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-skill-marketplace-edit', marketplaceId: 'team-skills' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'edit team-skills' }))
+      .toBeInTheDocument();
     expect(screen.getByLabelText('location')).toHaveValue('https://example.test/marketplace.json');
     fireEvent.change(screen.getByLabelText('location'), {
       target: { value: 'https://example.test/marketplace-v2.json' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'save source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
-    await waitFor(() => expect(client.adminPutSkillMarketplaceSource).toHaveBeenCalledTimes(1));
-    expect(client.adminPutSkillMarketplaceSource).toHaveBeenCalledWith('team-skills', {
+    await waitFor(() => expect(client.adminPutSkillMarketplaceSource).toHaveBeenLastCalledWith('team-skills', {
       source_type: 'http',
       location: 'https://example.test/marketplace-v2.json',
       enabled: true,
-    });
+    }));
   });
 
   test('links add and edit actions to dedicated catalog pages', async () => {

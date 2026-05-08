@@ -89,11 +89,22 @@ export function SkillCatalogRow({ skill }) {
           <span className="badge">{skill.marketplace_id}</span>
           <span className="muted small">v{skill.version}</span>
           <span className="muted small">{skill.content_type}</span>
+          {skill.author ? (
+            <a className="badge badge-info" href={skillAuthorHref(skill.author)}>
+              by {skill.author.name}
+            </a>
+          ) : null}
         </div>
         <div className="muted small" style={{marginTop:4}}>{skill.description}</div>
       </div>
     </div>
   );
+}
+
+function skillAuthorHref(author) {
+  if (author?.href) return author.href;
+  if (author?.instance_id) return `#/i/${encodeURIComponent(author.instance_id)}/skills`;
+  return '#/skills';
 }
 
 export function SkillInventoryGroup({ group }) {
