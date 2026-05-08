@@ -698,7 +698,7 @@
   text-decoration: none;
   color: var(--fg-muted);
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 13px;
   flex-shrink: 0;
 }

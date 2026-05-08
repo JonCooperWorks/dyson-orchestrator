@@ -11,3 +11,9 @@ describe('mobile form controls', () => {
     expect(panelsCss).toMatch(/@media \(max-width: 700px\)[\s\S]*\.mcp-json-textarea[\s\S]*font-size:\s*16px/);
   });
 });
+
+describe('section tab highlights', () => {
+  test('keeps active detail section borders square', () => {
+    expect(panelsCss).toMatch(/\.detail-section-chip\s*\{[\s\S]*border-radius:\s*0;/);
+  });
+});
