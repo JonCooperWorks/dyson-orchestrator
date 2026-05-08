@@ -340,7 +340,12 @@ async fn agent_source_views(
 }
 
 fn is_agent_created_skill(row: &crate::skill_inventory::SkillInventoryEntry) -> bool {
-    row.has_body && row.origin_kind != "marketplace"
+    row.has_body
+        && (row.origin_kind != "marketplace"
+            || row
+                .marketplace_id
+                .as_deref()
+                .is_some_and(is_agent_marketplace))
 }
 
 fn agent_catalog_skill(
@@ -688,7 +693,18 @@ mod tests {
     #[test]
     fn installed_marketplace_skills_are_not_republished_as_agent_created() {
         assert!(!is_agent_created_skill(&skill("marketplace")));
+        let mut marketplace = skill("marketplace");
+        marketplace.marketplace_id = Some("official".into());
+        assert!(!is_agent_created_skill(&marketplace));
         assert!(is_agent_created_skill(&skill("local")));
+    }
+
+    #[test]
+    fn agent_backed_marketplace_skills_remain_catalog_visible_after_restore() {
+        let mut row = skill("marketplace");
+        row.marketplace_id = Some("agent-axelrod".into());
+
+        assert!(is_agent_created_skill(&row));
     }
 
     #[test]
