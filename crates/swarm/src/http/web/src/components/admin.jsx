@@ -636,6 +636,7 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
     () => Object.fromEntries((initial?.placeholders || []).map(field => [field.id, field.label || field.id])),
   );
   const [err, setErr] = React.useState(null);
+  const templateEditorRef = React.useRef(null);
 
   const payloadPaths = React.useMemo(() => listPayloadValuePaths(template), [template]);
   const bindings = React.useMemo(() => listPlaceholderBindings(template), [template]);
@@ -698,6 +699,11 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
   const submit = (e) => {
     e.preventDefault();
     setErr(null);
+    const parsedTemplate = templateEditorRef.current?.parse();
+    if (!parsedTemplate?.ok) {
+      setErr(parsedTemplate?.error || 'JSON template is not valid JSON');
+      return;
+    }
     const placeholders = placeholderSpecsFromTemplate(template, placeholderLabels);
     const preset = {
       id: id.trim(),
@@ -754,15 +760,26 @@ function DockerCatalogForm({ mode, initial, busy, onCancel, onSave }) {
           <div className="admin-catalog-payload">
             <label className="field admin-catalog-template-field">
               <span>JSON template</span>
-              <textarea
-                className="mcp-json-textarea admin-catalog-template"
-                value={template}
-                placeholder={DOCKER_CATALOG_TEMPLATE_PLACEHOLDER}
-                onChange={e => setTemplate(e.target.value)}
-                spellCheck={false}
-                disabled={busy}
-                aria-label="Docker MCP JSON template"
-              />
+              <div className="admin-catalog-template">
+                <JsonEditor
+                  ref={templateEditorRef}
+                  value={template}
+                  onChange={setTemplate}
+                  rows={20}
+                  placeholder={DOCKER_CATALOG_TEMPLATE_PLACEHOLDER}
+                  disabled={busy}
+                  ariaLabel="Docker MCP JSON template"
+                  validate={parsed => {
+                    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+                      return { ok: false, message: 'template must be a JSON object' };
+                    }
+                    const placeholders = listPlaceholderBindings(JSON.stringify(parsed));
+                    return placeholders.length === 0
+                      ? { ok: true, message: 'valid JSON (no placeholders bound)' }
+                      : { ok: true, message: `valid JSON (${placeholders.length} placeholder${placeholders.length === 1 ? '' : 's'})` };
+                  }}
+                />
+              </div>
             </label>
             <div className="admin-catalog-token-workbench">
               <div className="mcp-card-head">

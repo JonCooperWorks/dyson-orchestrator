@@ -419,6 +419,90 @@ describe('AdminView Docker MCP catalog', () => {
     expect(screen.getByText('no template placeholders')).toBeInTheDocument();
   });
 
+  test('Docker catalog form rejects non-object JSON template', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminRevokeProxyToken: vi.fn(),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminPutMcpDockerCatalogServer: vi.fn(),
+      adminDeleteMcpDockerCatalogServer: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-mcp-catalog-new' }}/>
+      </ApiProvider>,
+    );
+
+    const template = await screen.findByLabelText('Docker MCP JSON template');
+    fireEvent.change(screen.getByLabelText('id'), { target: { value: 'github' } });
+    fireEvent.change(screen.getByLabelText('label'), { target: { value: 'GitHub' } });
+    fireEvent.change(template, { target: { value: '[]' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    expect(screen.getByText('template must be a JSON object')).toBeInTheDocument();
+    expect(client.adminPutMcpDockerCatalogServer).not.toHaveBeenCalled();
+  });
+
+  test('Docker catalog form shows green status with placeholder count when template is valid', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminRevokeProxyToken: vi.fn(),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminPutMcpDockerCatalogServer: vi.fn(),
+      adminDeleteMcpDockerCatalogServer: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-mcp-catalog-new' }}/>
+      </ApiProvider>,
+    );
+
+    const template = await screen.findByLabelText('Docker MCP JSON template');
+    fireEvent.change(template, {
+      target: {
+        value: JSON.stringify({
+          servers: {
+            github: {
+              type: 'stdio',
+              command: 'docker',
+              args: ['run', '--rm', '{{placeholder.github_image}}'],
+            },
+          },
+        }),
+      },
+    });
+    fireEvent.blur(template);
+
+    expect(await screen.findByText('valid JSON (1 placeholder)')).toHaveClass('json-editor-status-ok');
+  });
+
+  test('Docker catalog form blocks submit when JSON template is malformed', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminRevokeProxyToken: vi.fn(),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({ allow_raw_json: false, servers: [] }),
+      adminPutMcpDockerCatalogServer: vi.fn(),
+      adminDeleteMcpDockerCatalogServer: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-mcp-catalog-new' }}/>
+      </ApiProvider>,
+    );
+
+    const template = await screen.findByLabelText('Docker MCP JSON template');
+    fireEvent.change(screen.getByLabelText('id'), { target: { value: 'github' } });
+    fireEvent.change(screen.getByLabelText('label'), { target: { value: 'GitHub' } });
+    fireEvent.change(template, { target: { value: '{ broken' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+
+    expect(client.adminPutMcpDockerCatalogServer).not.toHaveBeenCalled();
+    expect(screen.getByText(/Expected property name/)).toBeInTheDocument();
+  });
+
   test('shows pending Docker MCP requests in the same catalog panel', async () => {
     const client = {
       adminListUsers: vi.fn().mockResolvedValue([]),
