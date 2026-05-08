@@ -397,7 +397,11 @@ async fn handle(
             }
         }
     }
-    response.body(resp_body).unwrap()
+    // This builder only uses validated status/header values, but keep the
+    // public proxy path defensive if future metadata changes make it fallible.
+    response
+        .body(resp_body)
+        .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "response build failed"))
 }
 
 /// Allowlist incoming headers — the curated set listed in
