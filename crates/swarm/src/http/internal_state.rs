@@ -124,7 +124,19 @@ async fn ingest_file(State(state): State<AppState>, req: Request<Body>) -> Statu
         };
         if is_identity {
             match std::str::from_utf8(&decoded) {
-                Ok(s) => identity_body = Some(s.to_owned()),
+                Ok(s) => {
+                    identity_body = Some(s.to_owned());
+                    let name = identity_name(s).unwrap_or_else(|| instance.name.clone());
+                    if !should_mirror_identity(&instance.name, &instance.task, s) {
+                        tracing::info!(
+                            instance = %instance_id,
+                            existing_name = %instance.name,
+                            incoming_name = %name,
+                            "state ingest: ignored bootstrap IDENTITY.md to preserve instance metadata"
+                        );
+                        return StatusCode::NO_CONTENT;
+                    }
+                }
                 Err(e) => {
                     tracing::debug!(
                         error = %e,
@@ -148,17 +160,24 @@ async fn ingest_file(State(state): State<AppState>, req: Request<Body>) -> Statu
                     return StatusCode::NO_CONTENT;
                 };
                 let name = identity_name(task).unwrap_or_else(|| instance.name.clone());
-                if let Err(e) = state
-                    .instances
-                    .mirror_identity_from_instance(&instance.owner_id, &instance.id, &name, task)
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        instance = %instance_id,
-                        "state ingest: failed to mirror IDENTITY.md into instance row",
-                    );
-                    return StatusCode::INTERNAL_SERVER_ERROR;
+                if should_mirror_identity(&instance.name, &instance.task, task) {
+                    if let Err(e) = state
+                        .instances
+                        .mirror_identity_from_instance(
+                            &instance.owner_id,
+                            &instance.id,
+                            &name,
+                            task,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            instance = %instance_id,
+                            "state ingest: failed to mirror IDENTITY.md into instance row",
+                        );
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
                 }
             }
             StatusCode::NO_CONTENT
@@ -195,6 +214,23 @@ fn extract_bearer(req: &Request<Body>) -> Option<&str> {
 
 fn is_workspace_identity(namespace: &str, path: &str) -> bool {
     namespace == "workspace" && path == "IDENTITY.md"
+}
+
+fn should_mirror_identity(existing_name: &str, existing_task: &str, incoming_task: &str) -> bool {
+    !(is_bootstrap_identity(incoming_task) && has_curated_identity(existing_name, existing_task))
+}
+
+fn has_curated_identity(name: &str, task: &str) -> bool {
+    let name = name.trim();
+    let task = task.trim();
+    (!name.is_empty() && name != "Dyson") || (!task.is_empty() && !is_bootstrap_identity(task))
+}
+
+fn is_bootstrap_identity(body: &str) -> bool {
+    identity_name(body).as_deref() == Some("Dyson")
+        && body.contains("Powered by:")
+        && body.contains("Dyson agent framework")
+        && body.contains("Update this file with your specific identity")
 }
 
 fn identity_name(body: &str) -> Option<String> {
@@ -234,5 +270,36 @@ mod tests {
         assert!(is_workspace_identity("workspace", "IDENTITY.md"));
         assert!(!is_workspace_identity("workspace", "notes/IDENTITY.md"));
         assert!(!is_workspace_identity("chats", "IDENTITY.md"));
+    }
+
+    #[test]
+    fn bootstrap_identity_does_not_replace_curated_metadata() {
+        let bootstrap = "# IDENTITY.md — Who Am I?\n\n\
+            - **Name:** Dyson\n\
+            - **Mode:** AI assistant\n\
+            - **Powered by:** Dyson agent framework\n\n\
+            Update this file with your specific identity, capabilities, and context.\n";
+
+        assert!(!should_mirror_identity(
+            "TARS",
+            "security review",
+            bootstrap
+        ));
+        assert!(!should_mirror_identity(
+            "Dyson",
+            "custom mission",
+            bootstrap
+        ));
+        assert!(should_mirror_identity("", "", bootstrap));
+    }
+
+    #[test]
+    fn custom_identity_still_updates_metadata() {
+        let custom = "# IDENTITY.md — Who Am I?\n\n\
+            - **Name:** TARS\n\
+            - **Role:** Security-focused systems assistant.\n";
+
+        assert!(should_mirror_identity("Dyson", "", custom));
+        assert!(!is_bootstrap_identity(custom));
     }
 }
