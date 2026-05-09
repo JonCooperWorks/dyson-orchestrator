@@ -536,4 +536,23 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn chat_artefacts_and_files_are_durable_state() {
+        // Dyson stores artefact metadata/bodies under each chat and
+        // file bytes under the chat-history root.  These must stay in
+        // the swarm mirror so binary rotations replay the artefact
+        // chips and their backing file URLs onto the new cube.
+        for path in [
+            "c-1/artefacts/a1.body",
+            "c-1/artefacts/a1.meta.json",
+            "files/f1.bin",
+            "files/f1.meta.json",
+        ] {
+            assert!(
+                is_durable_state_file_path("chats", path),
+                "{path} must be accepted as durable chat state"
+            );
+        }
+    }
 }
