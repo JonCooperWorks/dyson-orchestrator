@@ -3491,6 +3491,98 @@ async fn restore_snapshot_in_place_uses_mirror_instead_of_snapshot_when_state_ex
 }
 
 #[tokio::test]
+async fn restore_snapshot_in_place_uses_snapshot_when_mirror_has_no_replayable_bodies() {
+    let pool = open_in_memory().await.unwrap();
+    let owner = "ba5eba11".repeat(4);
+    sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let cube = MockCube::new();
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let recorder = Arc::new(RecordingReconfigurer::default());
+    let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+        Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        pool.clone(),
+        ciphers,
+    ));
+    let isvc = Arc::new(
+        InstanceService::new(
+            cube.clone(),
+            instances.clone(),
+            tokens,
+            "https://swarm.test/llm",
+        )
+        .with_reconfigurer(recorder.clone())
+        .with_state_files(state_files),
+    );
+
+    let src = isvc
+        .create(
+            &owner,
+            CreateRequest {
+                template_id: "tpl-old".into(),
+                name: Some("metadata-only".into()),
+                task: Some("keep disk snapshot".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    recorder.pushed.lock().unwrap().clear();
+    recorder.restored.lock().unwrap().clear();
+
+    sqlx::query(
+        "INSERT INTO instance_state_files \
+         (instance_id, owner_id, namespace, path, mime, bytes, body_ciphertext, updated_at, synced_at, deleted_at) \
+         VALUES (?, ?, 'workspace', 'IDENTITY.md', 'text/markdown', 128, NULL, ?, ?, NULL)",
+    )
+    .bind(&src.id)
+    .bind(&owner)
+    .bind(1_777_760_000i64)
+    .bind(1_777_760_000i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    isvc.restore_snapshot_in_place(
+        &owner,
+        &src.id,
+        std::path::PathBuf::from("/var/lib/dyson/snapshots/good"),
+        Some("tpl-new".into()),
+    )
+    .await
+    .unwrap();
+
+    let captured = cube.last_create();
+    assert_eq!(
+        captured.from_snapshot.as_deref(),
+        Some(std::path::Path::new("/var/lib/dyson/snapshots/good")),
+        "metadata-only mirror rows must not suppress the cube snapshot fallback"
+    );
+    assert!(
+        recorder.restored.lock().unwrap().is_empty(),
+        "no state replay should be attempted from metadata-only rows"
+    );
+}
+
+#[tokio::test]
 async fn change_network_invalid_cidr_returns_bad_request_and_does_not_destroy() {
     // Bad input MUST fail before snapshot + restore + destroy.  A
     // mid-pipeline failure that destroyed the source would lose
@@ -4349,6 +4441,80 @@ async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
         events.iter().all(|event| event == "push"),
         "runtime sync should be config-only and must not restore state files: {events:?}"
     );
+}
+
+#[tokio::test]
+async fn runtime_config_sync_keeps_row_identity_when_mirrored_identity_has_no_body() {
+    let pool = open_in_memory().await.unwrap();
+    let owner = "1dentity".repeat(4);
+    sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let cube = MockCube::new();
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let recorder = Arc::new(RecordingReconfigurer::default());
+    let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+        Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        pool.clone(),
+        ciphers,
+    ));
+    let isvc = Arc::new(
+        InstanceService::new(cube, instances, tokens, "https://swarm.test/llm")
+            .with_reconfigurer(recorder.clone())
+            .with_state_files(state_files),
+    );
+
+    let src = isvc
+        .create(
+            &owner,
+            CreateRequest {
+                template_id: "tpl-v1".into(),
+                name: Some("axelrod".into()),
+                task: Some("keep this mission".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    recorder.pushed.lock().unwrap().clear();
+
+    sqlx::query(
+        "INSERT INTO instance_state_files \
+         (instance_id, owner_id, namespace, path, mime, bytes, body_ciphertext, updated_at, synced_at, deleted_at) \
+         VALUES (?, ?, 'workspace', 'IDENTITY.md', 'text/markdown', 256, NULL, ?, ?, NULL)",
+    )
+    .bind(&src.id)
+    .bind(&owner)
+    .bind(1_777_760_100i64)
+    .bind(1_777_760_100i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (visited, succeeded) = isvc.sync_runtime_config_all().await.unwrap();
+    assert_eq!((visited, succeeded), (1, 1));
+
+    let pushed = recorder.pushed.lock().unwrap();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0].2.name.as_deref(), Some("axelrod"));
+    assert_eq!(pushed[0].2.task.as_deref(), Some("keep this mission"));
 }
 
 #[tokio::test]

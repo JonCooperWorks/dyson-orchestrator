@@ -800,6 +800,38 @@ impl InstanceService {
                 row.namespace, row.path
             )));
         }
+        if row.deleted_at.is_some() || row.body_ciphertext.is_none() {
+            tracing::warn!(
+                instance = %instance_id,
+                namespace = %row.namespace,
+                path = %row.path,
+                deleted = row.deleted_at.is_some(),
+                "state identity mirror is not readable; keeping row identity fields"
+            );
+            return Ok(());
+        }
+        match state_files.read_body_for_replay(&row).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::warn!(
+                    instance = %instance_id,
+                    namespace = %row.namespace,
+                    path = %row.path,
+                    "state identity mirror body missing; keeping row identity fields"
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    instance = %instance_id,
+                    namespace = %row.namespace,
+                    path = %row.path,
+                    error = %err,
+                    "state identity mirror body unreadable; keeping row identity fields"
+                );
+                return Ok(());
+            }
+        }
         body.name = None;
         body.task = None;
         Ok(())
@@ -814,9 +846,52 @@ impl InstanceService {
             .list_for_instance(instance_id)
             .await
             .map_err(|e| SwarmError::Internal(format!("list state files: {e}")))?;
-        Ok(rows
-            .iter()
-            .any(|row| crate::state_files::is_durable_state_file_path(&row.namespace, &row.path)))
+        for row in rows {
+            if !crate::state_files::is_durable_state_file_path(&row.namespace, &row.path) {
+                continue;
+            }
+            if row.deleted_at.is_some() {
+                return Ok(true);
+            }
+            if row.body_ciphertext.is_none() {
+                tracing::warn!(
+                    instance = %instance_id,
+                    namespace = %row.namespace,
+                    path = %row.path,
+                    "state mirror row has no sealed body; ignoring it for snapshot-skip decisions"
+                );
+                continue;
+            }
+            match state_files.read_body_for_replay(&row).await {
+                Ok(Some(body))
+                    if !crate::state_files::is_zero_byte_chat_transcript(
+                        &row.namespace,
+                        &row.path,
+                        &body,
+                    ) =>
+                {
+                    return Ok(true);
+                }
+                Ok(Some(_)) | Ok(None) => {
+                    tracing::warn!(
+                        instance = %instance_id,
+                        namespace = %row.namespace,
+                        path = %row.path,
+                        "state mirror row is not replayable; ignoring it for snapshot-skip decisions"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        instance = %instance_id,
+                        namespace = %row.namespace,
+                        path = %row.path,
+                        error = %err,
+                        "state mirror row is unreadable; ignoring it for snapshot-skip decisions"
+                    );
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Re-push the canonical desired runtime config to every Live
@@ -1851,6 +1926,21 @@ impl InstanceService {
             let (deleted, body_b64) = if row.deleted_at.is_some() {
                 (true, None)
             } else {
+                if row.body_ciphertext.is_none() {
+                    if allow_unreadable_rows {
+                        tracing::warn!(
+                            instance = %instance_id,
+                            namespace = %row.namespace,
+                            path = %row.path,
+                            "state-replay: skipping metadata-only mirror row with no sealed body"
+                        );
+                        continue;
+                    }
+                    return Err(SwarmError::Internal(format!(
+                        "state file body missing for {}:{}",
+                        row.namespace, row.path
+                    )));
+                }
                 let plain = match state_files.read_body_for_replay(&row).await {
                     Ok(Some(plain)) => plain,
                     Ok(None) if allow_unreadable_rows => {
