@@ -4079,6 +4079,28 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
     )
     .await
     .unwrap();
+    let vm_config_path = "dyson.json";
+    let sealed_vm_config = ciphers_for_zero
+        .for_user(&owner)
+        .unwrap()
+        .seal(br#"{"agent":{"model":"stale-vm-cache"}}"#)
+        .unwrap();
+    crate::db::state_files::upsert(
+        &pool,
+        crate::db::state_files::UpsertSpec {
+            instance_id: &src.id,
+            owner_id: &owner,
+            namespace: "workspace",
+            path: vm_config_path,
+            mime: Some("application/json"),
+            bytes: 40,
+            body_ciphertext: &sealed_vm_config,
+            updated_at: 1_777_730_003,
+            synced_at: 1_777_730_003,
+        },
+    )
+    .await
+    .unwrap();
 
     let (visited, succeeded) = isvc.sync_runtime_config_all().await.unwrap();
     assert_eq!((visited, succeeded), (1, 1));
@@ -4095,6 +4117,12 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
             .iter()
             .any(|(_, _, b)| b.namespace == "chats" && b.path == zero_path),
         "runtime sync must not replay invalid zero-byte chat transcripts"
+    );
+    assert!(
+        !restored
+            .iter()
+            .any(|(_, _, b)| b.namespace == "workspace" && b.path == vm_config_path),
+        "runtime sync must not replay legacy VM-local dyson.json mirror rows"
     );
     drop(restored);
 

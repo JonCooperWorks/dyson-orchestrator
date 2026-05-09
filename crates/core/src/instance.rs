@@ -1757,6 +1757,15 @@ impl InstanceService {
                     row.namespace, row.path
                 )));
             }
+            if !crate::state_files::is_durable_state_file_path(&row.namespace, &row.path) {
+                tracing::warn!(
+                    instance = %instance_id,
+                    namespace = %row.namespace,
+                    path = %row.path,
+                    "state-replay: skipping legacy mirror row outside durable state allowlist"
+                );
+                continue;
+            }
             let (deleted, body_b64) = if row.deleted_at.is_some() {
                 (true, None)
             } else {

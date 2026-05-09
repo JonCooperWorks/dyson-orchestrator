@@ -1,0 +1,41 @@
+# State Ownership
+
+Swarm is the source of truth for durable, user-visible state. A running Dyson
+sandbox keeps local files only as a hot working cache so turns can run quickly
+and so existing Dyson internals can keep using filesystem-backed workspace and
+chat stores.
+
+When a sandbox is rebuilt, reset, or rotated, swarm replays durable state into
+the fresh VM before enabling the state-sync worker again. The VM copy can be
+destroyed at any time without being the only copy of useful state.
+
+## Ownership Matrix
+
+| State | Authoritative store | VM copy | Notes |
+|---|---|---|---|
+| Instance identity, task, models, tools, template, network policy, TTL, pinned state | `instances` row in swarm DB | Generated into env and patched into `dyson.json` | The VM's `dyson.json` is generated runtime cache, not source of truth. |
+| Provider keys, OpenRouter provisioning, host/operator credentials | `system_secrets` | Not injected as plaintext config | TOML may carry local-dev fallbacks, but production values live in encrypted system secrets. |
+| User-owned MCP upstreams, OAuth tokens, BYOK values, webhook secrets | `user_secrets` | Dyson sees only swarm proxy URLs and per-instance bearers | Upstream URLs and real credentials stay on swarm. |
+| Per-instance proxy, ingest, and state-sync tokens | `proxy_tokens` | Token value is delivered in the env/config envelope | Token rows are revoked with the instance. |
+| Workspace identity and memory | `instance_state_files` namespace `workspace` | `/var/lib/dyson/workspace` hot cache | Mirrored durable paths: top-level Markdown, `memory/*.md`, `kb/**`, `skills/**`, and public-channel memory/audit files. |
+| Public-channel workspace memory and audit | `instance_state_files` namespace `workspace` under `channels/<id>/...` | `/var/lib/dyson/workspace/channels/<id>` hot cache | Durable files are channel Markdown, `memory/*.md`, and `_audit.jsonl`; generated indexes are disposable. |
+| Chat transcripts, archives, media, files, feedback, activity, chat artefact copies | `instance_state_files` namespace `chats` | `/var/lib/dyson/chats` hot cache | Clean non-hidden chat paths are mirrored. Zero-byte transcripts are rejected. |
+| Artefact cache and public shares | Swarm artefact tables and encrypted/local cache bodies | Optional chat-local artefact copies | Shares read from swarm's cache and survive sandbox reset. |
+| Skill inventory | Derived from mirrored `workspace/skills/**` state files | Workspace skill files | Swarm inventory is a read model over mirrored files. |
+| `dyson.json` inside the sandbox | Swarm DB/secrets rendered through `/api/admin/configure` | `/var/lib/dyson/dyson.json` generated cache | Never mirror this file as workspace state. Runtime edits that matter must write swarm first or be reflected back through a swarm API path. |
+| Workspace `.workspace_version`, `memory.db`, logs, temp audio, configure hash, generated indexes | VM disk | VM disk only | These are rebuildable, local-only, or sensitive implementation details. |
+| Cube snapshots | Backup/transition artefact | N/A | Useful for migrations and recovery, but not the long-term source of truth when state mirror rows exist. |
+| Swarm host config | `/etc/dyson-swarm/config.toml` plus encrypted secrets | N/A | Host operational config is outside the agent VM. Production secrets should be in `system_secrets`. |
+
+## Rules
+
+1. A file or setting is durable only if it is in the matrix above with a swarm
+   authoritative store.
+2. The state-file ingest endpoint must enforce the same allowlist as the Dyson
+   state-sync worker; a compromised or buggy VM must not be able to upload
+   `dyson.json`, `.env`, indexes, or other local-only files into swarm state.
+3. Runtime config changes must update swarm DB/secrets. Patching the VM's
+   generated `dyson.json` is only the delivery mechanism to the running
+   process.
+4. Reset, redeploy, and rotation flows replay mirrored files before enabling
+   state sync so an empty fresh VM cannot tombstone durable swarm state.

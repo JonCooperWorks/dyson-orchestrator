@@ -1,9 +1,11 @@
 //! Sealed swarm-side mirror for selected Dyson state files.
 //!
-//! In swarm mode Dyson mirrors selected file changes here via an
-//! internal endpoint. The service validates namespace/path, seals every
-//! body under the owning user's age cipher, and stores the sealed body
-//! in the swarm store so replay is not pinned to a particular server.
+//! In swarm mode Dyson keeps local workspace and chat files as a
+//! hot-cache projection and mirrors selected durable file changes here
+//! via an internal endpoint. The service validates namespace/path, seals
+//! every body under the owning user's age cipher, and stores the sealed
+//! body in the swarm store so replay is not pinned to a particular server.
+//! Swarm is the durable source of truth for these mirrored files.
 
 use std::path::{Component, Path};
 use std::sync::Arc;
@@ -59,8 +61,7 @@ impl StateFileService {
         body: &[u8],
     ) -> Result<StateFileRow, StateFileError> {
         validate_instance_id(meta.instance_id)?;
-        validate_namespace(meta.namespace)?;
-        validate_relative_path(meta.path)?;
+        validate_state_file_path(meta.namespace, meta.path)?;
         validate_body(meta.namespace, meta.path, body)?;
         let cipher = self
             .ciphers
@@ -92,8 +93,7 @@ impl StateFileService {
 
     pub async fn tombstone(&self, meta: StateFileMeta<'_>) -> Result<StateFileRow, StateFileError> {
         validate_instance_id(meta.instance_id)?;
-        validate_namespace(meta.namespace)?;
-        validate_relative_path(meta.path)?;
+        validate_state_file_path(meta.namespace, meta.path)?;
         Ok(store::tombstone(
             &self.pool,
             meta.instance_id,
@@ -198,6 +198,71 @@ fn validate_relative_path(path: &str) -> Result<(), StateFileError> {
     Ok(())
 }
 
+fn validate_state_file_path(namespace: &str, path: &str) -> Result<(), StateFileError> {
+    validate_namespace(namespace)?;
+    validate_relative_path(path)?;
+    let rel = Path::new(path);
+    if has_hidden_or_unclean_component(rel) {
+        return Err(StateFileError::Invalid(
+            "paths may not contain hidden or unclean components".into(),
+        ));
+    }
+    match namespace {
+        "chats" => Ok(()),
+        "workspace" if should_mirror_workspace_path(rel) => Ok(()),
+        "workspace" => Err(StateFileError::Invalid(format!(
+            "workspace path is not durable state: {path}"
+        ))),
+        _ => unreachable!("namespace already validated"),
+    }
+}
+
+pub fn is_durable_state_file_path(namespace: &str, path: &str) -> bool {
+    validate_state_file_path(namespace, path).is_ok()
+}
+
+fn should_mirror_workspace_path(rel: &Path) -> bool {
+    let parts: Vec<&str> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+    match parts.as_slice() {
+        [file] => file.ends_with(".md"),
+        ["memory", ..] => rel.extension().and_then(|s| s.to_str()) == Some("md"),
+        ["kb", ..] | ["skills", ..] => true,
+        ["channels", _channel, rest @ ..] => should_mirror_channel_workspace(rest, rel),
+        _ => false,
+    }
+}
+
+fn should_mirror_channel_workspace(parts: &[&str], rel: &Path) -> bool {
+    match parts {
+        [file] => file.ends_with(".md") || *file == "_audit.jsonl",
+        ["memory", ..] => rel.extension().and_then(|s| s.to_str()) == Some("md"),
+        _ => false,
+    }
+}
+
+fn has_hidden_or_unclean_component(path: &Path) -> bool {
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let Some(s) = part.to_str() else {
+                    return true;
+                };
+                if s.is_empty() || s.starts_with('.') {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
 pub fn is_zero_byte_chat_transcript(namespace: &str, path: &str, body: &[u8]) -> bool {
     namespace == "chats" && path.ends_with("/transcript.json") && body.is_empty()
 }
@@ -277,6 +342,51 @@ mod tests {
         let (svc, _keys) = svc().await;
         let err = svc.ingest(meta("../MEMORY.md"), b"nope").await.unwrap_err();
         assert!(matches!(err, StateFileError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_workspace_paths_that_are_vm_local_cache() {
+        let (svc, _keys) = svc().await;
+
+        for path in [
+            "dyson.json",
+            ".env",
+            "memory.db",
+            "channels/group-1/memory.db",
+            "channels/group-1/.workspace_version",
+        ] {
+            let err = svc.ingest(meta(path), b"nope").await.unwrap_err();
+            assert!(
+                matches!(err, StateFileError::Invalid(_)),
+                "{path} must not be accepted into the swarm mirror"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_public_channel_workspace_state() {
+        let (svc, _keys) = svc().await;
+
+        for path in [
+            "channels/group-1/MEMORY.md",
+            "channels/group-1/USER.md",
+            "channels/group-1/memory/2026-05-09.md",
+            "channels/group-1/_audit.jsonl",
+        ] {
+            svc.ingest(meta(path), b"hello").await.unwrap();
+        }
+
+        let rows = svc.list_for_instance("inst-a").await.unwrap();
+        let paths: Vec<_> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "channels/group-1/MEMORY.md",
+                "channels/group-1/USER.md",
+                "channels/group-1/_audit.jsonl",
+                "channels/group-1/memory/2026-05-09.md",
+            ]
+        );
     }
 
     #[tokio::test]
