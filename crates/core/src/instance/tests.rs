@@ -3271,6 +3271,180 @@ async fn restore_snapshot_in_place_preserves_identity_and_uses_snapshot() {
 }
 
 #[tokio::test]
+async fn restore_snapshot_in_place_uses_mirror_instead_of_snapshot_when_state_exists() {
+    let pool = open_in_memory().await.unwrap();
+    let owner = "ca11ab1e".repeat(4);
+    sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let cube = MockCube::new();
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let recorder = Arc::new(RecordingReconfigurer::default());
+    let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+        Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        pool.clone(),
+        ciphers.clone(),
+    ));
+    let user_secrets_store: Arc<dyn crate::traits::UserSecretStore> =
+        Arc::new(crate::db::secrets::SqlxUserSecretStore::new(pool.clone()));
+    let user_secrets = Arc::new(UserSecretsService::new(user_secrets_store, ciphers));
+    let isvc = Arc::new(
+        InstanceService::new(
+            cube.clone(),
+            instances.clone(),
+            tokens,
+            "https://swarm.test/llm",
+        )
+        .with_reconfigurer(recorder.clone())
+        .with_state_files(state_files.clone())
+        .with_mcp_secrets(user_secrets.clone()),
+    );
+
+    let src = isvc
+        .create(
+            &owner,
+            CreateRequest {
+                template_id: "tpl-old".into(),
+                name: Some("CASE".into()),
+                task: Some("restore from swarm".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    crate::mcp_servers::put_all(
+        &user_secrets,
+        &owner,
+        &src.id,
+        vec![crate::mcp_servers::McpServerSpec {
+            name: "linear".into(),
+            url: "https://8.8.8.8/mcp".into(),
+            auth: crate::mcp_servers::McpAuthSpec::Bearer {
+                token: "lin_secret".into(),
+            },
+            enabled_tools: None,
+        }],
+    )
+    .await
+    .unwrap();
+    recorder.pushed.lock().unwrap().clear();
+    recorder.restored.lock().unwrap().clear();
+    recorder.events.lock().unwrap().clear();
+
+    state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &src.id,
+                owner_id: &owner,
+                namespace: "workspace",
+                path: "IDENTITY.md",
+                mime: Some("text/markdown"),
+                updated_at: 1_777_740_000,
+            },
+            b"# IDENTITY.md\n\n- **Name:** mirrored-case",
+        )
+        .await
+        .unwrap();
+    state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &src.id,
+                owner_id: &owner,
+                namespace: "chats",
+                path: "c-restore/transcript.json",
+                mime: Some("application/json"),
+                updated_at: 1_777_740_001,
+            },
+            br#"[{"role":"user","content":"restore me from swarm"}]"#,
+        )
+        .await
+        .unwrap();
+
+    let before = instances.get(&src.id).await.unwrap().unwrap();
+    let old_sandbox = before.cube_sandbox_id.clone().unwrap();
+    let recovered = isvc
+        .restore_snapshot_in_place(
+            &owner,
+            &src.id,
+            std::path::PathBuf::from("/var/lib/dyson/snapshots/stale"),
+            Some("tpl-new".into()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(recovered.id, src.id);
+    assert_eq!(recovered.template_id, "tpl-new");
+    assert_ne!(recovered.cube_sandbox_id, before.cube_sandbox_id);
+    assert!(
+        cube.destroyed.lock().unwrap().contains(&old_sandbox),
+        "old sandbox should be destroyed after mirror-backed restore"
+    );
+
+    let captured = cube.last_create();
+    assert_eq!(captured.template_id, "tpl-new");
+    assert!(
+        captured.from_snapshot.is_none(),
+        "restore must not use a deploy snapshot when swarm has durable mirrored state"
+    );
+    assert!(
+        !captured.env.contains_key(ENV_STATE_SYNC_URL),
+        "mirror-backed restore create env must keep state sync disabled until replay finishes"
+    );
+    assert!(!captured.env.contains_key(ENV_STATE_SYNC_TOKEN));
+
+    let restored = recorder.restored.lock().unwrap();
+    assert_eq!(restored.len(), 2);
+    assert!(
+        restored
+            .iter()
+            .any(|(_, _, b)| b.namespace == "workspace" && b.path == "IDENTITY.md")
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|(_, _, b)| b.namespace == "chats" && b.path == "c-restore/transcript.json")
+    );
+    drop(restored);
+
+    let pushed = recorder.pushed.lock().unwrap();
+    assert_eq!(pushed.len(), 2);
+    assert!(pushed[0].2.state_sync_url.is_none());
+    assert!(pushed[0].2.state_sync_token.is_none());
+    assert!(pushed[1].2.state_sync_url.is_some());
+    assert!(pushed[1].2.state_sync_token.is_some());
+    assert!(
+        pushed
+            .iter()
+            .all(|(_, _, body)| body.name.is_none() && body.task.is_none()),
+        "restore configure must not overwrite mirrored IDENTITY.md"
+    );
+    assert!(
+        pushed.iter().all(|(_, _, body)| body
+            .mcp_servers
+            .as_ref()
+            .is_some_and(|block| block.contains_key("linear"))),
+        "restore configure must preserve attached MCP servers"
+    );
+}
+
+#[tokio::test]
 async fn change_network_invalid_cidr_returns_bad_request_and_does_not_destroy() {
     // Bad input MUST fail before snapshot + restore + destroy.  A
     // mid-pipeline failure that destroyed the source would lose
@@ -3966,7 +4140,7 @@ async fn reset_replays_sealed_state_before_enabling_sync() {
 }
 
 #[tokio::test]
-async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
+async fn runtime_config_sync_does_not_replay_state_into_live_sandbox() {
     let pool = open_in_memory().await.unwrap();
     let owner = "abbafeed".repeat(4);
     sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
@@ -4107,22 +4281,8 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
 
     let restored = recorder.restored.lock().unwrap();
     assert!(
-        restored
-            .iter()
-            .any(|(_, _, b)| b.namespace == "chats" && b.path == "c-7/transcript.json"),
-        "startup/runtime sync must replay mirrored chat transcripts into the live sandbox"
-    );
-    assert!(
-        !restored
-            .iter()
-            .any(|(_, _, b)| b.namespace == "chats" && b.path == zero_path),
-        "runtime sync must not replay invalid zero-byte chat transcripts"
-    );
-    assert!(
-        !restored
-            .iter()
-            .any(|(_, _, b)| b.namespace == "workspace" && b.path == vm_config_path),
-        "runtime sync must not replay legacy VM-local dyson.json mirror rows"
+        restored.is_empty(),
+        "startup/runtime sync must not replay mirrored files into an already-live sandbox: {restored:?}"
     );
     drop(restored);
 
@@ -4139,12 +4299,9 @@ async fn runtime_config_sync_replays_sealed_chats_before_enabling_sync() {
     drop(pushed);
 
     let events = recorder.events.lock().unwrap();
-    assert_eq!(events.last().map(String::as_str), Some("push"));
     assert!(
-        events[..events.len() - 1]
-            .iter()
-            .all(|event| event.starts_with("restore:")),
-        "all replay calls must happen before configure enables state sync: {events:?}"
+        events.iter().all(|event| event == "push"),
+        "runtime sync should be config-only and must not restore state files: {events:?}"
     );
 }
 
@@ -4278,10 +4435,16 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
         .await
         .unwrap();
 
+    let snapshots_before = cube.snapshotted.lock().unwrap().len();
     let report = isvc.rotate_binary_all(&ssvc, "tpl-v2").await.unwrap();
     assert_eq!(report.visited, 1);
     assert_eq!(report.rotated, 1);
     assert!(report.failed.is_empty());
+    assert_eq!(
+        cube.snapshotted.lock().unwrap().len(),
+        snapshots_before,
+        "redeploy rotation must not snapshot VM disk once swarm has durable mirrored state"
+    );
 
     let row = instances
         .get_for_owner(&owner, &src.id)
@@ -4294,8 +4457,8 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     let captured = cube.last_create();
     assert_eq!(captured.template_id, "tpl-v2");
     assert!(
-        captured.from_snapshot.is_some(),
-        "redeploy rotation should still use the cube snapshot"
+        captured.from_snapshot.is_none(),
+        "redeploy rotation must build a clean VM when swarm has durable mirrored state"
     );
     assert!(
         !captured.env.contains_key(ENV_STATE_SYNC_URL),
@@ -4357,7 +4520,7 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
 }
 
 #[tokio::test]
-async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
+async fn binary_rotation_skips_snapshot_when_mirror_rows_exist() {
     let pool = open_in_memory().await.unwrap();
     let owner = "deadcafe".repeat(4);
     sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
@@ -4455,13 +4618,19 @@ async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
     .await
     .unwrap();
 
+    let snapshots_before = cube.snapshotted.lock().unwrap().len();
     let report = isvc.rotate_binary_all(&ssvc, "tpl-v2").await.unwrap();
     assert_eq!(report.visited, 1);
     assert_eq!(report.rotated, 1);
     assert!(
         report.failed.is_empty(),
-        "snapshot-backed rotation must not fail on unreadable mirror rows: {:?}",
+        "mirror-backed rotation must not fail on unreadable mirror rows: {:?}",
         report.failed
+    );
+    assert_eq!(
+        cube.snapshotted.lock().unwrap().len(),
+        snapshots_before,
+        "rotation must skip cube snapshots when any durable mirror row exists"
     );
 
     let row = instances
@@ -4474,8 +4643,8 @@ async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
 
     let captured = cube.last_create();
     assert!(
-        captured.from_snapshot.is_some(),
-        "rotation must keep using the cube snapshot as the authoritative state source"
+        captured.from_snapshot.is_none(),
+        "rotation must not use cube disk as the authoritative state source"
     );
 
     let restored = recorder.restored.lock().unwrap();
@@ -4490,7 +4659,7 @@ async fn binary_rotation_tolerates_unreadable_mirror_rows_from_snapshot() {
         restored
             .iter()
             .all(|(_, _, b)| b.path != "c-legacy/activity.jsonl"),
-        "unreadable mirror rows should be skipped because the snapshot carries their state"
+        "unreadable mirror rows should be skipped without falling back to cube snapshot authority"
     );
 }
 

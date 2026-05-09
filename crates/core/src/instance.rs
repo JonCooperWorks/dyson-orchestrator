@@ -805,6 +805,20 @@ impl InstanceService {
         Ok(())
     }
 
+    async fn has_durable_mirrored_state_files(
+        &self,
+        instance_id: &str,
+        state_files: &crate::state_files::StateFileService,
+    ) -> Result<bool, SwarmError> {
+        let rows = state_files
+            .list_for_instance(instance_id)
+            .await
+            .map_err(|e| SwarmError::Internal(format!("list state files: {e}")))?;
+        Ok(rows
+            .iter()
+            .any(|row| crate::state_files::is_durable_state_file_path(&row.namespace, &row.path)))
+    }
+
     /// Re-push the canonical desired runtime config to every Live
     /// instance. Idempotent: a dyson that already has the right values
     /// gets the same JSON written back. Best-effort: a sandbox that's
@@ -857,20 +871,8 @@ impl InstanceService {
                     continue;
                 }
             };
-            let result = if let Some(state_files) = self.state_files.as_ref() {
-                self.replay_state_files_and_configure(
-                    &row.owner_id,
-                    row,
-                    &tokens,
-                    sandbox_id,
-                    state_files,
-                    true,
-                    false,
-                    "runtime-config-sync",
-                )
-                .await
-            } else {
-                let body = self
+            let result = async {
+                let mut body = self
                     .configure_body_for_existing_row(
                         &row.owner_id,
                         row,
@@ -879,10 +881,20 @@ impl InstanceService {
                         &tokens.state_sync,
                     )
                     .await;
+                if let Some(state_files) = self.state_files.as_ref() {
+                    self.clear_identity_fields_when_mirror_is_authoritative(
+                        &mut body,
+                        &row.owner_id,
+                        &row.id,
+                        state_files,
+                    )
+                    .await?;
+                }
                 push_with_retry(reconfigurer.as_ref(), &row.id, sandbox_id, &body)
                     .await
                     .map_err(SwarmError::Internal)
-            };
+            }
+            .await;
             match result {
                 Ok(()) => {
                     succeeded += 1;
@@ -1087,10 +1099,11 @@ impl InstanceService {
 
     /// In-place rotation: pivot a Live row onto a new template (and
     /// optionally a new network policy) WITHOUT changing the row's
-    /// swarm id.  Snapshot the workspace, spin up a fresh cube under
-    /// the new template + same swarm id, swap `cube_sandbox_id` +
-    /// `template_id` (+ policy when supplied) on the row, push the
-    /// configure envelope, then destroy the old cube.
+    /// swarm id.  When swarm has durable mirrored state, spin up a
+    /// clean cube and replay the mirror before enabling sync; otherwise
+    /// use a cube snapshot as the legacy fallback.  Then swap
+    /// `cube_sandbox_id` + `template_id` (+ policy when supplied) on
+    /// the row, push the configure envelope, and destroy the old cube.
     ///
     /// Side effects on the row that DO survive the rotation:
     /// `id`, `name`, `task`, `bearer_token`, `models`, `tools`,
@@ -1232,25 +1245,59 @@ impl InstanceService {
             );
         };
 
-        // Phase 1: snapshot the source workspace.
-        let snap = match snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await {
-            Ok(s) => s,
-            Err(e) => {
-                if quiesced {
-                    if let Some(rc) = self.reconfigurer.as_ref() {
-                        unquiesce_on_drop("snapshot failed", &e);
-                        let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
+        let replay_state_files = self.state_files.clone();
+        let use_state_mirror = if let Some(state_files) = replay_state_files.as_ref() {
+            match self
+                .has_durable_mirrored_state_files(&source.id, state_files)
+                .await
+            {
+                Ok(has_rows) => has_rows,
+                Err(e) => {
+                    if quiesced {
+                        if let Some(rc) = self.reconfigurer.as_ref() {
+                            unquiesce_on_drop("state mirror listing failed", &e);
+                            let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
+                        }
                     }
+                    return Err(e);
                 }
-                return Err(e);
             }
+        } else {
+            false
         };
-        tracing::info!(
-            instance = %source.id,
-            snapshot = %snap.id,
-            sandbox = %old_sandbox_id,
-            "rotate-in-place: snapshot taken"
-        );
+
+        // Phase 1: snapshot the source workspace only for legacy rows
+        // that do not yet have any durable swarm-side mirror. Once the
+        // mirror exists, swarm rows are authoritative and cube disk is
+        // only a hot projection.
+        let from_snapshot_path = if use_state_mirror {
+            tracing::info!(
+                instance = %source.id,
+                sandbox = %old_sandbox_id,
+                "rotate-in-place: durable state mirror present; skipping cube snapshot"
+            );
+            None
+        } else {
+            let snap = match snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    if quiesced {
+                        if let Some(rc) = self.reconfigurer.as_ref() {
+                            unquiesce_on_drop("snapshot failed", &e);
+                            let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
+                        }
+                    }
+                    return Err(e);
+                }
+            };
+            tracing::info!(
+                instance = %source.id,
+                snapshot = %snap.id,
+                sandbox = %old_sandbox_id,
+                "rotate-in-place: snapshot taken"
+            );
+            Some(std::path::PathBuf::from(snap.path))
+        };
 
         // Phase 2: build env envelope using the EXISTING bearer + id.
         // Runtime tokens are repaired here so legacy rows missing any
@@ -1258,16 +1305,16 @@ impl InstanceService {
         let runtime_tokens = self
             .runtime_tokens_for_instance(&source.id, &plan.target_state_generation)
             .await?;
-        let replay_state_files = self.state_files.clone();
 
         // Phase 3: spin up a fresh cube under the new template using
-        // the snapshot we just took.
+        // the legacy snapshot, or clean when swarm already owns durable
+        // state.
         let info = match self
             .create_in_place_swap_sandbox(
                 &plan,
                 &runtime_tokens,
-                Some(std::path::PathBuf::from(&snap.path)),
-                replay_state_files.is_some(),
+                from_snapshot_path,
+                use_state_mirror,
             )
             .await
         {
@@ -1289,7 +1336,7 @@ impl InstanceService {
             "rotate-in-place: new cube live"
         );
 
-        if let Some(state_files) = replay_state_files.as_ref() {
+        if let Some(state_files) = replay_state_files.as_ref().filter(|_| use_state_mirror) {
             if let Err(err) = self
                 .replay_state_files_and_configure(
                     owner_id,
@@ -1358,7 +1405,7 @@ impl InstanceService {
         // pointing at a Live cube that hasn't been reconfigured yet;
         // the runtime config sync sweep will retry the non-identity
         // parts on the next swarm restart.
-        if replay_state_files.is_none() {
+        if !use_state_mirror {
             self.push_configure_best_effort(
                 owner_id,
                 source,
@@ -1428,20 +1475,28 @@ impl InstanceService {
             &*self.resolver,
         )
         .await?;
+        let replay_state_files = self.state_files.clone();
+        let use_state_mirror = if let Some(state_files) = replay_state_files.as_ref() {
+            self.has_durable_mirrored_state_files(&source.id, state_files)
+                .await?
+        } else {
+            false
+        };
 
         tracing::warn!(
             instance = %source.id,
             old_sandbox = ?old_sandbox_id,
             to_template = %target_template,
             snapshot_path = %snapshot_path.display(),
-            "restore-snapshot-in-place: creating replacement cube from deploy snapshot"
+            use_state_mirror,
+            "restore-snapshot-in-place: creating replacement cube"
         );
 
         let target_state_generation = mint_state_generation();
         let runtime_tokens = self
             .runtime_tokens_for_instance(&source.id, &target_state_generation)
             .await?;
-        let managed = managed_env(
+        let mut managed = managed_env(
             &self.proxy_base,
             &runtime_tokens.proxy,
             &runtime_tokens.ingest,
@@ -1452,14 +1507,23 @@ impl InstanceService {
             &source.task,
             &source.network_policy,
         );
+        if use_state_mirror {
+            managed.remove(ENV_STATE_SYNC_URL);
+            managed.remove(ENV_STATE_SYNC_TOKEN);
+        }
         let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
+        let from_snapshot_path = if use_state_mirror {
+            None
+        } else {
+            Some(snapshot_path)
+        };
 
         let info = self
             .cube
             .create_sandbox(CreateSandboxArgs {
                 template_id: target_template.clone(),
                 env,
-                from_snapshot_path: Some(snapshot_path),
+                from_snapshot_path,
                 resolved_policy: resolved.clone(),
             })
             .await?;
@@ -1468,6 +1532,24 @@ impl InstanceService {
             new_sandbox = %info.sandbox_id,
             "restore-snapshot-in-place: replacement cube live"
         );
+
+        if let Some(state_files) = replay_state_files.as_ref().filter(|_| use_state_mirror)
+            && let Err(err) = self
+                .replay_state_files_and_configure(
+                    owner_id,
+                    &source,
+                    &runtime_tokens,
+                    &info.sandbox_id,
+                    state_files,
+                    true,
+                    true,
+                    "restore-snapshot",
+                )
+                .await
+        {
+            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+            return Err(err);
+        }
 
         if let Err(e) = self
             .instances
@@ -1493,7 +1575,7 @@ impl InstanceService {
             return Err(e.into());
         }
 
-        if let Some(reconfigurer) = self.reconfigurer.as_ref() {
+        if !use_state_mirror && let Some(reconfigurer) = self.reconfigurer.as_ref() {
             let body = self
                 .configure_body_for_existing_row(
                     owner_id,
