@@ -270,7 +270,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         } else {
             row.owner_id.clone()
         };
-        return swarm_share_mint(&state, &caller, &instance_id, req).await;
+        return swarm_share_mint(&state, &caller, &row, req).await;
     }
 
     // 3. Build upstream URL.  No path manipulation needed — host-based
@@ -417,7 +417,7 @@ fn json_response(status: StatusCode, body: &str) -> Response<Body> {
 async fn swarm_share_mint(
     state: &DispatchState,
     caller_user_id: &str,
-    instance_id: &str,
+    instance: &InstanceRow,
     req: Request,
 ) -> Response<Body> {
     use crate::shares::ShareTtl;
@@ -444,10 +444,31 @@ async fn swarm_share_mint(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "bad json"),
     };
     let Some(ttl) = ShareTtl::parse(&parsed.ttl) else {
-        return error_response(StatusCode::BAD_REQUEST, "ttl must be 1d, 7d, or 30d");
+        return error_response(StatusCode::BAD_REQUEST, "ttl must be 1d, 7d, 30d, or never");
     };
     if parsed.artefact_id.is_empty() || parsed.chat_id.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "artefact_id and chat_id required");
+    }
+    if let Err(e) = ensure_share_artefact_cached(
+        state,
+        caller_user_id,
+        instance,
+        &parsed.chat_id,
+        &parsed.artefact_id,
+    )
+    .await
+    {
+        return match e {
+            ShareMintCacheError::NotFound => {
+                error_response(StatusCode::NOT_FOUND, "artefact not available")
+            }
+            ShareMintCacheError::BadGateway => {
+                error_response(StatusCode::BAD_GATEWAY, "artefact fetch failed")
+            }
+            ShareMintCacheError::Internal => {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "cache failed")
+            }
+        };
     }
     let label = parsed.label.filter(|s| !s.trim().is_empty());
     match state
@@ -455,7 +476,7 @@ async fn swarm_share_mint(
         .shares
         .mint(
             caller_user_id,
-            instance_id,
+            &instance.id,
             &parsed.chat_id,
             &parsed.artefact_id,
             ttl,
@@ -468,16 +489,189 @@ async fn swarm_share_mint(
             Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "encode failed"),
         },
         Err(crate::shares::service::ShareServiceError::NotFound) => {
-            error_response(StatusCode::NOT_FOUND, "no such instance")
+            error_response(StatusCode::NOT_FOUND, "artefact not available")
         }
         Err(crate::shares::service::ShareServiceError::BadRequest(m)) => {
             error_response(StatusCode::BAD_REQUEST, &m)
         }
         Err(e) => {
-            tracing::warn!(instance = %instance_id, error = %e, "share-mint via _swarm escape route failed");
+            tracing::warn!(instance = %instance.id, error = %e, "share-mint via _swarm escape route failed");
             error_response(StatusCode::BAD_GATEWAY, "mint failed")
         }
     }
+}
+
+#[derive(Debug)]
+enum ShareMintCacheError {
+    NotFound,
+    BadGateway,
+    Internal,
+}
+
+#[derive(Debug, Default)]
+struct DysonArtefactMeta {
+    kind: Option<String>,
+    title: Option<String>,
+    created_at: Option<i64>,
+    metadata_json: Option<String>,
+}
+
+/// Dyson's in-instance share button can be clicked before swarm has seen
+/// the artefact through internal ingest or an explicit sweep. Verify that
+/// the requested artefact belongs to the requested chat, then write the body
+/// through to the durable cache so the normal ShareService mint path can keep
+/// its cache-backed authorization check.
+async fn ensure_share_artefact_cached(
+    state: &DispatchState,
+    caller_user_id: &str,
+    instance: &InstanceRow,
+    chat_id: &str,
+    artefact_id: &str,
+) -> Result<(), ShareMintCacheError> {
+    if let Ok(Some(row)) = state
+        .app
+        .artefact_cache
+        .find(&instance.id, chat_id, artefact_id)
+        .await
+        && row.owner_id == caller_user_id
+        && state
+            .app
+            .artefact_cache
+            .read_body(&row)
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        return Ok(());
+    }
+
+    let meta = lookup_dyson_artefact_for_share(state, instance, chat_id, artefact_id).await;
+    let mut listed = false;
+    let meta = match meta {
+        Ok(m) => {
+            listed = true;
+            m
+        }
+        Err(ShareMintCacheError::NotFound) => DysonArtefactMeta::default(),
+        Err(e) => return Err(e),
+    };
+
+    let resp = crate::instance_client::fetch_artefact(
+        &state.app.dyson_http,
+        &state.app.sandbox_domain,
+        instance,
+        &format!("/api/artefacts/{artefact_id}"),
+    )
+    .await
+    .map_err(|_| ShareMintCacheError::BadGateway)?;
+    if !resp.status().is_success() {
+        return Err(ShareMintCacheError::NotFound);
+    }
+
+    let mime = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let header_chat = resp
+        .headers()
+        .get("x-dyson-chat-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if let Some(header_chat) = header_chat.as_deref()
+        && !header_chat.is_empty()
+        && header_chat != chat_id
+    {
+        return Err(ShareMintCacheError::NotFound);
+    }
+    if !listed && header_chat.as_deref().unwrap_or("").is_empty() {
+        return Err(ShareMintCacheError::NotFound);
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|_| ShareMintCacheError::BadGateway)?
+        .to_vec();
+    let title = meta.title.unwrap_or_else(|| artefact_id.to_owned());
+    let kind = meta.kind.unwrap_or_else(|| "other".to_owned());
+    state
+        .app
+        .artefact_cache
+        .ingest(
+            crate::artefacts::IngestMeta {
+                instance_id: &instance.id,
+                owner_id: caller_user_id,
+                chat_id,
+                artefact_id,
+                kind: &kind,
+                title: &title,
+                mime: mime.as_deref(),
+                created_at: meta.created_at.unwrap_or_else(crate::now_secs),
+                metadata_json: meta.metadata_json.as_deref(),
+            },
+            Some(&bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                error = %e,
+                instance = %instance.id,
+                chat = %chat_id,
+                artefact = %artefact_id,
+                "share-mint: cache warm failed"
+            );
+            ShareMintCacheError::Internal
+        })?;
+    Ok(())
+}
+
+async fn lookup_dyson_artefact_for_share(
+    state: &DispatchState,
+    instance: &InstanceRow,
+    chat_id: &str,
+    artefact_id: &str,
+) -> Result<DysonArtefactMeta, ShareMintCacheError> {
+    let resp = crate::instance_client::fetch_artefact(
+        &state.app.dyson_http,
+        &state.app.sandbox_domain,
+        instance,
+        &format!("/api/conversations/{chat_id}/artefacts"),
+    )
+    .await
+    .map_err(|_| ShareMintCacheError::BadGateway)?;
+    if !resp.status().is_success() {
+        return Err(ShareMintCacheError::NotFound);
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|_| ShareMintCacheError::BadGateway)?;
+    parse_dyson_artefact_meta_list(&bytes, artefact_id)
+}
+
+fn parse_dyson_artefact_meta_list(
+    bytes: &[u8],
+    artefact_id: &str,
+) -> Result<DysonArtefactMeta, ShareMintCacheError> {
+    let arr: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| ShareMintCacheError::BadGateway)?;
+    let items = arr.as_array().ok_or(ShareMintCacheError::NotFound)?;
+    let Some(item) = items
+        .iter()
+        .find(|item| item.get("id").and_then(|v| v.as_str()) == Some(artefact_id))
+    else {
+        return Err(ShareMintCacheError::NotFound);
+    };
+    Ok(DysonArtefactMeta {
+        kind: item.get("kind").and_then(|v| v.as_str()).map(str::to_owned),
+        title: item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        created_at: item.get("created_at").and_then(|v| v.as_i64()),
+        metadata_json: item.get("metadata").map(|v| v.to_string()),
+    })
 }
 
 /// 403 Forbidden with the canonical JSON shape the SPA's fetch layer
@@ -782,6 +976,29 @@ mod tests {
         // would otherwise return Some("") and we'd happily try to look
         // up an empty instance id.
         assert!(extract_instance_subdomain(".swarm.example.com", "swarm.example.com").is_none());
+    }
+
+    #[test]
+    fn share_mint_meta_parser_selects_requested_artefact() {
+        let raw = br#"[
+            {"id":"a1","kind":"image","title":"diagram.png","created_at":10},
+            {"id":"a2","kind":"security_review","title":"report.md","created_at":20,
+             "metadata":{"model":"openai/gpt-5"}}
+        ]"#;
+        let meta = parse_dyson_artefact_meta_list(raw, "a2").unwrap();
+        assert_eq!(meta.kind.as_deref(), Some("security_review"));
+        assert_eq!(meta.title.as_deref(), Some("report.md"));
+        assert_eq!(meta.created_at, Some(20));
+        assert_eq!(
+            meta.metadata_json.as_deref(),
+            Some(r#"{"model":"openai/gpt-5"}"#)
+        );
+    }
+
+    #[test]
+    fn share_mint_meta_parser_rejects_missing_artefact() {
+        let err = parse_dyson_artefact_meta_list(br#"[{"id":"a1"}]"#, "missing").unwrap_err();
+        assert!(matches!(err, ShareMintCacheError::NotFound));
     }
 
     // ── Origin / Referer allowlist (CSRF defence-in-depth) ────────────
