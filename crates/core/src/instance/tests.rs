@@ -3317,7 +3317,7 @@ async fn restore_snapshot_in_place_preserves_identity_and_uses_snapshot() {
 }
 
 #[tokio::test]
-async fn restore_snapshot_in_place_uses_mirror_instead_of_snapshot_when_state_exists() {
+async fn restore_snapshot_in_place_uses_snapshot_base_and_replays_mirror_when_state_exists() {
     let pool = open_in_memory().await.unwrap();
     let owner = "ca11ab1e".repeat(4);
     sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
@@ -3445,9 +3445,10 @@ async fn restore_snapshot_in_place_uses_mirror_instead_of_snapshot_when_state_ex
 
     let captured = cube.last_create();
     assert_eq!(captured.template_id, "tpl-new");
-    assert!(
-        captured.from_snapshot.is_none(),
-        "restore must not use a deploy snapshot when swarm has durable mirrored state"
+    assert_eq!(
+        captured.from_snapshot.as_deref(),
+        Some(std::path::Path::new("/var/lib/dyson/snapshots/stale")),
+        "restore must use the snapshot as a base and replay mirrored state on top"
     );
     assert!(
         !captured.env.contains_key(ENV_STATE_SYNC_URL),
@@ -4646,6 +4647,20 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
         )
         .await
         .unwrap();
+    state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &src.id,
+                owner_id: &owner,
+                namespace: "workspace",
+                path: "skills/research-notes/SKILL.md",
+                mime: Some("text/markdown"),
+                updated_at: 1_777_710_002,
+            },
+            b"# Research Notes\n\nUse this skill for recurring research workflows.",
+        )
+        .await
+        .unwrap();
 
     let snapshots_before = cube.snapshotted.lock().unwrap().len();
     let report = isvc.rotate_binary_all(&ssvc, "tpl-v2").await.unwrap();
@@ -4654,8 +4669,8 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     assert!(report.failed.is_empty());
     assert_eq!(
         cube.snapshotted.lock().unwrap().len(),
-        snapshots_before,
-        "redeploy rotation must not snapshot VM disk once swarm has durable mirrored state"
+        snapshots_before + 1,
+        "redeploy rotation must snapshot VM disk so non-mirrored workspace files survive"
     );
 
     let row = instances
@@ -4668,9 +4683,10 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
 
     let captured = cube.last_create();
     assert_eq!(captured.template_id, "tpl-v2");
-    assert!(
-        captured.from_snapshot.is_none(),
-        "redeploy rotation must build a clean VM when swarm has durable mirrored state"
+    assert_eq!(
+        captured.from_snapshot.as_deref(),
+        Some(std::path::Path::new("/var/snaps/snap-sb-1-1")),
+        "redeploy rotation must use the live snapshot as a base before replaying mirrored state"
     );
     assert!(
         !captured.env.contains_key(ENV_STATE_SYNC_URL),
@@ -4679,7 +4695,7 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
     assert!(!captured.env.contains_key(ENV_STATE_SYNC_TOKEN));
 
     let restored = recorder.restored.lock().unwrap();
-    assert_eq!(restored.len(), 3);
+    assert_eq!(restored.len(), 4);
     assert!(
         restored
             .iter()
@@ -4691,6 +4707,13 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
             .iter()
             .any(|(_, _, b)| b.namespace == "chats" && b.path == "c-99/transcript.json"),
         "chat transcript must be replayed during redeploy rotation"
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|(_, _, b)| b.namespace == "workspace"
+                && b.path == "skills/research-notes/SKILL.md"),
+        "workspace skills must be replayed during redeploy rotation"
     );
     drop(restored);
 
@@ -4732,7 +4755,7 @@ async fn binary_rotation_replays_sealed_chats_before_enabling_sync() {
 }
 
 #[tokio::test]
-async fn binary_rotation_skips_snapshot_when_mirror_rows_exist() {
+async fn binary_rotation_uses_snapshot_base_when_mirror_rows_exist() {
     let pool = open_in_memory().await.unwrap();
     let owner = "deadcafe".repeat(4);
     sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
@@ -4841,8 +4864,8 @@ async fn binary_rotation_skips_snapshot_when_mirror_rows_exist() {
     );
     assert_eq!(
         cube.snapshotted.lock().unwrap().len(),
-        snapshots_before,
-        "rotation must skip cube snapshots when any durable mirror row exists"
+        snapshots_before + 1,
+        "rotation must snapshot live disk so non-mirrored workspace files survive"
     );
 
     let row = instances
@@ -4854,9 +4877,10 @@ async fn binary_rotation_skips_snapshot_when_mirror_rows_exist() {
     assert_eq!(row.template_id, "tpl-v2");
 
     let captured = cube.last_create();
-    assert!(
-        captured.from_snapshot.is_none(),
-        "rotation must not use cube disk as the authoritative state source"
+    assert_eq!(
+        captured.from_snapshot.as_deref(),
+        Some(std::path::Path::new("/var/snaps/snap-sb-1-1")),
+        "rotation must use the live snapshot as a base before replaying mirrored state"
     );
 
     let restored = recorder.restored.lock().unwrap();

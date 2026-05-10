@@ -90,7 +90,7 @@ impl ArtefactCacheService {
 
     /// Read the body bytes from the swarm store. Returns `Ok(None)` if
     /// the row is metadata-only or the sealed body cannot be opened.
-    pub async fn read_body(&self, row: &CachedArtefact) -> Result<Option<Vec<u8>>, CacheError> {
+    pub fn read_body(&self, row: &CachedArtefact) -> Result<Option<Vec<u8>>, CacheError> {
         let bytes = match row.body_ciphertext.as_deref() {
             Some(bytes) => bytes,
             None => return Ok(None),
@@ -324,7 +324,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.bytes, 5);
         assert_eq!(row.mime.as_deref(), Some("text/markdown"));
-        let bytes = svc.read_body(&row).await.unwrap().unwrap();
+        let bytes = svc.read_body(&row).unwrap().unwrap();
         assert_eq!(bytes, b"hello");
     }
 
@@ -343,7 +343,7 @@ mod tests {
         let row = svc.find("i", "c", "a").await.unwrap().unwrap();
         assert_eq!(row.title, "Renamed");
         assert_eq!(row.bytes, 8); // "original".len()
-        let bytes = svc.read_body(&row).await.unwrap().unwrap();
+        let bytes = svc.read_body(&row).unwrap().unwrap();
         assert_eq!(bytes, b"original");
     }
 
@@ -358,7 +358,7 @@ mod tests {
             .unwrap();
         let row = svc.find("i", "c", "a").await.unwrap().unwrap();
         assert_eq!(row.bytes, 9);
-        let bytes = svc.read_body(&row).await.unwrap().unwrap();
+        let bytes = svc.read_body(&row).unwrap().unwrap();
         assert_eq!(bytes, b"v2-longer");
     }
 
@@ -379,7 +379,7 @@ mod tests {
     async fn metadata_only_body_returns_none() {
         let (svc, _keys) = svc().await;
         let row = svc.ingest(meta("i", ALICE, "c", "a"), None).await.unwrap();
-        let got = svc.read_body(&row).await.unwrap();
+        let got = svc.read_body(&row).unwrap();
         assert!(got.is_none());
     }
 
@@ -429,7 +429,7 @@ mod tests {
             .ingest(meta("i", ALICE, "c", "a"), Some(b"# Findings\n\n* a\n"))
             .await
             .unwrap();
-        let plain = svc.read_body(&row).await.unwrap().unwrap();
+        let plain = svc.read_body(&row).unwrap().unwrap();
         assert_eq!(plain, b"# Findings\n\n* a\n");
         // bytes column reflects PLAINTEXT length, not ciphertext.
         assert_eq!(row.bytes, 16);
@@ -443,7 +443,7 @@ mod tests {
             .await
             .unwrap();
         row.body_ciphertext = Some(b"old plaintext body".to_vec());
-        let got = svc.read_body(&row).await.unwrap();
+        let got = svc.read_body(&row).unwrap();
         assert!(got.is_none());
     }
 
@@ -462,7 +462,7 @@ mod tests {
         let mid = ct.len() / 2;
         ct[mid] ^= 0x40;
         row.body_ciphertext = Some(ct);
-        let got = svc.read_body(&row).await.unwrap();
+        let got = svc.read_body(&row).unwrap();
         assert!(
             got.is_none(),
             "tampered ciphertext must surface as a miss, not ciphertext bytes"
@@ -483,7 +483,7 @@ mod tests {
         svc.ingest(refreshed, None).await.unwrap();
         let row = svc.find("i", "c", "a").await.unwrap().unwrap();
         assert_eq!(row.title, "Renamed");
-        let plain = svc.read_body(&row).await.unwrap().unwrap();
+        let plain = svc.read_body(&row).unwrap().unwrap();
         assert_eq!(plain, b"v1 sealed");
     }
 
@@ -498,7 +498,7 @@ mod tests {
             .unwrap();
         let row = svc.find("i", "c", "a").await.unwrap().unwrap();
         assert_eq!(row.bytes, 19);
-        let plain = svc.read_body(&row).await.unwrap().unwrap();
+        let plain = svc.read_body(&row).unwrap().unwrap();
         assert_eq!(plain, b"v2-much-longer-body");
     }
 
@@ -518,7 +518,7 @@ mod tests {
             row.body_ciphertext.as_deref().is_some_and(|b| b.is_empty()),
             "empty body should store a present empty blob"
         );
-        let got = svc.read_body(&row).await.unwrap().unwrap();
+        let got = svc.read_body(&row).unwrap().unwrap();
         assert!(
             got.is_empty(),
             "empty body should round-trip as empty bytes"
@@ -542,7 +542,7 @@ mod tests {
             owner_id: BOB.to_owned(),
             ..alice_row.clone()
         };
-        let got = svc.read_body(&forged).await.unwrap();
+        let got = svc.read_body(&forged).unwrap();
         assert!(
             got.is_none(),
             "wrong-owner read must surface as a miss, not plaintext"

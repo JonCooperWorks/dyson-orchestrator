@@ -77,8 +77,8 @@ pub async fn list_instance_skills(
 
     let mut out = Vec::new();
     for (skill, parts) in grouped {
-        let body = read_utf8(state_files, parts.body_row.as_ref()).await?;
-        let metadata_body = read_utf8(state_files, parts.metadata_row.as_ref()).await?;
+        let body = read_utf8(state_files, parts.body_row.as_ref())?;
+        let metadata_body = read_utf8(state_files, parts.metadata_row.as_ref())?;
         let metadata = metadata_body
             .as_deref()
             .and_then(|body| serde_json::from_str::<InstalledSkillMetadata>(body).ok());
@@ -165,7 +165,7 @@ pub async fn read_instance_skill_body(
     let row = rows
         .iter()
         .find(|row| row.namespace == "workspace" && row.path == body_path);
-    read_utf8(state_files, row).await
+    read_utf8(state_files, row)
 }
 
 enum SkillFileKind {
@@ -189,14 +189,14 @@ fn classify_skill_path(path: &str) -> Option<(&str, SkillFileKind)> {
     }
 }
 
-async fn read_utf8(
+fn read_utf8(
     state_files: &StateFileService,
     row: Option<&StateFileRow>,
 ) -> Result<Option<String>, SkillInventoryError> {
     let Some(row) = row else {
         return Ok(None);
     };
-    let Some(bytes) = state_files.read_body(row).await? else {
+    let Some(bytes) = state_files.read_body(row)? else {
         return Ok(None);
     };
     Ok(String::from_utf8(bytes).ok())

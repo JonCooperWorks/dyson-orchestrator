@@ -227,7 +227,7 @@ async fn resolve_artefact(
             &verified.row.artefact_id,
         )
         .await
-        && let Ok(Some(bytes)) = state.artefact_cache.read_body(&row).await
+        && let Ok(Some(bytes)) = state.artefact_cache.read_body(&row)
     {
         return Some(ResolvedArtefact {
             bytes,

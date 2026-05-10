@@ -810,7 +810,7 @@ impl InstanceService {
             );
             return Ok(());
         }
-        match state_files.read_body_for_replay(&row).await {
+        match state_files.read_body_for_replay(&row) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 tracing::warn!(
@@ -858,11 +858,11 @@ impl InstanceService {
                     instance = %instance_id,
                     namespace = %row.namespace,
                     path = %row.path,
-                    "state mirror row has no sealed body; ignoring it for snapshot-skip decisions"
+                    "state mirror row has no sealed body; ignoring it for state-replay decisions"
                 );
                 continue;
             }
-            match state_files.read_body_for_replay(&row).await {
+            match state_files.read_body_for_replay(&row) {
                 Ok(Some(body))
                     if !crate::state_files::is_zero_byte_chat_transcript(
                         &row.namespace,
@@ -877,7 +877,7 @@ impl InstanceService {
                         instance = %instance_id,
                         namespace = %row.namespace,
                         path = %row.path,
-                        "state mirror row is not replayable; ignoring it for snapshot-skip decisions"
+                        "state mirror row is not replayable; ignoring it for state-replay decisions"
                     );
                 }
                 Err(err) => {
@@ -886,7 +886,7 @@ impl InstanceService {
                         namespace = %row.namespace,
                         path = %row.path,
                         error = %err,
-                        "state mirror row is unreadable; ignoring it for snapshot-skip decisions"
+                        "state mirror row is unreadable; ignoring it for state-replay decisions"
                     );
                 }
             }
@@ -1174,9 +1174,10 @@ impl InstanceService {
 
     /// In-place rotation: pivot a Live row onto a new template (and
     /// optionally a new network policy) WITHOUT changing the row's
-    /// swarm id.  When swarm has durable mirrored state, spin up a
-    /// clean cube and replay the mirror before enabling sync; otherwise
-    /// use a cube snapshot as the legacy fallback.  Then swap
+    /// swarm id.  Always snapshot the live cube as the base so local
+    /// files that are outside, or not yet present in, the swarm mirror
+    /// survive. When swarm has durable mirrored state, replay that
+    /// mirror on top of the snapshot before enabling sync. Then swap
     /// `cube_sandbox_id` + `template_id` (+ policy when supplied) on
     /// the row, push the configure envelope, and destroy the old cube.
     ///
@@ -1341,38 +1342,38 @@ impl InstanceService {
             false
         };
 
-        // Phase 1: snapshot the source workspace only for legacy rows
-        // that do not yet have any durable swarm-side mirror. Once the
-        // mirror exists, swarm rows are authoritative and cube disk is
-        // only a hot projection.
-        let from_snapshot_path = if use_state_mirror {
+        // Phase 1: snapshot the live cube as the base.  The swarm
+        // mirror, when present, is replayed on top in Phase 3 so it
+        // remains authoritative for paths it knows about, while the
+        // snapshot preserves local workspace files that have not made
+        // it into the mirror yet.
+        if use_state_mirror {
             tracing::info!(
                 instance = %source.id,
                 sandbox = %old_sandbox_id,
-                "rotate-in-place: durable state mirror present; skipping cube snapshot"
+                "rotate-in-place: durable state mirror present; snapshot will be used as base and mirror replayed"
             );
-            None
-        } else {
-            let snap = match snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    if quiesced {
-                        if let Some(rc) = self.reconfigurer.as_ref() {
-                            unquiesce_on_drop("snapshot failed", &e);
-                            let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
-                        }
+        }
+        let snap = match snapshot_svc.snapshot(SYSTEM_OWNER, &source.id).await {
+            Ok(s) => s,
+            Err(e) => {
+                if quiesced {
+                    if let Some(rc) = self.reconfigurer.as_ref() {
+                        unquiesce_on_drop("snapshot failed", &e);
+                        let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
                     }
-                    return Err(e);
                 }
-            };
-            tracing::info!(
-                instance = %source.id,
-                snapshot = %snap.id,
-                sandbox = %old_sandbox_id,
-                "rotate-in-place: snapshot taken"
-            );
-            Some(std::path::PathBuf::from(snap.path))
+                return Err(e);
+            }
         };
+        tracing::info!(
+            instance = %source.id,
+            snapshot = %snap.id,
+            sandbox = %old_sandbox_id,
+            state_mirror_overlay = use_state_mirror,
+            "rotate-in-place: snapshot taken"
+        );
+        let from_snapshot_path = Some(std::path::PathBuf::from(snap.path));
 
         // Phase 2: build env envelope using the EXISTING bearer + id.
         // Runtime tokens are repaired here so legacy rows missing any
@@ -1563,7 +1564,7 @@ impl InstanceService {
             old_sandbox = ?old_sandbox_id,
             to_template = %target_template,
             snapshot_path = %snapshot_path.display(),
-            use_state_mirror,
+            state_mirror_overlay = use_state_mirror,
             "restore-snapshot-in-place: creating replacement cube"
         );
 
@@ -1587,11 +1588,7 @@ impl InstanceService {
             managed.remove(ENV_STATE_SYNC_TOKEN);
         }
         let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
-        let from_snapshot_path = if use_state_mirror {
-            None
-        } else {
-            Some(snapshot_path)
-        };
+        let from_snapshot_path = Some(snapshot_path);
 
         let info = self
             .cube
@@ -1941,7 +1938,7 @@ impl InstanceService {
                         row.namespace, row.path
                     )));
                 }
-                let plain = match state_files.read_body_for_replay(&row).await {
+                let plain = match state_files.read_body_for_replay(&row) {
                     Ok(Some(plain)) => plain,
                     Ok(None) if allow_unreadable_rows => {
                         tracing::warn!(

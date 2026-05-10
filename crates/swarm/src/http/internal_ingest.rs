@@ -583,13 +583,7 @@ mod tests {
         assert_eq!(row.bytes, 16);
 
         // Body decrypts back to the input plaintext.
-        let plain = f
-            .state
-            .artefact_cache
-            .read_body(&row)
-            .await
-            .unwrap()
-            .unwrap();
+        let plain = f.state.artefact_cache.read_body(&row).unwrap().unwrap();
         assert_eq!(plain, b"# Findings\n\n* a\n");
 
         // Store holds ciphertext, not plaintext.
@@ -628,13 +622,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.bytes, 14);
-        let plain = f
-            .state
-            .artefact_cache
-            .read_body(&row)
-            .await
-            .unwrap()
-            .unwrap();
+        let plain = f.state.artefact_cache.read_body(&row).unwrap().unwrap();
         assert_eq!(plain, b"v2-much-longer");
     }
 
@@ -679,13 +667,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.title, "Renamed");
         assert_eq!(row.bytes, 8);
-        let plain = f
-            .state
-            .artefact_cache
-            .read_body(&row)
-            .await
-            .unwrap()
-            .unwrap();
+        let plain = f.state.artefact_cache.read_body(&row).unwrap().unwrap();
         assert_eq!(plain, b"original");
     }
 
@@ -754,13 +736,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.bytes, 0);
-        let got = f
-            .state
-            .artefact_cache
-            .read_body(&row)
-            .await
-            .unwrap()
-            .unwrap();
+        let got = f.state.artefact_cache.read_body(&row).unwrap().unwrap();
         assert!(got.is_empty());
     }
 }

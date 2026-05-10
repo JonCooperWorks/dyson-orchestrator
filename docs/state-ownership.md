@@ -5,9 +5,11 @@ sandbox keeps local files only as a hot working cache so turns can run quickly
 and so existing Dyson internals can keep using filesystem-backed workspace and
 chat stores.
 
-When a sandbox is rebuilt, reset, or rotated, swarm replays durable state into
-the fresh VM before enabling the state-sync worker again. The VM copy can be
-destroyed at any time without being the only copy of useful state.
+When a sandbox is rebuilt, reset, or rotated, swarm uses the available cube
+snapshot as the replacement VM's base and then replays durable mirrored state
+over it before enabling the state-sync worker again. The snapshot base preserves
+local workspace files that are outside the mirror or have not synced yet; the
+mirror still wins for paths it has recorded.
 
 ## Ownership Matrix
 
@@ -24,7 +26,7 @@ destroyed at any time without being the only copy of useful state.
 | Skill inventory | Derived from mirrored `workspace/skills/**` state files | Workspace skill files | Swarm inventory is a read model over mirrored files. |
 | `dyson.json` inside the sandbox | Swarm DB/secrets rendered through `/api/admin/configure` | `/var/lib/dyson/dyson.json` generated cache | Never mirror this file as workspace state. Runtime edits that matter must write swarm first or be reflected back through a swarm API path. |
 | Workspace `.workspace_version`, `memory.db`, logs, temp audio, configure hash, generated indexes | VM disk | VM disk only | These are rebuildable, local-only, or sensitive implementation details. |
-| Cube snapshots | Backup/transition artefact | N/A | Useful for migrations and recovery, but not the long-term source of truth when state mirror rows exist. |
+| Cube snapshots | Backup/transition artefact | N/A | Used as the base for migrations and recovery; mirrored swarm state is replayed over the snapshot for paths swarm tracks. |
 | Swarm host config | `/etc/dyson-swarm/config.toml` plus encrypted secrets | N/A | Host operational config is outside the agent VM. Production secrets should be in `system_secrets`. |
 
 ## Rules

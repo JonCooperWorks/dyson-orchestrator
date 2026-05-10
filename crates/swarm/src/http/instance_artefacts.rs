@@ -206,7 +206,7 @@ async fn get_artefact_raw(
         .into_iter()
         .find(|r| r.artefact_id == art_id);
     if let Some(row) = &cached_row
-        && let Ok(Some(bytes)) = state.artefact_cache.read_body(row).await
+        && let Ok(Some(bytes)) = state.artefact_cache.read_body(row)
     {
         return Ok(body_response(bytes, row.mime.as_deref(), &row.title));
     }

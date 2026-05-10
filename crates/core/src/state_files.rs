@@ -156,7 +156,7 @@ impl StateFileService {
         Ok(store::list_for_instance(&self.pool, instance_id).await?)
     }
 
-    pub async fn read_body(&self, row: &StateFileRow) -> Result<Option<Vec<u8>>, StateFileError> {
+    pub fn read_body(&self, row: &StateFileRow) -> Result<Option<Vec<u8>>, StateFileError> {
         if row.deleted_at.is_some() {
             return Ok(None);
         }
@@ -190,11 +190,11 @@ impl StateFileService {
             .map_err(|e| StateFileError::Io(format!("open: {e}")))?;
         Ok(Some(plain))
     }
-    pub async fn read_body_for_replay(
+    pub fn read_body_for_replay(
         &self,
         row: &StateFileRow,
     ) -> Result<Option<Vec<u8>>, StateFileError> {
-        self.read_body(row).await
+        self.read_body(row)
     }
 }
 
@@ -264,7 +264,7 @@ fn should_mirror_workspace_path(rel: &Path) -> bool {
         })
         .collect();
     match parts.as_slice() {
-        [file] => file.ends_with(".md"),
+        [file] => has_extension(file, "md"),
         ["memory", ..] => rel.extension().and_then(|s| s.to_str()) == Some("md"),
         ["kb", ..] | ["skills", ..] => true,
         ["channels", _channel, rest @ ..] => should_mirror_channel_workspace(rest, rel),
@@ -274,10 +274,16 @@ fn should_mirror_workspace_path(rel: &Path) -> bool {
 
 fn should_mirror_channel_workspace(parts: &[&str], rel: &Path) -> bool {
     match parts {
-        [file] => file.ends_with(".md") || *file == "_audit.jsonl",
+        [file] => has_extension(file, "md") || *file == "_audit.jsonl",
         ["memory", ..] => rel.extension().and_then(|s| s.to_str()) == Some("md"),
         _ => false,
     }
+}
+
+fn has_extension(file_name: &str, expected: &str) -> bool {
+    Path::new(file_name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
 }
 
 fn has_hidden_or_unclean_component(path: &Path) -> bool {
@@ -388,7 +394,7 @@ mod tests {
         let row = svc.ingest(meta("MEMORY.md"), b"").await.unwrap();
         let stored = row.body_ciphertext.as_deref().expect("sealed body");
         assert!(stored.starts_with(AGE_ARMOR_PREFIX));
-        assert_eq!(svc.read_body(&row).await.unwrap().unwrap(), b"");
+        assert_eq!(svc.read_body(&row).unwrap().unwrap(), b"");
         assert_eq!(row.bytes, 0);
     }
 
@@ -423,7 +429,7 @@ mod tests {
         let row = svc.ingest(chat_meta, b"[]").await.unwrap();
         assert!(row.bytes > 2);
         assert_eq!(
-            svc.read_body(&row).await.unwrap().unwrap(),
+            svc.read_body(&row).unwrap().unwrap(),
             br#"[{"role":"assistant","content":"kept"}]"#
         );
     }
@@ -444,7 +450,7 @@ mod tests {
         let row = svc.ingest(chat_meta, b"New conversation").await.unwrap();
         assert_eq!(row.bytes, "Security review: programs".len() as i64);
         assert_eq!(
-            svc.read_body(&row).await.unwrap().unwrap(),
+            svc.read_body(&row).unwrap().unwrap(),
             b"Security review: programs"
         );
     }
@@ -509,7 +515,7 @@ mod tests {
         let row = svc.tombstone(meta("MEMORY.md")).await.unwrap();
         assert!(row.deleted_at.is_some());
         assert!(row.body_ciphertext.is_none());
-        assert!(svc.read_body(&row).await.unwrap().is_none());
+        assert!(svc.read_body(&row).unwrap().is_none());
     }
 
     #[tokio::test]
