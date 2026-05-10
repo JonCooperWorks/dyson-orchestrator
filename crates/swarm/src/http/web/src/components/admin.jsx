@@ -27,6 +27,33 @@ const DOCKER_CATALOG_TEMPLATE_PLACEHOLDER = JSON.stringify({
 const PLACEHOLDER_TOKEN_RE = /{{\s*placeholders?\.([A-Za-z0-9_-]+)\s*}}/g;
 const SAFE_PLACEHOLDER_NAME_RE = /^[A-Za-z0-9_-]+$/;
 
+const ADMIN_SECTIONS = [
+  {
+    key: 'mcp-catalog',
+    href: '#/admin/mcp-catalog',
+    label: 'MCP catalog',
+    summary: 'Docker MCP templates',
+  },
+  {
+    key: 'skill-marketplaces',
+    href: '#/admin/skill-marketplaces',
+    label: 'Skill marketplaces',
+    summary: 'Skill source indexes',
+  },
+  {
+    key: 'users',
+    href: '#/admin/users',
+    label: 'Users',
+    summary: 'Accounts and limits',
+  },
+  {
+    key: 'proxy-tokens',
+    href: '#/admin/proxy-tokens',
+    label: 'Proxy tokens',
+    summary: 'Emergency revocation',
+  },
+];
+
 export function AdminView({ view = { name: 'admin' } }) {
   const { client } = useApi();
   const [authz, setAuthz] = React.useState({ state: 'probing' }); // probing | ok | denied | error
@@ -75,78 +102,209 @@ export function AdminView({ view = { name: 'admin' } }) {
   }
   if (view.name === 'admin-mcp-catalog') {
     return (
-      <AdminSectionPage title="mcp-catalog">
+      <AdminSectionPage active="mcp-catalog">
         <DockerCatalogPanel client={client}/>
       </AdminSectionPage>
     );
   }
   if (view.name === 'admin-skill-marketplaces') {
     return (
-      <AdminSectionPage title="skill-marketplaces">
+      <AdminSectionPage active="skill-marketplaces">
         <SkillMarketplaceSourcesPanel client={client}/>
       </AdminSectionPage>
     );
   }
   if (view.name === 'admin-users') {
     return (
-      <AdminSectionPage title="users">
+      <AdminSectionPage active="users">
         <UsersPanel client={client}/>
       </AdminSectionPage>
     );
   }
   if (view.name === 'admin-proxy-tokens') {
     return (
-      <AdminSectionPage title="proxy-tokens">
+      <AdminSectionPage active="proxy-tokens">
         <ProxyTokensPanel client={client}/>
       </AdminSectionPage>
     );
   }
 
-  return <AdminLandingPage/>;
+  return <AdminLandingPage client={client}/>;
 }
 
-function AdminLandingPage() {
+function AdminLandingPage({ client }) {
+  const overview = useAdminOverview(client);
   return (
-    <main className="admin-pane">
-      <header className="admin-header">
-        <h2>admin</h2>
-      </header>
-      <section className="panel">
-        <div className="panel-header">
-          <div className="panel-title">sections</div>
-        </div>
-        <nav className="admin-section-links" aria-label="admin sections">
-          <a className="admin-section-link" href="#/admin/mcp-catalog">
-            <span>mcp-catalog</span>
-            <code className="mono-sm">#/admin/mcp-catalog</code>
-          </a>
-          <a className="admin-section-link" href="#/admin/skill-marketplaces">
-            <span>skill-marketplaces</span>
-            <code className="mono-sm">#/admin/skill-marketplaces</code>
-          </a>
-          <a className="admin-section-link" href="#/admin/users">
-            <span>users</span>
-            <code className="mono-sm">#/admin/users</code>
-          </a>
-          <a className="admin-section-link" href="#/admin/proxy-tokens">
-            <span>proxy-tokens</span>
-            <code className="mono-sm">#/admin/proxy-tokens</code>
-          </a>
-        </nav>
-      </section>
+    <main className="admin-pane admin-overview-page">
+      <AdminPageHeader title="admin" subtitle="Operator controls"/>
+      <nav className="admin-section-links" aria-label="admin sections">
+        {ADMIN_SECTIONS.map(section => (
+          <AdminSectionCard
+            key={section.key}
+            section={section}
+            overview={overview}
+          />
+        ))}
+      </nav>
     </main>
   );
 }
 
-function AdminSectionPage({ title, children }) {
+function AdminSectionPage({ active, children }) {
+  const section = ADMIN_SECTIONS.find(s => s.key === active);
   return (
     <main className="admin-pane">
-      <header className="admin-header">
-        <h2>{title}</h2>
-        <a className="btn btn-ghost btn-sm" href="#/admin">admin</a>
-      </header>
+      <AdminPageHeader title={section?.label || 'admin'} subtitle={section?.summary}>
+        <a className="btn btn-ghost btn-sm" href="#/admin">overview</a>
+      </AdminPageHeader>
+      <AdminSectionTabs active={active}/>
       {children}
     </main>
+  );
+}
+
+function AdminPageHeader({ title, subtitle, children }) {
+  return (
+    <header className="admin-header">
+      <div>
+        <h2>{title}</h2>
+        {subtitle ? <p className="muted small admin-header-subtitle">{subtitle}</p> : null}
+      </div>
+      {children ? <div className="admin-header-actions">{children}</div> : null}
+    </header>
+  );
+}
+
+function AdminSectionTabs({ active }) {
+  return (
+    <nav className="admin-section-tabs" aria-label="admin sections">
+      {ADMIN_SECTIONS.map(section => (
+        <a
+          key={section.key}
+          className={section.key === active ? 'active' : ''}
+          href={section.href}
+        >
+          {section.label}
+        </a>
+      ))}
+    </nav>
+  );
+}
+
+function AdminSectionCard({ section, overview }) {
+  const metrics = overviewMetrics(section.key, overview);
+  return (
+    <a className="admin-section-link" href={section.href}>
+      <span className="admin-section-link-main">
+        <span className="admin-section-link-title">{section.label}</span>
+        <span className="admin-section-link-summary">{section.summary}</span>
+      </span>
+      <span className="admin-section-link-metrics" aria-label={`${section.label} summary`}>
+        {metrics.map(item => (
+          <span className="admin-section-link-metric" key={item.label}>
+            <strong>{item.value}</strong>
+            <span>{item.label}</span>
+          </span>
+        ))}
+      </span>
+    </a>
+  );
+}
+
+function useAdminOverview(client) {
+  const [overview, setOverview] = React.useState({ state: 'loading' });
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const [users, docker, marketplaces, catalog] = await Promise.all([
+        callOverview(() => client.adminListUsers()),
+        callOverview(() => client.adminListMcpDockerCatalog?.()),
+        callOverview(() => client.adminListSkillMarketplaces?.()),
+        callOverview(() => client.listMarketplaceSkills?.()),
+      ]);
+      if (cancelled) return;
+
+      const userRows = Array.isArray(users.value) ? users.value : [];
+      const dockerRows = Array.isArray(docker.value?.servers) ? docker.value.servers : [];
+      const marketplaceRows = Array.isArray(marketplaces.value?.sources) ? marketplaces.value.sources : [];
+      const skillSources = Array.isArray(catalog.value?.sources) ? catalog.value.sources : [];
+      const virtualCatalogs = skillSources.filter(isVirtualAgentSource);
+
+      setOverview({
+        state: 'ready',
+        users: {
+          total: userRows.length,
+          active: userRows.filter(u => u.status === 'active').length,
+          suspended: userRows.filter(u => u.status === 'suspended').length,
+        },
+        docker: {
+          total: dockerRows.length,
+          pending: dockerRows.filter(row => row.status === 'pending').length,
+          admin: dockerRows.filter(row => (row.source || 'admin') === 'admin').length,
+        },
+        marketplaces: {
+          total: marketplaceRows.length,
+          enabled: marketplaceRows.filter(row => row.enabled !== false).length,
+          virtual: virtualCatalogs.length,
+        },
+      });
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [client]);
+
+  return overview;
+}
+
+async function callOverview(fn) {
+  if (typeof fn !== 'function') return { ok: false, value: null };
+  try {
+    return { ok: true, value: await fn() };
+  } catch (error) {
+    return { ok: false, value: null, error };
+  }
+}
+
+function overviewMetrics(key, overview) {
+  if (overview.state !== 'ready') {
+    return [{ label: 'status', value: '...' }];
+  }
+  switch (key) {
+    case 'mcp-catalog':
+      return [
+        { label: 'templates', value: overview.docker.total },
+        { label: 'pending', value: overview.docker.pending },
+      ];
+    case 'skill-marketplaces':
+      return [
+        { label: 'sources', value: overview.marketplaces.total },
+        { label: 'agent catalogs', value: overview.marketplaces.virtual },
+      ];
+    case 'users':
+      return [
+        { label: 'users', value: overview.users.total },
+        { label: 'active', value: overview.users.active },
+      ];
+    case 'proxy-tokens':
+      return [{ label: 'mode', value: 'revoke' }];
+    default:
+      return [];
+  }
+}
+
+function AdminStatsRow({ items }) {
+  const visible = (items || []).filter(item => item && item.value !== undefined && item.value !== null);
+  if (visible.length === 0) return null;
+  return (
+    <div className="admin-stats-row">
+      {visible.map(item => (
+        <div className="admin-stat" key={item.label}>
+          <span className="admin-stat-value">{item.value}</span>
+          <span className="admin-stat-label">{item.label}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -209,6 +367,13 @@ function DockerCatalogPanel({ client }) {
         </div>
       </div>
       {err ? <div className="error">{err}</div> : null}
+      {rows !== null ? (
+        <AdminStatsRow items={[
+          { label: 'templates', value: rows.length },
+          { label: 'pending', value: rows.filter(row => row.status === 'pending').length },
+          { label: 'admin managed', value: rows.filter(row => (row.source || 'admin') === 'admin').length },
+        ]}/>
+      ) : null}
       {rows === null ? (
         <p className="muted small">loading...</p>
       ) : rows.length === 0 ? (
@@ -341,6 +506,13 @@ function SkillMarketplaceSourcesPanel({ client }) {
         </div>
       </div>
       {err ? <div className="error">{err}</div> : null}
+      {rows !== null || virtualRows !== null ? (
+        <AdminStatsRow items={[
+          { label: 'configured sources', value: rows ? rows.length : '...' },
+          { label: 'enabled', value: rows ? rows.filter(row => row.enabled !== false).length : '...' },
+          { label: 'agent catalogs', value: virtualRows ? virtualRows.length : '...' },
+        ]}/>
+      ) : null}
       <div className="admin-marketplace-sections">
         <section className="admin-marketplace-section">
           <div className="admin-marketplace-section-head">
@@ -554,7 +726,7 @@ function SkillMarketplaceSourceEditorPage({ client, mode, marketplaceId }) {
         location: source.location,
         enabled: source.enabled,
       });
-      window.location.hash = '#/admin';
+      window.location.hash = '#/admin/skill-marketplaces';
     } catch (e) {
       setErr(e?.detail || e?.message || 'save skill marketplace failed');
     } finally {
@@ -582,7 +754,7 @@ function SkillMarketplaceSourceEditorPage({ client, mode, marketplaceId }) {
           mode={mode}
           initial={initial}
           busy={busy}
-          onCancel={() => { window.location.hash = '#/admin'; }}
+          onCancel={() => { window.location.hash = '#/admin/skill-marketplaces'; }}
           onSave={save}
         />
       ) : null}
@@ -767,7 +939,7 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
         template: preset.template,
         placeholders: preset.placeholders,
       });
-      window.location.hash = '#/admin';
+      window.location.hash = '#/admin/mcp-catalog';
     } catch (e) {
       setErr(e?.detail || e?.message || 'save Docker MCP template failed');
     } finally {
@@ -795,7 +967,7 @@ function DockerCatalogEditorPage({ client, mode, catalogId }) {
           mode={mode}
           initial={initial}
           busy={busy}
-          onCancel={() => { window.location.hash = '#/admin'; }}
+          onCancel={() => { window.location.hash = '#/admin/mcp-catalog'; }}
           onSave={save}
         />
       ) : null}
@@ -1452,6 +1624,14 @@ function UsersPanel({ client }) {
         </div>
       </div>
       {err ? <div className="error">{err}</div> : null}
+      {rows !== null ? (
+        <AdminStatsRow items={[
+          { label: 'users', value: rows.length },
+          { label: 'active', value: rows.filter(u => u.status === 'active').length },
+          { label: 'suspended', value: rows.filter(u => u.status === 'suspended').length },
+          { label: 'OpenRouter keys', value: rows.filter(u => u.openrouter_key_present).length },
+        ]}/>
+      ) : null}
       {rows === null ? (
         <p className="muted small">loading…</p>
       ) : rows.length === 0 ? (
@@ -1582,9 +1762,9 @@ function ProxyTokensPanel({ client }) {
   };
 
   return (
-    <section className="panel">
+    <section className="panel admin-danger-panel">
       <div className="panel-header">
-        <div className="panel-title">proxy tokens</div>
+        <div className="panel-title">proxy token revocation</div>
       </div>
       <p className="muted small">
         Emergency revoke for a leaked per-instance LLM proxy token.

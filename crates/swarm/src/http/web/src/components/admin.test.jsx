@@ -12,11 +12,22 @@ afterEach(() => {
 });
 
 describe('AdminView Docker MCP catalog', () => {
-  test('admin landing links to each section page without loading the panels', async () => {
+  test('admin landing links to each section page with overview metrics', async () => {
     const client = {
-      adminListUsers: vi.fn().mockResolvedValue([]),
-      adminListMcpDockerCatalog: vi.fn(),
-      adminListSkillMarketplaces: vi.fn(),
+      adminListUsers: vi.fn().mockResolvedValue([
+        { id: 'u1', status: 'active' },
+        { id: 'u2', status: 'suspended' },
+      ]),
+      adminListMcpDockerCatalog: vi.fn().mockResolvedValue({
+        servers: [{ id: 'github', status: 'pending', source: 'user' }],
+      }),
+      adminListSkillMarketplaces: vi.fn().mockResolvedValue({
+        sources: [{ id: 'team-skills', enabled: true }],
+      }),
+      listMarketplaceSkills: vi.fn().mockResolvedValue({
+        sources: [{ id: 'agent-live', source_type: 'agent' }],
+        skills: [],
+      }),
       adminRevokeProxyToken: vi.fn(),
     };
 
@@ -27,17 +38,19 @@ describe('AdminView Docker MCP catalog', () => {
     );
 
     expect(await screen.findByRole('heading', { name: 'admin' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /mcp-catalog/ }))
+    expect(screen.getByRole('link', { name: /MCP catalog/ }))
       .toHaveAttribute('href', '#/admin/mcp-catalog');
-    expect(screen.getByRole('link', { name: /skill-marketplaces/ }))
+    expect(screen.getByRole('link', { name: /Skill marketplaces/ }))
       .toHaveAttribute('href', '#/admin/skill-marketplaces');
-    expect(screen.getByRole('link', { name: /users/ }))
+    expect(screen.getByRole('link', { name: /Users/ }))
       .toHaveAttribute('href', '#/admin/users');
-    expect(screen.getByRole('link', { name: /proxy-tokens/ }))
+    expect(screen.getByRole('link', { name: /Proxy tokens/ }))
       .toHaveAttribute('href', '#/admin/proxy-tokens');
-    expect(client.adminListMcpDockerCatalog).not.toHaveBeenCalled();
-    expect(client.adminListSkillMarketplaces).not.toHaveBeenCalled();
+    await waitFor(() => expect(client.adminListMcpDockerCatalog).toHaveBeenCalled());
+    expect(client.adminListSkillMarketplaces).toHaveBeenCalled();
+    expect(client.listMarketplaceSkills).toHaveBeenCalled();
     expect(client.adminRevokeProxyToken).not.toHaveBeenCalled();
+    expect(screen.getByText('agent catalogs')).toBeInTheDocument();
   });
 
   test('admin users and proxy token section pages render independently', async () => {
@@ -52,9 +65,10 @@ describe('AdminView Docker MCP catalog', () => {
       </ApiProvider>,
     );
 
-    expect(await screen.findByRole('heading', { name: 'users' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Users' })).toBeInTheDocument();
     expect(await screen.findByText('no users.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'admin' })).toHaveAttribute('href', '#/admin');
+    expect(screen.getByRole('link', { name: 'overview' })).toHaveAttribute('href', '#/admin');
+    expect(screen.getByRole('link', { name: 'Users' })).toHaveClass('active');
 
     rerender(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
@@ -62,7 +76,7 @@ describe('AdminView Docker MCP catalog', () => {
       </ApiProvider>,
     );
 
-    expect(await screen.findByRole('heading', { name: 'proxy-tokens' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Proxy tokens' })).toBeInTheDocument();
     expect(screen.getByLabelText('proxy token')).toBeInTheDocument();
   });
 
@@ -280,7 +294,7 @@ describe('AdminView Docker MCP catalog', () => {
       location: 'https://example.test/marketplace.json',
       enabled: true,
     }));
-    expect(window.location.hash).toBe('#/admin');
+    expect(window.location.hash).toBe('#/admin/skill-marketplaces');
 
     window.location.hash = '';
     rerender(
@@ -554,7 +568,7 @@ describe('AdminView Docker MCP catalog', () => {
         placeholder: null,
       }],
     });
-    expect(window.location.hash).toBe('#/admin');
+    expect(window.location.hash).toBe('#/admin/mcp-catalog');
   });
 
   test('does not leak placeholders from an edited template into a fresh add page', async () => {
@@ -742,7 +756,7 @@ describe('AdminView Docker MCP catalog', () => {
       </ApiProvider>,
     );
 
-    expect(await screen.findByText('pending')).toBeInTheDocument();
+    expect((await screen.findAllByText('pending')).length).toBeGreaterThan(0);
     expect(screen.getByText(/requested by/)).toBeInTheDocument();
     expect(screen.getByText('user-1')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'edit' }))
