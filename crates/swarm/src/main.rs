@@ -75,30 +75,6 @@ Every authenticated response carries X-Swarm-Insecure.
 Do not run this configuration outside a trusted network.
 =================================================================";
 
-#[cfg(test)]
-mod tests {
-    use super::startup_rotation_target;
-
-    #[test]
-    fn startup_rotation_requires_explicit_enable() {
-        assert_eq!(startup_rotation_target(false, Some("tpl-new")), None);
-    }
-
-    #[test]
-    fn startup_rotation_uses_trimmed_default_template_when_enabled() {
-        assert_eq!(
-            startup_rotation_target(true, Some(" tpl-new ")),
-            Some("tpl-new".to_string())
-        );
-    }
-
-    #[test]
-    fn startup_rotation_skips_empty_default_template() {
-        assert_eq!(startup_rotation_target(true, Some("   ")), None);
-        assert_eq!(startup_rotation_target(true, None), None);
-    }
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     // Tighten the process umask before any FS I/O.  Files we create
@@ -880,4 +856,28 @@ async fn wait_for_shutdown() -> std::io::Result<()> {
         _ = int.recv() => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_rotation_target;
+
+    #[test]
+    fn startup_rotation_requires_explicit_enable() {
+        assert_eq!(startup_rotation_target(false, Some("tpl-new")), None);
+    }
+
+    #[test]
+    fn startup_rotation_uses_trimmed_default_template_when_enabled() {
+        assert_eq!(
+            startup_rotation_target(true, Some(" tpl-new ")),
+            Some("tpl-new".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_rotation_skips_empty_default_template() {
+        assert_eq!(startup_rotation_target(true, Some("   ")), None);
+        assert_eq!(startup_rotation_target(true, None), None);
+    }
 }

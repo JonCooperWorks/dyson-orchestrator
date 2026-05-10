@@ -910,9 +910,9 @@ async fn skill_install_endpoint_validates_ownership_status_and_collisions() {
 // ---------------------------------------------------------------------
 
 async fn add_test_marketplace(stack: &Stack, id: &str, skill: &str, version: &str) {
-    let skill_md = format!(
+    let skill_md =
         "---\ndescription: Review code changes.\n---\n# Code Review\n\nUse this skill to review patches.\n"
-    );
+            .to_string();
     let sha256 = skill_body_sha256(&skill_md);
     let index = json!({
         "schema_version": 1,

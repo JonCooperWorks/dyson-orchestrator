@@ -1114,7 +1114,7 @@ mod tests {
             .json(&serde_json::json!({
                 "model": "gpt-4o",
                 "messages": [],
-                "usage": { "prompt_tokens": 999999999 }
+                "usage": { "prompt_tokens": 999_999_999 }
             }))
             .send()
             .await
