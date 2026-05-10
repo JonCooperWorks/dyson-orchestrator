@@ -106,6 +106,7 @@ pub enum InstanceStatus {
     Live,
     Paused,
     Cold,
+    Configuring,
     Destroyed,
 }
 
@@ -115,6 +116,7 @@ impl InstanceStatus {
             Self::Live => "live",
             Self::Paused => "paused",
             Self::Cold => "cold",
+            Self::Configuring => "configuring",
             Self::Destroyed => "destroyed",
         }
     }
@@ -124,6 +126,7 @@ impl InstanceStatus {
             "live" => Some(Self::Live),
             "paused" => Some(Self::Paused),
             "cold" => Some(Self::Cold),
+            "configuring" => Some(Self::Configuring),
             "destroyed" => Some(Self::Destroyed),
             _ => None,
         }

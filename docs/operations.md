@@ -10,6 +10,11 @@ instance row. The interval and timeout are configurable.
 
 That data drives both UI status and operational visibility.
 
+`/healthz` is a liveness check only. Instance readiness is the row status:
+`configuring` means Cube has returned a sandbox id but Dyson has not yet
+accepted the runtime config, while `live` means normal user traffic may be
+proxied.
+
 ## TTL Reaper
 
 Instances with expiries are reaped by a background loop. Pinned or otherwise
@@ -64,6 +69,8 @@ jq . /run/dyson-egress/policies.json
 
 After a deploy that touches proxying, sharing, restore, or clone paths:
 
+- run `bring-up.sh smoke`; it hires a fresh instance, checks `/healthz`, checks
+  `/llm`, and runs `what is secretpeek?` through a real chat turn
 - run a long model turn through a live Dyson and watch for `/llm/*` 502s or
   incomplete `llm_audit` rows
 - mint a share and open the returned `share.<hostname>/v1/<token>` URL plus its

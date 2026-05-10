@@ -192,7 +192,7 @@ function InstanceList({ selectedId, onNew, view }) {
 
 function StatusBadge({ status }) {
   const cls = status === 'live' ? 'ok'
-            : status === 'creating' ? 'warn'
+            : (status === 'creating' || status === 'configuring') ? 'warn'
             : status === 'destroyed' ? 'faint'
             : 'warn';
   return <span className={`badge badge-${cls}`}>{status}</span>;

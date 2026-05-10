@@ -849,6 +849,26 @@ impl DysonReconfigurer for FailingPushReconfigurer {
 }
 
 #[derive(Default)]
+struct BlockingPushReconfigurer {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl DysonReconfigurer for BlockingPushReconfigurer {
+    async fn push(
+        &self,
+        _instance_id: &str,
+        _sandbox_id: &str,
+        _body: &ReconfigureBody,
+    ) -> Result<(), String> {
+        self.entered.notify_waiters();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct FlakyRestoreReconfigurer {
     attempts: Mutex<usize>,
 }
@@ -942,16 +962,6 @@ async fn create_pushes_proxy_base_without_trailing_v1() {
     )
     .await
     .unwrap();
-
-    // The reconfigure push happens in a tokio::spawn — give it a
-    // moment to land.  Five 50ms probes is plenty for the in-process
-    // recorder.
-    for _ in 0..5 {
-        if !recorder.pushed.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
 
     let pushed = recorder.pushed.lock().unwrap();
     assert_eq!(pushed.len(), 1, "exactly one reconfigure push expected");
@@ -2147,6 +2157,50 @@ async fn create_configure_failure_destroys_half_configured_sandbox() {
         tokens.lookup_by_instance(&row.id).await.unwrap().is_none(),
         "failed create must revoke its proxy token"
     );
+}
+
+#[tokio::test]
+async fn create_reports_configuring_until_configure_push_finishes() {
+    let (svc, _cube, _tokens, instances) = build().await;
+    let reconfigurer = Arc::new(BlockingPushReconfigurer::default());
+    let entered = reconfigurer.entered.notified();
+    let svc = svc.with_reconfigurer(reconfigurer.clone());
+
+    let create_task = tokio::spawn(async move {
+        svc.create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("smoke".into()),
+                task: Some("say hello".into()),
+                env: env_with_model(),
+                ttl_seconds: Some(3600),
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+    });
+
+    entered.await;
+    let rows = instances
+        .list(
+            "legacy",
+            ListFilter {
+                include_destroyed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, InstanceStatus::Configuring);
+    assert_eq!(rows[0].cube_sandbox_id.as_deref(), Some("sb-1"));
+
+    reconfigurer.release.notify_waiters();
+    let created = create_task.await.unwrap().unwrap();
+    let row = instances.get(&created.id).await.unwrap().unwrap();
+    assert_eq!(row.status, InstanceStatus::Live);
 }
 
 #[test]

@@ -2418,7 +2418,14 @@ impl InstanceService {
             .set_cube_sandbox_id(&id, &info.sandbox_id)
             .await?;
         self.instances
-            .update_status(&id, InstanceStatus::Live)
+            .update_status(
+                &id,
+                if self.reconfigurer.is_some() {
+                    InstanceStatus::Configuring
+                } else {
+                    InstanceStatus::Live
+                },
+            )
             .await?;
 
         // Caddy's on_demand TLS for `<id>.<hostname>` is warmed by the
@@ -2431,7 +2438,7 @@ impl InstanceService {
         // restore freezes the warmup-mode dyson process's env; without
         // this push, every instance shows "warmup-placeholder" forever
         // and IDENTITY.md is empty.  Best-effort with retries — the
-        // sandbox is Live by here but the dyson HTTP server inside
+        // sandbox is Configuring by here but the dyson HTTP server inside
         // can take a beat to settle, especially on cold cubeproxy.
         if let Some(reconfigurer) = self.reconfigurer.as_ref() {
             let image_gen_defaults = self.image_gen_defaults.as_ref().map(|defaults| {
@@ -2578,6 +2585,9 @@ impl InstanceService {
                     "configure-push failed: {err}"
                 )));
             }
+            self.instances
+                .update_status(&id, InstanceStatus::Live)
+                .await?;
         }
 
         Ok(CreatedInstance {
@@ -3705,7 +3715,14 @@ impl InstanceService {
             .set_cube_sandbox_id(&id, &info.sandbox_id)
             .await?;
         self.instances
-            .update_status(&id, InstanceStatus::Live)
+            .update_status(
+                &id,
+                if self.reconfigurer.is_some() {
+                    InstanceStatus::Configuring
+                } else {
+                    InstanceStatus::Live
+                },
+            )
             .await?;
 
         // A restored sandbox may inherit dyson.json from the snapshot
@@ -3739,6 +3756,9 @@ impl InstanceService {
                     );
                     SwarmError::Internal(format!("restore configure-push failed: {err}"))
                 })?;
+            self.instances
+                .update_status(&id, InstanceStatus::Live)
+                .await?;
         }
 
         Ok(CreatedInstance {

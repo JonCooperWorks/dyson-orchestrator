@@ -47,8 +47,13 @@ this order:
 
 - `InstanceService` inserts or updates the instance row
 - swarm mints per-instance proxy tokens (`pt_...`, `it_...`, `st_...`)
-- swarm pushes the generated config into the Dyson sandbox
+- the row is `configuring` while swarm pushes generated config into Dyson
+- the row becomes `live` only after the configure push succeeds
 - the sandbox talks back to swarm for LLM, artefact ingest, and state sync
+
+The host proxy forwards normal user traffic only for `live` rows. `/healthz`
+remains available during startup as a liveness check, but it is not a readiness
+signal for chat turns.
 
 ### LLM requests
 

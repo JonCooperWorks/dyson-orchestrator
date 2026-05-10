@@ -53,7 +53,7 @@ use futures::TryStreamExt;
 
 use crate::auth::{Authenticator, user::resolve_active_user};
 use crate::http::AppState;
-use crate::traits::InstanceRow;
+use crate::traits::{InstanceRow, InstanceStatus};
 
 /// Bundle of state the host dispatcher needs in addition to AppState.
 /// `hostname` is the suffix we strip to read the leading subdomain;
@@ -249,6 +249,9 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
         Some(s) if !s.is_empty() => s,
         _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "sandbox not yet ready"),
     };
+    if !may_forward_user_traffic(row.status, anonymous_probe) {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "instance not ready");
+    }
 
     // 2.5. Same-origin escape routes for swarm-side actions a sandbox
     //      SPA legitimately needs but can't trigger via cross-origin
@@ -377,6 +380,10 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
             .body(Body::from("response build failed"))
             .unwrap()
     })
+}
+
+fn may_forward_user_traffic(status: InstanceStatus, anonymous_probe: bool) -> bool {
+    anonymous_probe || matches!(status, InstanceStatus::Live)
 }
 
 fn dyson_model_selection_from_request(method: &Method, path: &str, body: &[u8]) -> Option<String> {
@@ -916,6 +923,19 @@ fn encode_query_value(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_live_statuses_do_not_receive_user_traffic() {
+        assert!(may_forward_user_traffic(InstanceStatus::Live, false));
+        assert!(!may_forward_user_traffic(InstanceStatus::Cold, false));
+        assert!(!may_forward_user_traffic(
+            InstanceStatus::Configuring,
+            false
+        ));
+        assert!(!may_forward_user_traffic(InstanceStatus::Paused, false));
+        assert!(!may_forward_user_traffic(InstanceStatus::Destroyed, false));
+        assert!(may_forward_user_traffic(InstanceStatus::Configuring, true));
+    }
 
     #[test]
     fn extract_subdomain_happy_path() {
