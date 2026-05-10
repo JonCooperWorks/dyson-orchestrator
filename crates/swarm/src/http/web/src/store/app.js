@@ -244,7 +244,11 @@ export function setMarketplaceCatalog(catalog) {
 //   #/new                       → dedicated hire page (replaces the old CreateModal)
 //   #/skills                    → marketplace catalog + fleet skill inventory
 //   #/skills/<market>/<skill>   → marketplace skill detail
-//   #/admin                     → admin (users, proxy tokens)
+//   #/admin                     → admin landing page
+//   #/admin/mcp-catalog         → Docker MCP catalog list
+//   #/admin/skill-marketplaces  → skill marketplace source list
+//   #/admin/users               → user management
+//   #/admin/proxy-tokens        → proxy-token revocation
 //
 // Anything else falls back to the list.  Order matters: every
 // subroute is a strict prefix of the detail pattern, so all of them
@@ -304,7 +308,7 @@ export function parseHashView() {
   const m = h.match(/^#\/i\/([^/?#]+)/);
   if (m) return { name: 'instance', id: decodeURIComponent(m[1]) };
   if (h.startsWith('#/new')) return { name: 'instance-new', id: null };
-  if (h.startsWith('#/admin/mcp-catalog/new')) {
+  if (h.match(/^#\/admin\/mcp-catalog\/new(?:[?#]|$)/)) {
     return { name: 'admin-mcp-catalog-new', id: null };
   }
   const adminCatalogEdit = h.match(/^#\/admin\/mcp-catalog\/([^/?#]+)/);
@@ -315,7 +319,10 @@ export function parseHashView() {
       catalogId: decodeURIComponent(adminCatalogEdit[1]),
     };
   }
-  if (h.startsWith('#/admin/skill-marketplaces/new')) {
+  if (h.match(/^#\/admin\/mcp-catalog(?:[?#]|$)/)) {
+    return { name: 'admin-mcp-catalog', id: null };
+  }
+  if (h.match(/^#\/admin\/skill-marketplaces\/new(?:[?#]|$)/)) {
     return { name: 'admin-skill-marketplace-new', id: null };
   }
   const adminSkillMarketplaceEdit = h.match(/^#\/admin\/skill-marketplaces\/([^/?#]+)/);
@@ -326,7 +333,16 @@ export function parseHashView() {
       marketplaceId: decodeURIComponent(adminSkillMarketplaceEdit[1]),
     };
   }
-  if (h.startsWith('#/admin')) return { name: 'admin', id: null };
+  if (h.match(/^#\/admin\/skill-marketplaces(?:[?#]|$)/)) {
+    return { name: 'admin-skill-marketplaces', id: null };
+  }
+  if (h.match(/^#\/admin\/users(?:[?#]|$)/)) {
+    return { name: 'admin-users', id: null };
+  }
+  if (h.match(/^#\/admin\/proxy-tokens(?:[?#]|$)/)) {
+    return { name: 'admin-proxy-tokens', id: null };
+  }
+  if (h.match(/^#\/admin(?:[/?#]|$)/)) return { name: 'admin', id: null };
   if (h.startsWith('#/keys')) return { name: 'byok', id: null };
   const marketplaceSkill = h.match(/^#\/skills\/([^/?#]+)\/([^/?#]+)/);
   if (marketplaceSkill) return {

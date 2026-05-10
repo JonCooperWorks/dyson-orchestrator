@@ -71,6 +71,10 @@ function renderView(view) {
     case 'marketplace-skill-detail':
       return <MarketplaceSkillDetailPage view={view}/>;
     case 'admin':
+    case 'admin-mcp-catalog':
+    case 'admin-skill-marketplaces':
+    case 'admin-users':
+    case 'admin-proxy-tokens':
     case 'admin-mcp-catalog-new':
     case 'admin-mcp-catalog-edit':
     case 'admin-skill-marketplace-new':

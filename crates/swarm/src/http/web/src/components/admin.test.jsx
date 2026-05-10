@@ -12,6 +12,60 @@ afterEach(() => {
 });
 
 describe('AdminView Docker MCP catalog', () => {
+  test('admin landing links to each section page without loading the panels', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListMcpDockerCatalog: vi.fn(),
+      adminListSkillMarketplaces: vi.fn(),
+      adminRevokeProxyToken: vi.fn(),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'admin' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /mcp-catalog/ }))
+      .toHaveAttribute('href', '#/admin/mcp-catalog');
+    expect(screen.getByRole('link', { name: /skill-marketplaces/ }))
+      .toHaveAttribute('href', '#/admin/skill-marketplaces');
+    expect(screen.getByRole('link', { name: /users/ }))
+      .toHaveAttribute('href', '#/admin/users');
+    expect(screen.getByRole('link', { name: /proxy-tokens/ }))
+      .toHaveAttribute('href', '#/admin/proxy-tokens');
+    expect(client.adminListMcpDockerCatalog).not.toHaveBeenCalled();
+    expect(client.adminListSkillMarketplaces).not.toHaveBeenCalled();
+    expect(client.adminRevokeProxyToken).not.toHaveBeenCalled();
+  });
+
+  test('admin users and proxy token section pages render independently', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminRevokeProxyToken: vi.fn(),
+    };
+
+    const { rerender } = render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-users' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'users' })).toBeInTheDocument();
+    expect(await screen.findByText('no users.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'admin' })).toHaveAttribute('href', '#/admin');
+
+    rerender(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-proxy-tokens' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'proxy-tokens' })).toBeInTheDocument();
+    expect(screen.getByLabelText('proxy token')).toBeInTheDocument();
+  });
+
   test('configured DB-backed skill marketplace sources still render and link to edit pages', async () => {
     const sources = [{
       id: 'team-skills',
@@ -35,7 +89,7 @@ describe('AdminView Docker MCP catalog', () => {
 
     render(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
-        <AdminView/>
+        <AdminView view={{ name: 'admin-skill-marketplaces' }}/>
       </ApiProvider>,
     );
 
@@ -83,7 +137,7 @@ describe('AdminView Docker MCP catalog', () => {
 
     render(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
-        <AdminView/>
+        <AdminView view={{ name: 'admin-skill-marketplaces' }}/>
       </ApiProvider>,
     );
 
@@ -144,7 +198,7 @@ describe('AdminView Docker MCP catalog', () => {
 
     render(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
-        <AdminView/>
+        <AdminView view={{ name: 'admin-skill-marketplaces' }}/>
       </ApiProvider>,
     );
 
@@ -175,7 +229,7 @@ describe('AdminView Docker MCP catalog', () => {
 
     render(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
-        <AdminView/>
+        <AdminView view={{ name: 'admin-skill-marketplaces' }}/>
       </ApiProvider>,
     );
 
@@ -390,7 +444,7 @@ describe('AdminView Docker MCP catalog', () => {
 
     render(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
-        <AdminView/>
+        <AdminView view={{ name: 'admin-mcp-catalog' }}/>
       </ApiProvider>,
     );
 
@@ -684,7 +738,7 @@ describe('AdminView Docker MCP catalog', () => {
 
     render(
       <ApiProvider client={client} auth={{ mode: 'none' }}>
-        <AdminView/>
+        <AdminView view={{ name: 'admin-mcp-catalog' }}/>
       </ApiProvider>,
     );
 

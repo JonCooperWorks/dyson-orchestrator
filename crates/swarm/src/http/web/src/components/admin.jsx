@@ -73,16 +73,79 @@ export function AdminView({ view = { name: 'admin' } }) {
   if (view.name === 'admin-skill-marketplace-edit') {
     return <SkillMarketplaceSourceEditorPage client={client} mode="edit" marketplaceId={view.marketplaceId}/>;
   }
+  if (view.name === 'admin-mcp-catalog') {
+    return (
+      <AdminSectionPage title="mcp-catalog">
+        <DockerCatalogPanel client={client}/>
+      </AdminSectionPage>
+    );
+  }
+  if (view.name === 'admin-skill-marketplaces') {
+    return (
+      <AdminSectionPage title="skill-marketplaces">
+        <SkillMarketplaceSourcesPanel client={client}/>
+      </AdminSectionPage>
+    );
+  }
+  if (view.name === 'admin-users') {
+    return (
+      <AdminSectionPage title="users">
+        <UsersPanel client={client}/>
+      </AdminSectionPage>
+    );
+  }
+  if (view.name === 'admin-proxy-tokens') {
+    return (
+      <AdminSectionPage title="proxy-tokens">
+        <ProxyTokensPanel client={client}/>
+      </AdminSectionPage>
+    );
+  }
 
+  return <AdminLandingPage/>;
+}
+
+function AdminLandingPage() {
   return (
     <main className="admin-pane">
       <header className="admin-header">
         <h2>admin</h2>
       </header>
-      <DockerCatalogPanel client={client}/>
-      <SkillMarketplaceSourcesPanel client={client}/>
-      <UsersPanel client={client}/>
-      <ProxyTokensPanel client={client}/>
+      <section className="panel">
+        <div className="panel-header">
+          <div className="panel-title">sections</div>
+        </div>
+        <nav className="admin-section-links" aria-label="admin sections">
+          <a className="admin-section-link" href="#/admin/mcp-catalog">
+            <span>mcp-catalog</span>
+            <code className="mono-sm">#/admin/mcp-catalog</code>
+          </a>
+          <a className="admin-section-link" href="#/admin/skill-marketplaces">
+            <span>skill-marketplaces</span>
+            <code className="mono-sm">#/admin/skill-marketplaces</code>
+          </a>
+          <a className="admin-section-link" href="#/admin/users">
+            <span>users</span>
+            <code className="mono-sm">#/admin/users</code>
+          </a>
+          <a className="admin-section-link" href="#/admin/proxy-tokens">
+            <span>proxy-tokens</span>
+            <code className="mono-sm">#/admin/proxy-tokens</code>
+          </a>
+        </nav>
+      </section>
+    </main>
+  );
+}
+
+function AdminSectionPage({ title, children }) {
+  return (
+    <main className="admin-pane">
+      <header className="admin-header">
+        <h2>{title}</h2>
+        <a className="btn btn-ghost btn-sm" href="#/admin">admin</a>
+      </header>
+      {children}
     </main>
   );
 }

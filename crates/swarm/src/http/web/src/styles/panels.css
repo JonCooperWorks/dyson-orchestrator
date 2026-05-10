@@ -96,6 +96,34 @@
   font-size: 18px;
 }
 
+.admin-section-links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.admin-section-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.admin-section-link:hover {
+  background: var(--bg-2);
+}
+
+.admin-section-link code {
+  color: var(--fg-muted);
+}
+
 .admin-catalog-page {
   padding-inline: clamp(16px, 4vw, 48px);
 }

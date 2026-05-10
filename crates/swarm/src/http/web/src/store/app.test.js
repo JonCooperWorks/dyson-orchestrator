@@ -53,6 +53,9 @@ describe('parseHashView', () => {
     window.history.pushState(null, '', '/i/abc/tools');
     expect(parseHashView()).toEqual({ name: 'instance-tools', id: 'abc' });
 
+    window.history.pushState(null, '', '/admin/mcp-catalog');
+    expect(parseHashView()).toEqual({ name: 'admin-mcp-catalog', id: null });
+
     window.history.pushState(null, '', '/admin/mcp-catalog/github');
     expect(parseHashView()).toEqual({
       name: 'admin-mcp-catalog-edit',
@@ -99,7 +102,38 @@ describe('parseHashView', () => {
     expect(parseHashView()).toEqual({ name: 'admin', id: null });
   });
 
+  test('admin section routes get their own view names', () => {
+    const cases = {
+      'mcp-catalog': 'admin-mcp-catalog',
+      'skill-marketplaces': 'admin-skill-marketplaces',
+      users: 'admin-users',
+      'proxy-tokens': 'admin-proxy-tokens',
+    };
+    for (const [slug, name] of Object.entries(cases)) {
+      window.location.hash = `#/admin/${slug}`;
+      expect(parseHashView()).toEqual({ name, id: null });
+    }
+  });
+
+  test('"#/admin/mcp-catalog/*" routes to catalog section and editor pages', () => {
+    window.location.hash = '#/admin/mcp-catalog';
+    expect(parseHashView()).toEqual({ name: 'admin-mcp-catalog', id: null });
+
+    window.location.hash = '#/admin/mcp-catalog/new';
+    expect(parseHashView()).toEqual({ name: 'admin-mcp-catalog-new', id: null });
+
+    window.location.hash = '#/admin/mcp-catalog/github%2Dtools';
+    expect(parseHashView()).toEqual({
+      name: 'admin-mcp-catalog-edit',
+      id: null,
+      catalogId: 'github-tools',
+    });
+  });
+
   test('"#/admin/skill-marketplaces/*" routes to marketplace editor pages', () => {
+    window.location.hash = '#/admin/skill-marketplaces';
+    expect(parseHashView()).toEqual({ name: 'admin-skill-marketplaces', id: null });
+
     window.location.hash = '#/admin/skill-marketplaces/new';
     expect(parseHashView()).toEqual({ name: 'admin-skill-marketplace-new', id: null });
 

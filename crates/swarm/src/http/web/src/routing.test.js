@@ -24,6 +24,19 @@ describe('routeHashFromLocation', () => {
     expect(routeHashFromLocation()).toBe('#/artifacts');
   });
 
+  test('maps every admin section path to a hash route', () => {
+    for (const path of [
+      '/admin',
+      '/admin/mcp-catalog',
+      '/admin/skill-marketplaces',
+      '/admin/users',
+      '/admin/proxy-tokens',
+    ]) {
+      window.history.pushState(null, '', path);
+      expect(routeHashFromLocation()).toBe(`#${path}`);
+    }
+  });
+
   test('does not treat arbitrary server paths as app routes', () => {
     window.history.pushState(null, '', '/auth/config');
     expect(routeHashFromLocation()).toBe('#/');
@@ -39,6 +52,21 @@ describe('canonicalizePathRoute', () => {
     expect(window.location.pathname).toBe('/');
     expect(window.location.search).toBe('');
     expect(window.location.hash).toBe('#/i/abc/mcp?pane=docker');
+  });
+
+  test('rewrites clean admin section paths into hash URLs', () => {
+    for (const path of [
+      '/admin',
+      '/admin/mcp-catalog',
+      '/admin/skill-marketplaces',
+      '/admin/users',
+      '/admin/proxy-tokens',
+    ]) {
+      window.history.pushState(null, '', path);
+      expect(canonicalizePathRoute()).toBe(true);
+      expect(window.location.pathname).toBe('/');
+      expect(window.location.hash).toBe(`#${path}`);
+    }
   });
 
   test('leaves existing hash URLs alone', () => {
