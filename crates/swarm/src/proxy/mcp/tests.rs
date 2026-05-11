@@ -1,7 +1,14 @@
 use super::*;
 use crate::db::open_in_memory;
+use crate::db::instances::SqlxInstanceStore;
 use crate::db::secrets::SqlxUserSecretStore;
+use crate::db::tokens::SqlxTokenStore;
 use crate::envelope::AgeCipherDirectory;
+use crate::envelope::{EnvelopeCipher, EnvelopeError};
+use crate::traits::{InstanceRow, InstanceStatus, InstanceStore, TokenStore};
+use axum::body::Bytes;
+use sqlx::SqlitePool;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[test]
 fn strip_url_query_drops_query_and_fragment() {
@@ -297,4 +304,257 @@ fn hop_by_hop_filters_known_set() {
     assert!(is_hop_by_hop("Connection"));
     assert!(is_hop_by_hop("transfer-encoding"));
     assert!(!is_hop_by_hop("content-type"));
+}
+
+#[derive(Debug)]
+struct TestCipher;
+
+impl EnvelopeCipher for TestCipher {
+    fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+        let mut out = b"sealed:".to_vec();
+        out.extend_from_slice(plaintext);
+        Ok(out)
+    }
+
+    fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+        ciphertext
+            .strip_prefix(b"sealed:")
+            .map(|s| s.to_vec())
+            .ok_or(EnvelopeError::Corrupt)
+    }
+}
+
+fn system_cipher() -> Arc<dyn EnvelopeCipher> {
+    Arc::new(TestCipher)
+}
+
+const MCP_TEST_OWNER: &str = "00000000000000000000000000000002";
+const MCP_TEST_INSTANCE: &str = "i-mcp-audit";
+const MCP_TEST_SERVER: &str = "linear";
+
+async fn create_test_mcp_audit_table(pool: &SqlitePool) {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS mcp_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            server_name TEXT NOT NULL,
+            tool TEXT,
+            status INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            ts INTEGER NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn spawn_mcp_upstream() -> (String, Arc<AtomicU32>) {
+    async fn handler(
+        axum::extract::State(calls): axum::extract::State<Arc<AtomicU32>>,
+        _body: Bytes,
+    ) -> Response<Body> {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}"#,
+            ))
+            .unwrap()
+    }
+
+    let calls = Arc::new(AtomicU32::new(0));
+    let app = axum::Router::new()
+        .route("/", axum::routing::post(handler))
+        .with_state(calls.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/"), calls)
+}
+
+async fn build_mcp_proxy_fixture(
+    pool: SqlitePool,
+    upstream_url: String,
+) -> (Arc<McpService>, String, tempfile::TempDir) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO users (id, subject, status, created_at) \
+         VALUES (?, ?, 'active', 0)",
+    )
+    .bind(MCP_TEST_OWNER)
+    .bind("subject-mcp-audit")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instances = Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher()));
+    instances
+        .create(InstanceRow {
+            id: MCP_TEST_INSTANCE.into(),
+            owner_id: MCP_TEST_OWNER.into(),
+            name: String::new(),
+            task: String::new(),
+            cube_sandbox_id: Some("sb-mcp".into()),
+            state_generation: String::new(),
+            template_id: "template".into(),
+            status: InstanceStatus::Live,
+            bearer_token: "instance-bearer".into(),
+            pinned: false,
+            expires_at: None,
+            last_active_at: 0,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: 0,
+            destroyed_at: None,
+            rotated_to: None,
+            network_policy: crate::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let tokens = Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher()));
+    let token = tokens.mint(MCP_TEST_INSTANCE, "*").await.unwrap();
+
+    let keys_tmp = tempfile::tempdir().unwrap();
+    let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
+        Arc::new(AgeCipherDirectory::new(keys_tmp.path()).unwrap());
+    let user_secret_store: Arc<dyn crate::traits::UserSecretStore> =
+        Arc::new(SqlxUserSecretStore::new(pool));
+    let user_secrets = Arc::new(UserSecretsService::new(user_secret_store, cipher_dir));
+    let entry = McpServerEntry {
+        url: upstream_url,
+        auth: McpAuthSpec::None,
+        headers: std::collections::HashMap::new(),
+        runtime: None,
+        docker_catalog: None,
+        raw_vscode_config: None,
+        oauth_tokens: None,
+        tools_catalog: None,
+        last_check_error: None,
+        enabled_tools: None,
+    };
+    mcp_servers::put(
+        &user_secrets,
+        MCP_TEST_OWNER,
+        MCP_TEST_INSTANCE,
+        MCP_TEST_SERVER,
+        &entry,
+    )
+    .await
+    .unwrap();
+
+    let svc = McpService::new(tokens, instances, user_secrets, None)
+        .unwrap()
+        .with_mcp_upstream_policy(crate::upstream_policy::OutboundUrlPolicy {
+            enabled: true,
+            allow_localhost: true,
+            allow_internal: true,
+        });
+    (Arc::new(svc), token, keys_tmp)
+}
+
+async fn spawn_mcp_proxy(svc: Arc<McpService>) -> String {
+    let app = router(svc);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn tools_call_forward_writes_mcp_audit_row() {
+    let pool = open_in_memory().await.unwrap();
+    create_test_mcp_audit_table(&pool).await;
+    let (upstream_url, _calls) = spawn_mcp_upstream().await;
+    let (svc, token, _keys) = build_mcp_proxy_fixture(pool.clone(), upstream_url).await;
+    let base = spawn_mcp_proxy(svc).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/mcp/{MCP_TEST_INSTANCE}/{MCP_TEST_SERVER}"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "search", "arguments": {}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let row = sqlx::query(
+        "SELECT owner_id, server_name, tool, status, ts \
+         FROM mcp_audit ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap()
+    .expect("MCP tools/call forward must write an mcp_audit row");
+    let owner_id: String = sqlx::Row::try_get(&row, "owner_id").unwrap();
+    let server_name: String = sqlx::Row::try_get(&row, "server_name").unwrap();
+    let tool: String = sqlx::Row::try_get(&row, "tool").unwrap();
+    let status: i64 = sqlx::Row::try_get(&row, "status").unwrap();
+    let ts: i64 = sqlx::Row::try_get(&row, "ts").unwrap();
+    assert_eq!(owner_id, MCP_TEST_OWNER, "mcp_audit owner_id mismatch");
+    assert_eq!(
+        server_name, MCP_TEST_SERVER,
+        "mcp_audit server_name mismatch"
+    );
+    assert_eq!(tool, "search", "mcp_audit tool name mismatch");
+    assert_eq!(status, 200, "mcp_audit status mismatch");
+    assert!(ts > 0, "mcp_audit timestamp must be populated");
+}
+
+#[tokio::test]
+async fn tools_call_forward_is_rate_limited_per_owner_and_server() {
+    let pool = open_in_memory().await.unwrap();
+    create_test_mcp_audit_table(&pool).await;
+    let (upstream_url, calls) = spawn_mcp_upstream().await;
+    let (svc, token, _keys) = build_mcp_proxy_fixture(pool, upstream_url).await;
+    let base = spawn_mcp_proxy(svc).await;
+    let client = reqwest::Client::new();
+
+    let mut saw_429 = false;
+    for _ in 0..64 {
+        let resp = client
+            .post(format!("{base}/mcp/{MCP_TEST_INSTANCE}/{MCP_TEST_SERVER}"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {}}
+            }))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_429,
+        "MCP tools/call forward must rate-limit per owner/server before line-speed upstream drain"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) < 64,
+        "MCP rate limit must refuse excess calls before forwarding upstream"
+    );
 }
