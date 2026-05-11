@@ -1,6 +1,6 @@
 use super::*;
-use crate::db::open_in_memory;
 use crate::db::instances::SqlxInstanceStore;
+use crate::db::open_in_memory;
 use crate::db::secrets::SqlxUserSecretStore;
 use crate::db::tokens::SqlxTokenStore;
 use crate::envelope::AgeCipherDirectory;
@@ -370,9 +370,7 @@ async fn spawn_mcp_upstream() -> (String, Arc<AtomicU32>) {
     let app = axum::Router::new()
         .route("/", axum::routing::post(handler))
         .with_state(calls.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -429,7 +427,7 @@ async fn build_mcp_proxy_fixture(
     let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
         Arc::new(AgeCipherDirectory::new(keys_tmp.path()).unwrap());
     let user_secret_store: Arc<dyn crate::traits::UserSecretStore> =
-        Arc::new(SqlxUserSecretStore::new(pool));
+        Arc::new(SqlxUserSecretStore::new(pool.clone()));
     let user_secrets = Arc::new(UserSecretsService::new(user_secret_store, cipher_dir));
     let entry = McpServerEntry {
         url: upstream_url,
@@ -455,6 +453,9 @@ async fn build_mcp_proxy_fixture(
 
     let svc = McpService::new(tokens, instances, user_secrets, None)
         .unwrap()
+        .with_mcp_audit(Arc::new(crate::db::audit::SqliteMcpAuditStore::new(
+            pool.clone(),
+        )))
         .with_mcp_upstream_policy(crate::upstream_policy::OutboundUrlPolicy {
             enabled: true,
             allow_localhost: true,
@@ -465,9 +466,7 @@ async fn build_mcp_proxy_fixture(
 
 async fn spawn_mcp_proxy(svc: Arc<McpService>) -> String {
     let app = router(svc);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();

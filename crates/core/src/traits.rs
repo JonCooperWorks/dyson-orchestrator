@@ -300,6 +300,18 @@ pub struct TokenRecord {
     pub revoked_at: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct McpAuditEntry {
+    pub owner_id: String,
+    pub instance_id: String,
+    pub server_name: String,
+    pub tool: Option<String>,
+    pub status: i64,
+    pub duration_ms: i64,
+    pub ts: i64,
+    pub completed: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
     pub status: Option<InstanceStatus>,
@@ -711,6 +723,17 @@ pub trait AuditStore: Send + Sync {
         &self,
         audit_id: i64,
         output_tokens: Option<i64>,
+    ) -> Result<(), StoreError>;
+}
+
+#[async_trait]
+pub trait McpAuditStore: Send + Sync {
+    async fn insert(&self, entry: &McpAuditEntry) -> Result<i64, StoreError>;
+    async fn update_status(
+        &self,
+        audit_id: i64,
+        status: i64,
+        duration_ms: i64,
     ) -> Result<(), StoreError>;
 }
 

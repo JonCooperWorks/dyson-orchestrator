@@ -21,7 +21,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
-use crate::traits::{AuditEntry, AuditStore};
+use crate::traits::{AuditEntry, AuditStore, McpAuditEntry, McpAuditStore};
 
 #[derive(Debug, Clone)]
 pub struct SqliteAuditStore {
@@ -41,6 +41,20 @@ impl SqliteAuditStore {
         Ok(0.0)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct SqliteMcpAuditStore {
+    pool: SqlitePool,
+}
+
+impl SqliteMcpAuditStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopMcpAuditStore;
 
 #[async_trait]
 impl AuditStore for SqliteAuditStore {
@@ -107,6 +121,63 @@ impl AuditStore for SqliteAuditStore {
             .execute(&self.pool)
             .await
             .map_err(map_sqlx)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl McpAuditStore for SqliteMcpAuditStore {
+    async fn insert(&self, entry: &McpAuditEntry) -> Result<i64, StoreError> {
+        let row = sqlx::query(
+            "INSERT INTO mcp_audit \
+             (owner_id, instance_id, server_name, tool, status, duration_ms, ts, completed) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+        )
+        .bind(&entry.owner_id)
+        .bind(&entry.instance_id)
+        .bind(&entry.server_name)
+        .bind(&entry.tool)
+        .bind(entry.status)
+        .bind(entry.duration_ms)
+        .bind(entry.ts)
+        .bind(i64::from(entry.completed))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        let id: i64 = row.try_get("id").map_err(map_sqlx)?;
+        Ok(id)
+    }
+
+    async fn update_status(
+        &self,
+        audit_id: i64,
+        status: i64,
+        duration_ms: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE mcp_audit SET status = ?, duration_ms = ?, completed = 1 WHERE id = ?")
+            .bind(status)
+            .bind(duration_ms)
+            .bind(audit_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl McpAuditStore for NoopMcpAuditStore {
+    async fn insert(&self, _entry: &McpAuditEntry) -> Result<i64, StoreError> {
+        Ok(0)
+    }
+
+    async fn update_status(
+        &self,
+        _audit_id: i64,
+        _status: i64,
+        _duration_ms: i64,
+    ) -> Result<(), StoreError> {
         Ok(())
     }
 }

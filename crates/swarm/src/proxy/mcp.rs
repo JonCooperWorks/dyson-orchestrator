@@ -12,9 +12,10 @@
 //! Real upstream URL + tokens stay encrypted in the user secret store
 //! and are decrypted in-process per request.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -33,7 +34,7 @@ use crate::mcp_servers::{
     McpServerSpec, McpToolSummary, McpToolsCatalog, OAuthFlowCache, PendingFlow,
 };
 use crate::secrets::UserSecretsService;
-use crate::traits::{InstanceStore, TokenStore};
+use crate::traits::{InstanceStore, McpAuditEntry, McpAuditStore, TokenStore};
 use crate::upstream_policy::OutboundUrlPolicy;
 use dyson_swarm_core::http::ExternalHttpClient;
 
@@ -98,6 +99,8 @@ pub struct McpService {
     /// Shared SSRF policy for remote HTTP/SSE MCP upstreams.  Docker
     /// runtime entries are local runtime requests and do not use this.
     pub mcp_upstream_policy: OutboundUrlPolicy,
+    pub mcp_audit: Arc<dyn McpAuditStore>,
+    rate: Arc<McpRateWindow>,
 }
 
 impl McpService {
@@ -122,6 +125,8 @@ impl McpService {
             allow_user_docker_json: false,
             docker_catalog_store: None,
             mcp_upstream_policy: OutboundUrlPolicy::default(),
+            mcp_audit: Arc::new(crate::db::audit::NoopMcpAuditStore),
+            rate: Arc::new(McpRateWindow::default()),
         })
     }
 
@@ -156,6 +161,11 @@ impl McpService {
     pub fn with_mcp_upstream_policy(mut self, policy: OutboundUrlPolicy) -> Self {
         self.external_http = Arc::new(ExternalHttpClient::new(Arc::new(policy)));
         self.mcp_upstream_policy = policy;
+        self
+    }
+
+    pub fn with_mcp_audit(mut self, audit: Arc<dyn McpAuditStore>) -> Self {
+        self.mcp_audit = audit;
         self
     }
 
@@ -220,6 +230,87 @@ impl McpService {
             .iter()
             .find(|server| server.id == id)
             .cloned())
+    }
+}
+
+const MCP_RPS_LIMIT: u32 = 20;
+
+#[derive(Default)]
+struct McpRateWindow {
+    buckets: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+impl McpRateWindow {
+    fn observe(&self, owner_id: &str, server_name: &str) -> u32 {
+        let mut buckets = self.buckets.lock().expect("mcp rate window poisoned");
+        let key = format!("{owner_id}:{server_name}");
+        let q = buckets.entry(key).or_default();
+        let now = Instant::now();
+        q.push_back(now);
+        prune_mcp_rate(q, now);
+        u32::try_from(q.len()).unwrap_or(u32::MAX)
+    }
+}
+
+fn prune_mcp_rate(q: &mut VecDeque<Instant>, now: Instant) {
+    let cutoff = now.checked_sub(Duration::from_secs(1)).unwrap_or(now);
+    while let Some(front) = q.front() {
+        if *front < cutoff {
+            q.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+fn duration_ms(started: Instant) -> i64 {
+    i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+fn tools_call_name(
+    peek: Option<&(String, serde_json::Value, serde_json::Value)>,
+) -> Option<String> {
+    match peek {
+        Some((method, _, params)) if method == "tools/call" => params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
+async fn begin_mcp_audit(
+    svc: &McpService,
+    owner_id: &str,
+    instance_id: &str,
+    server_name: &str,
+    tool: Option<String>,
+) -> Result<i64, Response<Body>> {
+    svc.mcp_audit
+        .insert(&McpAuditEntry {
+            owner_id: owner_id.to_owned(),
+            instance_id: instance_id.to_owned(),
+            server_name: server_name.to_owned(),
+            tool,
+            status: 0,
+            duration_ms: 0,
+            ts: crate::now_secs(),
+            completed: false,
+        })
+        .await
+        .map_err(|err| {
+            tracing::warn!(error = %err, "mcp_audit insert failed");
+            error_resp(StatusCode::INTERNAL_SERVER_ERROR, "audit store error")
+        })
+}
+
+async fn finish_mcp_audit(svc: &McpService, audit_id: i64, started: Instant, status: StatusCode) {
+    if let Err(err) = svc
+        .mcp_audit
+        .update_status(audit_id, i64::from(status.as_u16()), duration_ms(started))
+        .await
+    {
+        tracing::warn!(error = %err, audit_id, "mcp_audit completion update failed");
     }
 }
 
@@ -398,6 +489,25 @@ async fn forward(
     // forwarded upstream is unchanged.  Batched JSON-RPC arrays and
     // unparseable bodies skip filtering entirely (passes through).
     let peek = peek_jsonrpc(&body_bytes);
+    let audit_started = Instant::now();
+    let audit_id = match begin_mcp_audit(
+        &svc,
+        &owner_id,
+        &instance_id,
+        &server_name,
+        tools_call_name(peek.as_ref()),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    if svc.rate.observe(&owner_id, &server_name) > MCP_RPS_LIMIT {
+        let status = StatusCode::TOO_MANY_REQUESTS;
+        finish_mcp_audit(&svc, audit_id, audit_started, status).await;
+        return error_resp(status, "mcp rate limit exceeded");
+    }
 
     // Gate: when the call is `tools/call` for a name the admin has
     // disabled, refuse without forwarding.  Returns a JSON-RPC error
@@ -408,18 +518,20 @@ async fn forward(
         if method == "tools/call" {
             if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
                 if !allowed.iter().any(|t| t == name) {
-                    return jsonrpc_error_resp(
+                    let resp = jsonrpc_error_resp(
                         id.clone(),
                         -32601,
                         &format!("tool '{name}' is disabled by admin"),
                     );
+                    finish_mcp_audit(&svc, audit_id, audit_started, resp.status()).await;
+                    return resp;
                 }
             }
         }
     }
 
     if entry.runtime.is_some() {
-        return forward_runtime_stdio(
+        let resp = forward_runtime_stdio(
             &svc,
             &instance_id,
             &server_name,
@@ -428,17 +540,23 @@ async fn forward(
             peek.as_ref(),
         )
         .await;
+        finish_mcp_audit(&svc, audit_id, audit_started, resp.status()).await;
+        return resp;
     }
 
     if let Err(err) = validate_remote_mcp_auth_urls(&svc, &entry.auth).await {
         tracing::warn!(error = %err, server = %server_name, "mcp: auth URL rejected");
-        return error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+        let status = StatusCode::FORBIDDEN;
+        finish_mcp_audit(&svc, audit_id, audit_started, status).await;
+        return error_resp(status, "mcp upstream not allowed");
     }
     let pinned_http = match pinned_remote_mcp_client(&svc, &entry).await {
         Ok(client) => client,
         Err(err) => {
             tracing::warn!(error = %err, server = %server_name, "mcp: upstream rejected");
-            return error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed");
+            let status = StatusCode::FORBIDDEN;
+            finish_mcp_audit(&svc, audit_id, audit_started, status).await;
+            return error_resp(status, "mcp upstream not allowed");
         }
     };
 
@@ -454,7 +572,11 @@ async fn forward(
     // Apply extra VS Code-style headers, then the legacy auth shape.
     outbound = match apply_entry_headers_and_auth(outbound, &entry) {
         Ok(req) => req,
-        Err(msg) => return error_resp(StatusCode::PRECONDITION_REQUIRED, &msg),
+        Err(msg) => {
+            let status = StatusCode::PRECONDITION_REQUIRED;
+            finish_mcp_audit(&svc, audit_id, audit_started, status).await;
+            return error_resp(status, &msg);
+        }
     };
 
     let resp = match outbound.body(body_bytes).send().await {
@@ -470,7 +592,9 @@ async fn forward(
                 domain = %crate::mcp_servers::domain_of(&entry.url),
                 "mcp: upstream send failed",
             );
-            return error_resp(StatusCode::BAD_GATEWAY, "upstream unreachable");
+            let status = StatusCode::BAD_GATEWAY;
+            finish_mcp_audit(&svc, audit_id, audit_started, status).await;
+            return error_resp(status, "upstream unreachable");
         }
     };
 
@@ -502,7 +626,9 @@ async fn forward(
             Ok(b) => b,
             Err(err) => {
                 tracing::warn!(error = %err, "mcp: tools/list response read failed");
-                return error_resp(StatusCode::BAD_GATEWAY, "upstream read failed");
+                let status = StatusCode::BAD_GATEWAY;
+                finish_mcp_audit(&svc, audit_id, audit_started, status).await;
+                return error_resp(status, "upstream read failed");
             }
         };
         let allowed = entry.enabled_tools.as_deref().unwrap_or(&[]);
@@ -521,6 +647,7 @@ async fn forward(
             }
             builder = builder.header(k, v);
         }
+        finish_mcp_audit(&svc, audit_id, audit_started, status).await;
         return builder
             .header(
                 axum::http::header::CONTENT_LENGTH,
@@ -538,6 +665,7 @@ async fn forward(
         builder = builder.header(k, v);
     }
     let stream = futures::TryStreamExt::map_err(resp.bytes_stream(), std::io::Error::other);
+    finish_mcp_audit(&svc, audit_id, audit_started, status).await;
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "build resp"))

@@ -21,8 +21,8 @@ use dyson_swarm::{
     proxy::{self, ProxyService, policy_check::InstancePolicy},
     snapshot::SnapshotService,
     traits::{
-        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, PolicyStore,
-        SnapshotStore, TokenStore, UserStore,
+        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, McpAuditStore,
+        PolicyStore, SnapshotStore, TokenStore, UserStore,
     },
     ttl,
 };
@@ -181,6 +181,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let policies_store: Arc<dyn PolicyStore> =
         Arc::new(db::policies::SqlitePolicyStore::new(pool.clone()));
     let audit_store: Arc<dyn AuditStore> = Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
+    let mcp_audit_store: Arc<dyn McpAuditStore> =
+        Arc::new(db::audit::SqliteMcpAuditStore::new(pool.clone()));
     let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(
         pool.clone(),
         cipher_dir.clone(),
@@ -567,6 +569,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
                 .with_runtime_socket(mcp_runtime_socket.clone())
                 .with_docker_catalog(docker_catalog, allow_user_docker_json)
                 .with_docker_catalog_store(mcp_catalog_store)
+                .with_mcp_audit(mcp_audit_store)
                 .with_mcp_upstream_policy(dyson_swarm::upstream_policy::OutboundUrlPolicy {
                     enabled: cfg.byo.enabled,
                     allow_localhost: cfg.byo.allow_localhost,
