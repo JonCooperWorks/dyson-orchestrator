@@ -272,8 +272,8 @@ mod tests {
     use crate::db::open_in_memory;
     use crate::db::tokens::SqlxTokenStore;
     use crate::traits::{
-        BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStore,
-        ProbeResult, SandboxInfo, SnapshotInfo, SnapshotStore, TokenStore,
+        BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
+        InstanceStore, ProbeResult, SandboxInfo, SnapshotInfo, SnapshotStore, TokenStore,
     };
 
     struct StubProber;
@@ -311,6 +311,15 @@ mod tests {
     }
 
     async fn build_state() -> (AppState, Arc<dyn crate::traits::UserStore>) {
+        let (state, users, _) = build_state_with_instances().await;
+        (state, users)
+    }
+
+    async fn build_state_with_instances() -> (
+        AppState,
+        Arc<dyn crate::traits::UserStore>,
+        Arc<dyn InstanceStore>,
+    ) {
         let pool = open_in_memory().await.unwrap();
         let keys_tmp = tempfile::tempdir().unwrap();
         let cipher_dir: Arc<dyn crate::envelope::CipherDirectory> =
@@ -347,7 +356,7 @@ mod tests {
             Arc::new(crate::db::snapshots::SqliteSnapshotStore::new(pool.clone()));
         let snapshot_svc = Arc::new(SnapshotService::new(
             cube,
-            instances_store,
+            instances_store.clone(),
             snapshots_store,
             backup,
             instance_svc.clone(),
@@ -410,7 +419,7 @@ mod tests {
             skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::empty()),
             mcp_runtime_socket: None,
         };
-        (state, users_store)
+        (state, users_store, instances_store)
     }
 
     async fn spawn(state: AppState, auth: AuthState, user_auth: UserAuthState) -> String {
@@ -434,6 +443,67 @@ mod tests {
         let (state, users) = build_state().await;
         let (user_auth, user_id) = crate::auth::user::fixed_user_auth(users, subject).await;
         (state, user_auth, user_id)
+    }
+
+    async fn token_bound_user_auth(
+        users: Arc<dyn crate::traits::UserStore>,
+        subject: &str,
+        bearer: &str,
+    ) -> (UserAuthState, String) {
+        struct BearerOnly {
+            bearer: String,
+            identity: crate::auth::UserIdentity,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::auth::Authenticator for BearerOnly {
+            async fn authenticate(
+                &self,
+                headers: &axum::http::HeaderMap,
+            ) -> Result<crate::auth::UserIdentity, crate::auth::AuthError> {
+                match crate::auth::extract_bearer(headers) {
+                    Some(token) if token == self.bearer => Ok(self.identity.clone()),
+                    Some(_) => Err(crate::auth::AuthError::Invalid(
+                        "unexpected bearer".to_owned(),
+                    )),
+                    None => Err(crate::auth::AuthError::Missing),
+                }
+            }
+        }
+
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        users
+            .create(crate::traits::UserRow {
+                id: id.clone(),
+                subject: subject.into(),
+                email: None,
+                display_name: None,
+                status: crate::traits::UserStatus::Active,
+                created_at: 0,
+                activated_at: Some(0),
+                last_seen_at: None,
+                openrouter_key_id: None,
+                openrouter_key_limit_usd: 10.0,
+            })
+            .await
+            .expect("create test user");
+        let identity = crate::auth::UserIdentity {
+            subject: subject.into(),
+            email: None,
+            display_name: None,
+            source: crate::auth::AuthSource::Oidc,
+            claims: serde_json::Value::Null,
+        };
+        (
+            UserAuthState::new(
+                Arc::new(BearerOnly {
+                    bearer: bearer.to_owned(),
+                    identity,
+                }),
+                users,
+            ),
+            id,
+        )
     }
 
     fn deny_user_auth(users: Arc<dyn crate::traits::UserStore>) -> UserAuthState {
@@ -549,6 +619,107 @@ mod tests {
         assert!(cookie.starts_with("dyson_swarm_session=;"));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Max-Age=0"));
+    }
+
+    #[tokio::test]
+    async fn auth_session_logout_revokes_prior_cookie_identity() {
+        let (mut state, users, instances) = build_state_with_instances().await;
+        state.hostname = Some("swarm.test".into());
+        let (user_auth, user_id) = token_bound_user_auth(users, "alice", "future.jwt.token").await;
+        let now = crate::now_secs();
+        let instance_id = uuid::Uuid::new_v4().simple().to_string();
+        instances
+            .create(InstanceRow {
+                id: instance_id.clone(),
+                owner_id: user_id,
+                name: "session test".into(),
+                task: "session test".into(),
+                cube_sandbox_id: Some("sb-test".into()),
+                state_generation: uuid::Uuid::new_v4().simple().to_string(),
+                template_id: "tpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "instance-bearer".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: now,
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: now,
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+                network_policy_cidrs: vec![],
+                models: vec!["test-model".into()],
+                tools: vec![],
+            })
+            .await
+            .expect("insert test instance");
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let create_resp = client
+            .post(format!("{base}/auth/session"))
+            .bearer_auth("future.jwt.token")
+            .json(&serde_json::json!({ "expires_at": crate::now_secs() + 3600 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), 204);
+        let set_cookie = create_resp
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .expect("session response must set cookie")
+            .to_str()
+            .unwrap();
+        let cookie_pair = set_cookie
+            .split(';')
+            .next()
+            .expect("set-cookie must contain a cookie pair")
+            .to_owned();
+        let before_logout = client
+            .get(format!("{base}/api/conversations"))
+            .header("host", format!("{instance_id}.swarm.test"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            before_logout.status(),
+            401,
+            "session cookie should resolve before logout"
+        );
+
+        let logout_resp = client
+            .delete(format!("{base}/auth/session"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(logout_resp.status(), 204);
+        let after_logout = client
+            .get(format!("{base}/api/conversations"))
+            .header("host", format!("{instance_id}.swarm.test"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            after_logout.status(),
+            401,
+            "logout must revoke prior session cookie even when the original JWT is unexpired"
+        );
     }
 
     #[tokio::test]
