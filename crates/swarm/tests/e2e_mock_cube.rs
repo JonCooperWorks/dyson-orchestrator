@@ -309,6 +309,9 @@ async fn full_walkthrough() {
         prober,
         tokens: tokens_store.clone(),
         users: users_store,
+        admin_audit: Arc::new(dyson_swarm::db::audit::SqliteAdminAuditStore::new(
+            pool.clone(),
+        )),
         sandbox_domain: "cube.test".into(),
         hostname: None,
         auth_config: std::sync::Arc::new(http::auth_config::AuthConfig::none()),

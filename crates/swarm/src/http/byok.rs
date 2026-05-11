@@ -488,7 +488,7 @@ mod tests {
             None,
         ));
         let state_files = Arc::new(crate::state_files::StateFileService::new(
-            pool,
+            pool.clone(),
             cipher_dir.clone(),
         ));
         let state = AppState {
@@ -500,6 +500,7 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store,
             users: users_store,
+            admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::none()),

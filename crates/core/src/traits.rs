@@ -312,6 +312,15 @@ pub struct McpAuditEntry {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct AdminAuditEntry {
+    pub actor_subject: String,
+    pub action: String,
+    pub target_user: String,
+    pub params_hash: String,
+    pub ts: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
     pub status: Option<InstanceStatus>,
@@ -735,6 +744,11 @@ pub trait McpAuditStore: Send + Sync {
         status: i64,
         duration_ms: i64,
     ) -> Result<(), StoreError>;
+}
+
+#[async_trait]
+pub trait AdminAuditStore: Send + Sync {
+    async fn insert(&self, entry: &AdminAuditEntry) -> Result<(), StoreError>;
 }
 
 #[async_trait]

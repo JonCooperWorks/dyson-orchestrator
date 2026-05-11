@@ -21,7 +21,9 @@ use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
-use crate::traits::{AuditEntry, AuditStore, McpAuditEntry, McpAuditStore};
+use crate::traits::{
+    AdminAuditEntry, AdminAuditStore, AuditEntry, AuditStore, McpAuditEntry, McpAuditStore,
+};
 
 #[derive(Debug, Clone)]
 pub struct SqliteAuditStore {
@@ -48,6 +50,17 @@ pub struct SqliteMcpAuditStore {
 }
 
 impl SqliteMcpAuditStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteAdminAuditStore {
+    pool: SqlitePool,
+}
+
+impl SqliteAdminAuditStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
@@ -178,6 +191,26 @@ impl McpAuditStore for NoopMcpAuditStore {
         _status: i64,
         _duration_ms: i64,
     ) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AdminAuditStore for SqliteAdminAuditStore {
+    async fn insert(&self, entry: &AdminAuditEntry) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO admin_audit \
+             (actor_subject, action, target_user, params_hash, ts) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&entry.actor_subject)
+        .bind(&entry.action)
+        .bind(&entry.target_user)
+        .bind(&entry.params_hash)
+        .bind(entry.ts)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
         Ok(())
     }
 }

@@ -14,12 +14,14 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::auth::CallerIdentity;
 use crate::http::{AppState, store_err_to_status};
 use crate::openrouter::USER_OR_KEY_SECRET_NAME;
-use crate::traits::{UserRow, UserStatus};
+use crate::traits::{AdminAuditEntry, UserRow, UserStatus};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -54,6 +56,7 @@ struct CreateUserBody {
 
 async fn create_user(
     State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
     Json(body): Json<CreateUserBody>,
 ) -> Result<(StatusCode, Json<UserView>), StatusCode> {
     let now = crate::now_secs();
@@ -74,6 +77,19 @@ async fn create_user(
         openrouter_key_id: None,
         openrouter_key_limit_usd: 10.0,
     };
+    audit_admin_user_mutation(
+        &state,
+        caller.as_ref().map(|Extension(c)| c),
+        "create_user",
+        &row.id,
+        serde_json::json!({
+            "subject": &row.subject,
+            "email": &row.email,
+            "display_name": &row.display_name,
+            "activate": body.activate,
+        }),
+    )
+    .await?;
     match state.users.create(row.clone()).await {
         Ok(()) => Ok((StatusCode::CREATED, Json(UserView::from(row)))),
         Err(e) => Err(store_err_to_status(e)),
@@ -139,14 +155,44 @@ async fn list_users(State(state): State<AppState>) -> Result<Json<Vec<UserView>>
     }
 }
 
-async fn activate(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+async fn activate(
+    State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    if let Err(status) = audit_admin_user_mutation(
+        &state,
+        caller.as_ref().map(|Extension(c)| c),
+        "activate",
+        &id,
+        serde_json::json!({}),
+    )
+    .await
+    {
+        return status;
+    }
     match state.users.set_status(&id, UserStatus::Active).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => store_err_to_status(e),
     }
 }
 
-async fn suspend(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+async fn suspend(
+    State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    if let Err(status) = audit_admin_user_mutation(
+        &state,
+        caller.as_ref().map(|Extension(c)| c),
+        "suspend",
+        &id,
+        serde_json::json!({}),
+    )
+    .await
+    {
+        return status;
+    }
     // Stage 6.5: revoke the user's OpenRouter key upstream BEFORE
     // flipping local status, so a leaked plaintext stops accruing
     // charges even if the local DB write fails.  Best-effort — we
@@ -194,16 +240,40 @@ struct MintKeyResp {
 
 async fn mint_key(
     State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
     Path(id): Path<String>,
     Json(body): Json<MintKeyBody>,
 ) -> Result<(StatusCode, Json<MintKeyResp>), StatusCode> {
+    audit_admin_user_mutation(
+        &state,
+        caller.as_ref().map(|Extension(c)| c),
+        "mint_key",
+        &id,
+        serde_json::json!({ "label": body.label }),
+    )
+    .await?;
     match state.users.mint_api_key(&id, body.label.as_deref()).await {
         Ok(token) => Ok((StatusCode::CREATED, Json(MintKeyResp { token }))),
         Err(e) => Err(store_err_to_status(e)),
     }
 }
 
-async fn revoke_key(State(state): State<AppState>, Path(token): Path<String>) -> StatusCode {
+async fn revoke_key(
+    State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
+    Path(token): Path<String>,
+) -> StatusCode {
+    if let Err(status) = audit_admin_user_mutation(
+        &state,
+        caller.as_ref().map(|Extension(c)| c),
+        "revoke_key",
+        "<api-key>",
+        serde_json::json!({ "token": token }),
+    )
+    .await
+    {
+        return status;
+    }
     match state.users.revoke_api_key(&token).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => store_err_to_status(e),
@@ -220,6 +290,7 @@ struct SetLimitBody {
 
 async fn set_or_limit(
     State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
     Path(id): Path<String>,
     Json(body): Json<SetLimitBody>,
 ) -> StatusCode {
@@ -231,6 +302,17 @@ async fn set_or_limit(
         Ok(None) => return StatusCode::NOT_FOUND,
         Err(e) => return store_err_to_status(e),
     };
+    if let Err(status) = audit_admin_user_mutation(
+        &state,
+        caller.as_ref().map(|Extension(c)| c),
+        "set_openrouter_limit",
+        &id,
+        serde_json::json!({ "limit_usd": body.limit_usd }),
+    )
+    .await
+    {
+        return status;
+    }
     if let Err(e) = state.users.set_openrouter_limit(&id, body.limit_usd).await {
         return store_err_to_status(e);
     }
@@ -254,21 +336,26 @@ async fn set_or_limit(
 
 #[derive(Debug, Serialize)]
 struct ForceMintResp {
-    /// Plaintext key.  Surfaced once; the next call to this endpoint
-    /// returns a different value because the previous one is wiped
-    /// upstream.
-    token: String,
     or_key_id: String,
 }
 
 async fn force_mint_or_key(
     State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<ForceMintResp>), StatusCode> {
     let resolver = state
         .user_or_keys
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    audit_admin_user_mutation(
+        &state,
+        caller.as_ref().map(|Extension(c)| c),
+        "force_mint_or_key",
+        &id,
+        serde_json::json!({}),
+    )
+    .await?;
 
     // Force a fresh mint by clearing the existing one (if any) first,
     // so the lazy-mint path picks "new key needed".  Upstream revoke
@@ -289,7 +376,7 @@ async fn force_mint_or_key(
             .await;
         let _ = state.users.set_openrouter_key_id(&id, None).await;
     }
-    let plaintext = resolver.resolve_plaintext(&id).await.map_err(|err| {
+    let _plaintext = resolver.resolve_plaintext(&id).await.map_err(|err| {
         tracing::warn!(error = %err, user = %id, "force mint OR key failed");
         StatusCode::BAD_GATEWAY
     })?;
@@ -300,11 +387,42 @@ async fn force_mint_or_key(
     };
     Ok((
         StatusCode::CREATED,
-        Json(ForceMintResp {
-            token: plaintext,
-            or_key_id: new_id,
-        }),
+        Json(ForceMintResp { or_key_id: new_id }),
     ))
+}
+
+fn actor_subject(caller: Option<&CallerIdentity>) -> String {
+    caller
+        .map(|caller| caller.identity.subject.clone())
+        .unwrap_or_else(|| "dangerous-no-auth".to_owned())
+}
+
+fn params_hash(params: serde_json::Value) -> Result<String, StatusCode> {
+    let bytes = serde_json::to_vec(&params).map_err(|err| {
+        tracing::warn!(error = %err, "admin audit params encode failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(hex::encode(Sha256::digest(&bytes)))
+}
+
+async fn audit_admin_user_mutation(
+    state: &AppState,
+    caller: Option<&CallerIdentity>,
+    action: &str,
+    target_user: &str,
+    params: serde_json::Value,
+) -> Result<(), StatusCode> {
+    let entry = AdminAuditEntry {
+        actor_subject: actor_subject(caller),
+        action: action.to_owned(),
+        target_user: target_user.to_owned(),
+        params_hash: params_hash(params)?,
+        ts: crate::now_secs(),
+    };
+    state.admin_audit.insert(&entry).await.map_err(|err| {
+        tracing::warn!(error = %err, action, target_user, "admin audit insert failed");
+        store_err_to_status(err)
+    })
 }
 
 #[cfg(test)]
@@ -498,11 +616,11 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store,
             users: users_store.clone(),
+            admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::none()),
-            dyson_http: crate::http::dyson_proxy::build_client()
-                .expect("dyson http client init"),
+            dyson_http: crate::http::dyson_proxy::build_client().expect("dyson http client init"),
             models_upstream: None,
             models_cache: crate::http::models::ModelsCache::new(),
             openrouter_provisioning: Some(provisioning),
@@ -540,9 +658,7 @@ mod tests {
             axum::Router::new(),
             axum::Router::new(),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -661,10 +777,7 @@ mod tests {
             let target: String = sqlx::Row::try_get(&row, "target_user").unwrap();
             let params_hash: String = sqlx::Row::try_get(&row, "params_hash").unwrap();
             let ts: i64 = sqlx::Row::try_get(&row, "ts").unwrap();
-            assert_eq!(
-                actor, "admin-subject",
-                "admin_audit actor_subject mismatch"
-            );
+            assert_eq!(actor, "admin-subject", "admin_audit actor_subject mismatch");
             assert!(
                 target == target_user || target == "<api-key>",
                 "admin_audit target_user mismatch"

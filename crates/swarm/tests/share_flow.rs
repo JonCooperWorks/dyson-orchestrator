@@ -286,6 +286,9 @@ async fn build() -> Fixture {
         prober: Arc::new(StubProber),
         tokens: tokens_store.clone(),
         users: users_store,
+        admin_audit: Arc::new(dyson_swarm::db::audit::SqliteAdminAuditStore::new(
+            pool.clone(),
+        )),
         sandbox_domain: "127.0.0.1".to_string(),
         hostname: Some(apex.clone()),
         auth_config: Arc::new(http::auth_config::AuthConfig::none()),

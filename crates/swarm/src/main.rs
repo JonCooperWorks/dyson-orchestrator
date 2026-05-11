@@ -21,8 +21,8 @@ use dyson_swarm::{
     proxy::{self, ProxyService, policy_check::InstancePolicy},
     snapshot::SnapshotService,
     traits::{
-        AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore, McpAuditStore,
-        PolicyStore, SnapshotStore, TokenStore, UserStore,
+        AdminAuditStore, AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore,
+        McpAuditStore, PolicyStore, SnapshotStore, TokenStore, UserStore,
     },
     ttl,
 };
@@ -183,6 +183,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let audit_store: Arc<dyn AuditStore> = Arc::new(db::audit::SqliteAuditStore::new(pool.clone()));
     let mcp_audit_store: Arc<dyn McpAuditStore> =
         Arc::new(db::audit::SqliteMcpAuditStore::new(pool.clone()));
+    let admin_audit_store: Arc<dyn AdminAuditStore> =
+        Arc::new(db::audit::SqliteAdminAuditStore::new(pool.clone()));
     let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(
         pool.clone(),
         cipher_dir.clone(),
@@ -716,6 +718,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         prober,
         tokens: tokens_store,
         users: users_store,
+        admin_audit: admin_audit_store,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
         hostname: cfg.hostname.clone(),
         auth_config: Arc::new(http::auth_config::AuthConfig::from_toml(

@@ -65,6 +65,7 @@ pub struct AppState {
     pub prober: Arc<dyn HealthProber>,
     pub tokens: Arc<dyn TokenStore>,
     pub users: Arc<dyn crate::traits::UserStore>,
+    pub admin_audit: Arc<dyn crate::traits::AdminAuditStore>,
     pub sandbox_domain: String,
     /// Public hostname swarm serves on, e.g. `"swarm.example.com"`.
     /// Drives the host-based dispatcher in
@@ -388,6 +389,7 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store,
             users: users_store.clone(),
+            admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(auth_config::AuthConfig::none()),
