@@ -360,6 +360,14 @@ pub trait CubeClient: Send + Sync {
 #[async_trait]
 pub trait InstanceStore: Send + Sync {
     async fn create(&self, row: InstanceRow) -> Result<(), StoreError>;
+    /// Atomically insert `row` only when this owner has fewer than
+    /// `limit` non-destroyed rows. Returns `Ok(false)` when the quota
+    /// is already full.
+    async fn create_with_owner_limit(
+        &self,
+        row: InstanceRow,
+        limit: u64,
+    ) -> Result<bool, StoreError>;
     /// Look up by id without an owner filter. Reserved for system-internal
     /// flows (TTL sweep, probe loop, proxy resolving an instance by its
     /// proxy_token) where the caller has already authorised the access.

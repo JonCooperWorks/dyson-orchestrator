@@ -1032,5 +1032,6 @@ pub(crate) fn swarm_err_to_status(e: SwarmError) -> StatusCode {
         // existing snapshots, the operation isn't being rate-limited or
         // policy-denied.
         SwarmError::SnapshotQuotaExceeded { .. } => StatusCode::INSUFFICIENT_STORAGE,
+        SwarmError::InstanceQuotaExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
     }
 }

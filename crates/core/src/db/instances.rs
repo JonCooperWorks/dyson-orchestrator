@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use std::sync::Arc;
 
 use crate::db::map_sqlx;
@@ -127,55 +127,136 @@ fn row_to_instance(
     })
 }
 
+struct EncodedInstanceInsert {
+    probe_json: Option<String>,
+    kind: String,
+    entries_csv: String,
+    cidrs_csv: String,
+    models_json: String,
+    tools_json: String,
+    bearer_token: String,
+}
+
+fn encode_instance_insert(
+    row: &InstanceRow,
+    cipher: &dyn EnvelopeCipher,
+) -> Result<EncodedInstanceInsert, StoreError> {
+    let probe_json = match &row.last_probe_status {
+        Some(p) => Some(serde_json::to_string(p).map_err(|e| StoreError::Io(e.to_string()))?),
+        None => None,
+    };
+    let models_json = serde_json::to_string(&row.models)
+        .map_err(|e| StoreError::Io(format!("models encode: {e}")))?;
+    let tools_json = serde_json::to_string(&row.tools)
+        .map_err(|e| StoreError::Io(format!("tools encode: {e}")))?;
+    Ok(EncodedInstanceInsert {
+        probe_json,
+        kind: row.network_policy.kind_str().to_owned(),
+        entries_csv: vec_to_csv(row.network_policy.entries()),
+        cidrs_csv: vec_to_csv(&row.network_policy_cidrs),
+        models_json,
+        tools_json,
+        bearer_token: seal_bearer(cipher, &row.bearer_token)?,
+    })
+}
+
+async fn insert_instance_row<'e, E>(
+    executor: E,
+    row: &InstanceRow,
+    encoded: &EncodedInstanceInsert,
+) -> Result<(), StoreError>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    sqlx::query(
+        "INSERT INTO instances \
+         (id, owner_id, name, task, cube_sandbox_id, state_generation, template_id, status, bearer_token, \
+          pinned, expires_at, last_active_at, last_probe_at, last_probe_status, \
+          created_at, destroyed_at, rotated_to, \
+          network_policy_kind, network_policy_entries, network_policy_cidrs, models, tools) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&row.id)
+    .bind(&row.owner_id)
+    .bind(&row.name)
+    .bind(&row.task)
+    .bind(&row.cube_sandbox_id)
+    .bind(&row.state_generation)
+    .bind(&row.template_id)
+    .bind(row.status.as_str())
+    .bind(&encoded.bearer_token)
+    .bind(row.pinned as i64)
+    .bind(row.expires_at)
+    .bind(row.last_active_at)
+    .bind(row.last_probe_at)
+    .bind(&encoded.probe_json)
+    .bind(row.created_at)
+    .bind(row.destroyed_at)
+    .bind(&row.rotated_to)
+    .bind(&encoded.kind)
+    .bind(&encoded.entries_csv)
+    .bind(&encoded.cidrs_csv)
+    .bind(&encoded.models_json)
+    .bind(&encoded.tools_json)
+    .execute(executor)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
 #[async_trait]
 impl InstanceStore for SqlxInstanceStore {
     async fn create(&self, row: InstanceRow) -> Result<(), StoreError> {
-        let probe_json = match &row.last_probe_status {
-            Some(p) => Some(serde_json::to_string(p).map_err(|e| StoreError::Io(e.to_string()))?),
-            None => None,
-        };
-        let kind = row.network_policy.kind_str().to_owned();
-        let entries_csv = vec_to_csv(row.network_policy.entries());
-        let cidrs_csv = vec_to_csv(&row.network_policy_cidrs);
-        let models_json = serde_json::to_string(&row.models)
-            .map_err(|e| StoreError::Io(format!("models encode: {e}")))?;
-        let tools_json = serde_json::to_string(&row.tools)
-            .map_err(|e| StoreError::Io(format!("tools encode: {e}")))?;
-        let bearer_token = seal_bearer(self.cipher.as_ref(), &row.bearer_token)?;
-        sqlx::query(
-            "INSERT INTO instances \
-             (id, owner_id, name, task, cube_sandbox_id, state_generation, template_id, status, bearer_token, \
-              pinned, expires_at, last_active_at, last_probe_at, last_probe_status, \
-              created_at, destroyed_at, rotated_to, \
-              network_policy_kind, network_policy_entries, network_policy_cidrs, models, tools) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.owner_id)
-        .bind(&row.name)
-        .bind(&row.task)
-        .bind(&row.cube_sandbox_id)
-        .bind(&row.state_generation)
-        .bind(&row.template_id)
-        .bind(row.status.as_str())
-        .bind(&bearer_token)
-        .bind(row.pinned as i64)
-        .bind(row.expires_at)
-        .bind(row.last_active_at)
-        .bind(row.last_probe_at)
-        .bind(probe_json)
-        .bind(row.created_at)
-        .bind(row.destroyed_at)
-        .bind(&row.rotated_to)
-        .bind(kind)
-        .bind(entries_csv)
-        .bind(cidrs_csv)
-        .bind(models_json)
-        .bind(tools_json)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
+        let encoded = encode_instance_insert(&row, self.cipher.as_ref())?;
+        insert_instance_row(&self.pool, &row, &encoded).await?;
         Ok(())
+    }
+
+    async fn create_with_owner_limit(
+        &self,
+        row: InstanceRow,
+        limit: u64,
+    ) -> Result<bool, StoreError> {
+        let encoded = encode_instance_insert(&row, self.cipher.as_ref())?;
+        let mut conn = self.pool.acquire().await.map_err(map_sqlx)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
+        let count_row = match sqlx::query(
+            "SELECT COUNT(*) AS n FROM instances WHERE owner_id = ? AND status != 'destroyed'",
+        )
+        .bind(&row.owner_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_sqlx)
+        {
+            Ok(row) => row,
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(err);
+            }
+        };
+        let count: i64 = match count_row.try_get("n").map_err(map_sqlx) {
+            Ok(count) => count,
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(err);
+            }
+        };
+        if u64::try_from(count.max(0)).unwrap_or(0) >= limit {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Ok(false);
+        }
+        if let Err(err) = insert_instance_row(&mut *conn, &row, &encoded).await {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(err);
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(true)
     }
 
     async fn get(&self, id: &str) -> Result<Option<InstanceRow>, StoreError> {

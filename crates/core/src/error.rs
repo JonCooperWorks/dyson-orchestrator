@@ -65,6 +65,11 @@ pub enum SwarmError {
     /// another".
     #[error("snapshot quota exceeded (limit {limit})")]
     SnapshotQuotaExceeded { limit: u64 },
+    /// Per-owner active instance quota exceeded.  Mapped to 429 by
+    /// the HTTP layer; callers can destroy an existing instance and
+    /// retry.
+    #[error("instance quota exceeded (limit {limit})")]
+    InstanceQuotaExceeded { limit: u64 },
 }
 
 impl From<crate::network_policy::PolicyError> for SwarmError {

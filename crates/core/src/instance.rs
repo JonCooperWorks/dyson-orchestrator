@@ -53,6 +53,8 @@ pub use types::{
 };
 use types::{InPlaceSwapPlan, RuntimeTokens};
 
+const MAX_ACTIVE_INSTANCES_PER_OWNER: u64 = 20;
+
 /// Build the `system_secrets` name for an instance's per-instance
 /// configure secret (Stage 8).  Used by `instance.create` /
 /// `instance.destroy` and the Stage-8.3 patch path; central so
@@ -2380,7 +2382,15 @@ impl InstanceService {
             models: models.clone(),
             tools: tools.clone(),
         };
-        self.instances.create(row).await?;
+        if !self
+            .instances
+            .create_with_owner_limit(row, MAX_ACTIVE_INSTANCES_PER_OWNER)
+            .await?
+        {
+            return Err(SwarmError::InstanceQuotaExceeded {
+                limit: MAX_ACTIVE_INSTANCES_PER_OWNER,
+            });
+        }
 
         let proxy_token = self.tokens.mint(&id, SHARED_PROVIDER).await?;
         // Per-instance ingest token, sibling of the chat proxy token
