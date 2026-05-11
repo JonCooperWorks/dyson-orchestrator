@@ -537,9 +537,7 @@ async fn forward(
         }
         builder = builder.header(k, v);
     }
-    let stream = futures::TryStreamExt::map_err(resp.bytes_stream(), |e| {
-        std::io::Error::new(std::io::ErrorKind::Other, e)
-    });
+    let stream = futures::TryStreamExt::map_err(resp.bytes_stream(), std::io::Error::other);
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| error_resp(StatusCode::INTERNAL_SERVER_ERROR, "build resp"))

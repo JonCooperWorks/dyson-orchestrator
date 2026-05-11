@@ -26,7 +26,8 @@ use crate::auth::CallerIdentity;
 use crate::http::AppState;
 use crate::traits::{DeliveryRow, WebhookAuthScheme, WebhookRow};
 use crate::webhooks::{
-    DEFAULT_DELIVERY_LIMIT, MAX_WEBHOOK_BODY, WebhookError, WebhookSpec, validate_webhook_name,
+    DEFAULT_DELIVERY_LIMIT, DispatchCtx, MAX_WEBHOOK_BODY, WebhookError, WebhookSpec,
+    validate_webhook_name,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -337,7 +338,7 @@ async fn create_webhook(
         return Err(StatusCode::BAD_REQUEST);
     }
     let scheme = parse_scheme(&body.auth_scheme)?;
-    if scheme != WebhookAuthScheme::None && body.secret.as_deref().map_or(true, str::is_empty) {
+    if scheme != WebhookAuthScheme::None && body.secret.as_deref().is_none_or(str::is_empty) {
         return Err(StatusCode::BAD_REQUEST);
     }
     // 409 when a row with this name already exists — POST is create-only;
@@ -463,7 +464,7 @@ async fn list_instance_deliveries(
     // Hard cap on the search needle — past a few hundred chars it's
     // almost certainly a paste of a payload, and SQLite's LIKE on a
     // BLOB cast happily eats CPU on long needles.
-    if q_raw.map_or(false, |q| q.len() > 256) {
+    if q_raw.is_some_and(|q| q.len() > 256) {
         return Err(StatusCode::BAD_REQUEST);
     }
     let rows = state
@@ -566,16 +567,16 @@ async fn fire_webhook(
 
     match state
         .webhooks
-        .verify_and_dispatch(
-            &instance_id,
-            &name,
-            &signature_headers,
+        .verify_and_dispatch(DispatchCtx {
+            instance_id: &instance_id,
+            name: &name,
+            signature_headers: &signature_headers,
             bearer_header,
-            request_id.as_deref(),
-            forward,
+            request_id: request_id.as_deref(),
+            forward_headers: forward,
             content_type,
-            body.as_ref(),
-        )
+            body: body.as_ref(),
+        })
         .await
     {
         Ok(_) => StatusCode::NO_CONTENT,

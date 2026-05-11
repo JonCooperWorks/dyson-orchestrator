@@ -68,6 +68,17 @@ pub const DEFAULT_DELIVERY_LIMIT: u32 = 50;
 pub const MAX_DELIVERY_LIMIT: u32 = 200;
 pub const DEFAULT_SIGNATURE_HEADER: &str = "x-swarm-signature";
 
+pub struct DispatchCtx<'a> {
+    pub instance_id: &'a str,
+    pub name: &'a str,
+    pub signature_headers: &'a [(String, String)],
+    pub bearer_header: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+    pub forward_headers: Vec<(String, String)>,
+    pub content_type: Option<String>,
+    pub body: &'a [u8],
+}
+
 /// Convention for the `secret_name` column: signing keys are stored in
 /// `user_secrets` under a per-instance, per-webhook key.  They verify
 /// inbound webhooks only; they are not agent-readable runtime secrets.
@@ -83,6 +94,10 @@ pub fn webhook_chat_id(webhook_name: &str) -> String {
 
 pub fn webhook_chat_title(webhook_name: &str) -> String {
     format!("{WEBHOOK_CHAT_TITLE_PREFIX}{webhook_name}")
+}
+
+pub fn clamp_delivery_limit(limit: u32) -> u32 {
+    limit.clamp(1, MAX_DELIVERY_LIMIT)
 }
 
 /// Lower-cased name accepted for the URL path.  Slug-ish: ascii
@@ -566,7 +581,7 @@ impl WebhookService {
         limit: u32,
     ) -> Result<Vec<DeliveryRow>, WebhookError> {
         self.ensure_owner(owner_id, instance_id).await?;
-        let limit = limit.min(MAX_DELIVERY_LIMIT).max(1);
+        let limit = clamp_delivery_limit(limit);
         Ok(self
             .deliveries
             .list_for_webhook(instance_id, name, limit)
@@ -589,7 +604,7 @@ impl WebhookService {
         limit: u32,
     ) -> Result<Vec<DeliveryRow>, WebhookError> {
         self.ensure_owner(owner_id, instance_id).await?;
-        let limit = limit.min(MAX_DELIVERY_LIMIT).max(1);
+        let limit = clamp_delivery_limit(limit);
         Ok(self
             .deliveries
             .list_for_instance(instance_id, webhook_name, q, before, limit)
@@ -667,17 +682,17 @@ impl WebhookService {
     ///
     /// Always writes a `webhook_deliveries` row in the terminal arm so
     /// failed signatures show up alongside successes.
-    pub async fn verify_and_dispatch(
-        &self,
-        instance_id: &str,
-        name: &str,
-        signature_headers: &[(String, String)],
-        bearer_header: Option<&str>,
-        request_id: Option<&str>,
-        forward_headers: Vec<(String, String)>,
-        content_type: Option<String>,
-        body: &[u8],
-    ) -> Result<u16, WebhookError> {
+    pub async fn verify_and_dispatch(&self, ctx: DispatchCtx<'_>) -> Result<u16, WebhookError> {
+        let DispatchCtx {
+            instance_id,
+            name,
+            signature_headers,
+            bearer_header,
+            request_id,
+            forward_headers,
+            content_type,
+            body,
+        } = ctx;
         let started = Instant::now();
         let res = self
             .verify_and_dispatch_inner(
@@ -977,6 +992,44 @@ mod tests {
         assert_eq!(webhook_secret_name("i1", "ping"), "webhook:i1:ping");
     }
 
+    #[test]
+    fn regression_delivery_limit_zero_clamps_to_one() {
+        assert_eq!(clamp_delivery_limit(0), 1);
+    }
+
+    #[test]
+    fn delivery_limit_clamps_at_configured_bounds() {
+        assert_eq!(clamp_delivery_limit(1), 1);
+        assert_eq!(clamp_delivery_limit(MAX_DELIVERY_LIMIT), MAX_DELIVERY_LIMIT);
+        assert_eq!(
+            clamp_delivery_limit(MAX_DELIVERY_LIMIT + 1),
+            MAX_DELIVERY_LIMIT
+        );
+    }
+
+    #[test]
+    fn dispatch_ctx_carries_audit_metadata() {
+        let headers = vec![("x-test".to_owned(), "ok".to_owned())];
+        let ctx = DispatchCtx {
+            instance_id: "i1",
+            name: "github",
+            signature_headers: &headers,
+            bearer_header: Some("Bearer tok"),
+            request_id: Some("req-1"),
+            forward_headers: headers.clone(),
+            content_type: Some("application/json".to_owned()),
+            body: b"{}",
+        };
+        assert_eq!(ctx.instance_id, "i1");
+        assert_eq!(ctx.name, "github");
+        assert_eq!(ctx.signature_headers, headers.as_slice());
+        assert_eq!(ctx.bearer_header, Some("Bearer tok"));
+        assert_eq!(ctx.request_id, Some("req-1"));
+        assert_eq!(ctx.forward_headers, headers);
+        assert_eq!(ctx.content_type.as_deref(), Some("application/json"));
+        assert_eq!(ctx.body, b"{}");
+    }
+
     #[tokio::test]
     async fn put_stores_verifier_key_in_user_secrets() {
         let pool = crate::db::open_in_memory().await.unwrap();
@@ -1162,32 +1215,34 @@ mod tests {
         mac.update(body);
         let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
 
+        let wrong_headers = vec![(DEFAULT_SIGNATURE_HEADER.into(), signature.clone())];
         let wrong_header = svc
-            .verify_and_dispatch(
-                "i1",
-                "github",
-                &[(DEFAULT_SIGNATURE_HEADER.into(), signature.clone())],
-                None,
-                None,
-                Vec::new(),
-                Some("application/json".into()),
+            .verify_and_dispatch(DispatchCtx {
+                instance_id: "i1",
+                name: "github",
+                signature_headers: &wrong_headers,
+                bearer_header: None,
+                request_id: None,
+                forward_headers: Vec::new(),
+                content_type: Some("application/json".into()),
                 body,
-            )
+            })
             .await
             .unwrap_err();
         assert!(matches!(wrong_header, WebhookError::SignatureMismatch));
 
+        let right_headers = vec![("X-Hub-Signature-256".into(), signature)];
         let status = svc
-            .verify_and_dispatch(
-                "i1",
-                "github",
-                &[("X-Hub-Signature-256".into(), signature)],
-                None,
-                Some("req-1"),
-                Vec::new(),
-                Some("application/json".into()),
+            .verify_and_dispatch(DispatchCtx {
+                instance_id: "i1",
+                name: "github",
+                signature_headers: &right_headers,
+                bearer_header: None,
+                request_id: Some("req-1"),
+                forward_headers: Vec::new(),
+                content_type: Some("application/json".into()),
                 body,
-            )
+            })
             .await
             .unwrap();
         assert_eq!(status, 204);

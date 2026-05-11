@@ -2227,10 +2227,9 @@ mod tests {
     fn as_metadata_url_rejects_garbage() {
         assert!(as_metadata_url("not a url").is_err());
         // Errors must use the redacted domain, not the raw input.
-        let err = as_metadata_url("https://auth.example.com/tenant?token=secret-abc")
+        as_metadata_url("https://auth.example.com/tenant?token=secret-abc")
             .map(|_| ())
             .unwrap_or_else(|e| panic!("expected ok for valid URL with query, got err: {e}"));
-        let _ = err;
     }
 
     #[test]

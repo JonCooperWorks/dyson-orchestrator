@@ -161,7 +161,7 @@ pub(super) async fn forward_runtime_stdio(
         StatusCode::from_u16(runtime_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let content_type = runtime_resp.content_type;
     let mut body = runtime_resp.body.into_bytes();
-    let response_ct = content_type.as_deref().unwrap_or_else(|| {
+    let response_ct = content_type.as_deref().unwrap_or({
         if body.is_empty() {
             ""
         } else {

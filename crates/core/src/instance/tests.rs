@@ -1274,25 +1274,27 @@ async fn create_persists_mcp_specs_and_pushes_proxied_entries() {
         .unwrap();
 
     wait_for_pushes(&recorder, 1).await;
-    let pushed = recorder.pushed.lock().unwrap();
-    let (_, _, body) = &pushed[0];
-    let block = body
-        .mcp_servers
-        .as_ref()
-        .expect("mcp_servers must ride the configure push");
-    assert_eq!(block.len(), 2, "both servers must appear in the body");
+    {
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = &pushed[0];
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("mcp_servers must ride the configure push");
+        assert_eq!(block.len(), 2, "both servers must appear in the body");
 
-    let linear = &block["linear"];
-    // Origin only — `/llm` is stripped because LLM and MCP mount
-    // off the same swarm origin.  See `dyson_json_block`.
-    let expected_url = format!("https://dyson.example.com/mcp/{}/linear", created.id,);
-    assert_eq!(linear["url"], expected_url);
-    let header = linear["headers"]["Authorization"].as_str().unwrap();
-    let want_header = format!("Bearer {}", created.proxy_token);
-    assert_eq!(
-        header, want_header,
-        "agent's MCP bearer must equal the per-instance proxy_token"
-    );
+        let linear = &block["linear"];
+        // Origin only — `/llm` is stripped because LLM and MCP mount
+        // off the same swarm origin.  See `dyson_json_block`.
+        let expected_url = format!("https://dyson.example.com/mcp/{}/linear", created.id,);
+        assert_eq!(linear["url"], expected_url);
+        let header = linear["headers"]["Authorization"].as_str().unwrap();
+        let want_header = format!("Bearer {}", created.proxy_token);
+        assert_eq!(
+            header, want_header,
+            "agent's MCP bearer must equal the per-instance proxy_token"
+        );
+    }
 
     // Persistence: the upstream URL + bearer are sealed in user_secrets.
     let entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "linear")
@@ -1352,13 +1354,15 @@ async fn put_mcp_server_persists_and_pushes_proxied_block() {
     .await
     .unwrap();
     wait_for_pushes(&recorder, 1).await;
-    let pushed = recorder.pushed.lock().unwrap();
-    let (_, _, body) = pushed.last().unwrap();
-    let block = body
-        .mcp_servers
-        .as_ref()
-        .expect("put must push mcp_servers");
-    assert!(block.contains_key("linear"));
+    {
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = pushed.last().unwrap();
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("put must push mcp_servers");
+        assert!(block.contains_key("linear"));
+    }
 
     // Persistence carried the real upstream + bearer.
     let entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "linear")
@@ -1440,14 +1444,16 @@ async fn put_vscode_mcp_config_adds_docker_without_replacing_remote_servers() {
         .unwrap();
 
     wait_for_pushes(&recorder, 1).await;
-    let pushed = recorder.pushed.lock().unwrap();
-    let (_, _, body) = pushed.last().unwrap();
-    let block = body
-        .mcp_servers
-        .as_ref()
-        .expect("put must push mcp_servers");
-    assert!(block.contains_key("linear"));
-    assert!(block.contains_key("github"));
+    {
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = pushed.last().unwrap();
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("put must push mcp_servers");
+        assert!(block.contains_key("linear"));
+        assert!(block.contains_key("github"));
+    }
 
     let mut names = crate::mcp_servers::list_names(&user_secrets, &owner, &created.id)
         .await
@@ -1523,13 +1529,15 @@ async fn put_docker_catalog_mcp_server_renders_template_and_pushes_proxy_block()
     assert_eq!(name, "github");
 
     wait_for_pushes(&recorder, 1).await;
-    let pushed = recorder.pushed.lock().unwrap();
-    let (_, _, body) = pushed.last().unwrap();
-    let block = body
-        .mcp_servers
-        .as_ref()
-        .expect("catalog put must push mcp_servers");
-    assert!(block.contains_key("github"));
+    {
+        let pushed = recorder.pushed.lock().unwrap();
+        let (_, _, body) = pushed.last().unwrap();
+        let block = body
+            .mcp_servers
+            .as_ref()
+            .expect("catalog put must push mcp_servers");
+        assert!(block.contains_key("github"));
+    }
 
     let entry = crate::mcp_servers::get(&user_secrets, &owner, &created.id, "github")
         .await
@@ -4998,23 +5006,24 @@ async fn update_tools_pushes_allowlist_and_persists_on_row() {
     //    list under `tools: Some(...)`.  Identity / models are
     //    untouched on this branch — the body should look like
     //    "tools-only".
-    let pushed = recorder.pushed.lock().unwrap();
-    assert!(
-        pushed.len() > pushes_before,
-        "update_tools must fire at least one configure push"
-    );
-    let (target_id, _, body) = pushed.last().unwrap();
-    assert_eq!(target_id, &created.id);
-    assert_eq!(body.tools.as_deref(), Some(trimmed.as_slice()));
-    assert!(
-        body.name.is_none() && body.task.is_none() && body.models.is_empty(),
-        "tools-only push must not carry identity or models"
-    );
+    {
+        let pushed = recorder.pushed.lock().unwrap();
+        assert!(
+            pushed.len() > pushes_before,
+            "update_tools must fire at least one configure push"
+        );
+        let (target_id, _, body) = pushed.last().unwrap();
+        assert_eq!(target_id, &created.id);
+        assert_eq!(body.tools.as_deref(), Some(trimmed.as_slice()));
+        assert!(
+            body.name.is_none() && body.task.is_none() && body.models.is_empty(),
+            "tools-only push must not carry identity or models"
+        );
+    }
 
     // 2. The row's `tools` column reflects the new list, so
     //    GET /v1/instances/:id surfaces the trimmed allowlist
     //    on the next read.
-    drop(pushed);
     let row = _instances.get(&created.id).await.unwrap().unwrap();
     assert_eq!(row.tools, trimmed);
 }

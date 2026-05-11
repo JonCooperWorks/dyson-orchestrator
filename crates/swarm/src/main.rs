@@ -695,6 +695,15 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         dyson_swarm::shares::ShareMetrics::new(),
         cfg.hostname.clone(),
     ));
+    let dyson_http =
+        match startup_result(http::dyson_proxy::build_client(), "dyson http client init") {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::error!(error = %err, "startup failed");
+                return ExitCode::FAILURE;
+            }
+        };
+
     let app_state = http::AppState {
         user_secrets: user_secrets_svc,
         system_secrets: system_secrets_svc,
@@ -712,7 +721,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             cfg.default_models.clone(),
             cfg.cube_profiles.clone(),
         )),
-        dyson_http: http::dyson_proxy::build_client().expect("dyson http client init"),
+        dyson_http,
         models_upstream: cfg.providers.get("openrouter").map(|p| p.upstream.clone()),
         models_cache: http::models::ModelsCache::new(),
         openrouter_provisioning: or_provisioning,
@@ -847,6 +856,13 @@ async fn resolve_or_provisioning_async(
         .map_err(|e| format!("openrouter client build: {e}"))
 }
 
+fn startup_result<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    context: &'static str,
+) -> Result<T, String> {
+    result.map_err(|err| format!("{context}: {err}"))
+}
+
 async fn wait_for_shutdown() -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
@@ -860,7 +876,20 @@ async fn wait_for_shutdown() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::startup_rotation_target;
+    use super::{startup_result, startup_rotation_target};
+
+    #[test]
+    fn regression_dyson_http_client_init_error_is_returned() {
+        let err =
+            startup_result::<(), _>(Err("builder failed"), "dyson http client init").unwrap_err();
+        assert_eq!(err, "dyson http client init: builder failed");
+    }
+
+    #[test]
+    fn startup_result_returns_success_value() {
+        let value = startup_result::<_, &str>(Ok(42), "dyson http client init").unwrap();
+        assert_eq!(value, 42);
+    }
 
     #[test]
     fn startup_rotation_requires_explicit_enable() {

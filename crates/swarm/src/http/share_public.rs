@@ -346,7 +346,7 @@ fn parse_files_pointer(s: &str) -> Option<String> {
     }
     // Reject CR/LF and other shenanigans — the dyson stamp is a
     // single-line URL with bounded charset.
-    if s.contains(|c: char| c == '\n' || c == '\r' || c == ' ') {
+    if s.contains(['\n', '\r', ' ']) {
         return None;
     }
     if s.len() > 256 {
