@@ -86,8 +86,8 @@ impl SqlxTokenStore {
         let lookup = token_lookup_key(&token);
         sqlx::query(
             "INSERT INTO proxy_tokens \
-             (token, token_lookup, instance_id, provider, created_at, revoked_at) \
-             VALUES (?, ?, ?, ?, ?, NULL)",
+             (token, token_lookup, instance_id, provider, created_at, revoked_at, expected_src_ip) \
+             VALUES (?, ?, ?, ?, ?, NULL, NULL)",
         )
         .bind(&stored_token)
         .bind(&lookup)
@@ -130,10 +130,31 @@ impl TokenStore for SqlxTokenStore {
             .await
     }
 
+    async fn bind_expected_src_ip(
+        &self,
+        instance_id: &str,
+        expected_src_ip: &str,
+    ) -> Result<(), StoreError> {
+        let expected_src_ip = expected_src_ip.trim();
+        if expected_src_ip.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE proxy_tokens SET expected_src_ip = ? \
+             WHERE instance_id = ? AND revoked_at IS NULL",
+        )
+        .bind(expected_src_ip)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError> {
         let lookup = token_lookup_key(token);
         let row = sqlx::query(
-            "SELECT token, instance_id, provider, created_at, revoked_at \
+            "SELECT token, instance_id, provider, created_at, revoked_at, expected_src_ip \
              FROM proxy_tokens \
              WHERE token_lookup = ? AND revoked_at IS NULL \
              LIMIT 1",
@@ -156,6 +177,7 @@ impl TokenStore for SqlxTokenStore {
             provider: row.get("provider"),
             created_at: row.get("created_at"),
             revoked_at: row.get("revoked_at"),
+            expected_src_ip: row.get("expected_src_ip"),
         }))
     }
 

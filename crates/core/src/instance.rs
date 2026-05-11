@@ -536,7 +536,7 @@ impl InstanceService {
             managed.remove(ENV_STATE_SYNC_TOKEN);
         }
         let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
-        Ok(self
+        let info = self
             .cube
             .create_sandbox(CreateSandboxArgs {
                 template_id: plan.target_template_id.clone(),
@@ -544,7 +544,25 @@ impl InstanceService {
                 from_snapshot_path,
                 resolved_policy: plan.resolved_policy.clone(),
             })
-            .await?)
+            .await?;
+        self.bind_runtime_tokens_to_sandbox_source(&source.id, &info)
+            .await?;
+        Ok(info)
+    }
+
+    async fn bind_runtime_tokens_to_sandbox_source(
+        &self,
+        instance_id: &str,
+        info: &SandboxInfo,
+    ) -> Result<(), SwarmError> {
+        let source_ip = info.host_ip.trim();
+        if source_ip.is_empty() {
+            return Ok(());
+        }
+        self.tokens
+            .bind_expected_src_ip(instance_id, source_ip)
+            .await?;
+        Ok(())
     }
 
     async fn replay_state_files_and_configure(
@@ -1636,6 +1654,8 @@ impl InstanceService {
                 resolved_policy: resolved.clone(),
             })
             .await?;
+        self.bind_runtime_tokens_to_sandbox_source(&source.id, &info)
+            .await?;
         tracing::info!(
             instance = %source.id,
             new_sandbox = %info.sandbox_id,
@@ -2458,6 +2478,8 @@ impl InstanceService {
                 return Err(e.into());
             }
         };
+        self.bind_runtime_tokens_to_sandbox_source(&id, &info)
+            .await?;
         self.instances
             .set_cube_sandbox_id(&id, &info.sandbox_id)
             .await?;
@@ -3754,6 +3776,8 @@ impl InstanceService {
                 return Err(e.into());
             }
         };
+        self.bind_runtime_tokens_to_sandbox_source(&id, &info)
+            .await?;
 
         self.instances
             .set_cube_sandbox_id(&id, &info.sandbox_id)

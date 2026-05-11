@@ -315,6 +315,7 @@ pub struct TokenRecord {
     pub provider: String,
     pub created_at: i64,
     pub revoked_at: Option<i64>,
+    pub expected_src_ip: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -491,6 +492,14 @@ pub trait TokenStore: Send + Sync {
         instance_id: &str,
         generation: &str,
     ) -> Result<String, StoreError>;
+    /// Bind every live token for `instance_id` to the sandbox source IP
+    /// expected at the swarm proxy boundary. Rotation/recreate paths call
+    /// this again after Cube assigns a replacement sandbox.
+    async fn bind_expected_src_ip(
+        &self,
+        instance_id: &str,
+        expected_src_ip: &str,
+    ) -> Result<(), StoreError>;
     async fn resolve(&self, token: &str) -> Result<Option<TokenRecord>, StoreError>;
     async fn revoke_for_instance(&self, instance_id: &str) -> Result<(), StoreError>;
     /// Revoke a single proxy_token by its plaintext value (B1).

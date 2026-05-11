@@ -764,7 +764,11 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     };
     tracing::info!(bind = %cfg.bind, db = %cfg.db_path.display(), "swarm started");
 
-    let server = axum::serve(listener, app).with_graceful_shutdown(async {
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
         let _ = wait_for_shutdown().await;
     });
     if let Err(err) = server.await {

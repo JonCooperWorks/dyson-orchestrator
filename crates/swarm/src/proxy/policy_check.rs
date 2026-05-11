@@ -77,6 +77,7 @@ mod tests {
             provider: "*".into(),
             created_at: 0,
             revoked_at: None,
+            expected_src_ip: None,
         }
     }
 

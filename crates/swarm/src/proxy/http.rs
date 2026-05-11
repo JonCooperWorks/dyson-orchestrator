@@ -12,12 +12,13 @@
 //!    then streams the response back via `axum::body::Body::from_stream`.
 //! 6. Writes an `llm_audit` row regardless of outcome.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode, Uri, header};
 use axum::routing::any;
 use futures::TryStreamExt;
@@ -65,6 +66,7 @@ pub fn router(state: Arc<ProxyService>) -> Router {
 }
 
 async fn handle(
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<ProxyService>>,
     Path((provider, rest)): Path<(String, String)>,
     req: Request,
@@ -84,6 +86,9 @@ async fn handle(
         Ok(None) => return error_response(StatusCode::UNAUTHORIZED, "invalid bearer"),
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "token store error"),
     };
+    if !source_ip_allowed(peer_addr.ip(), record.expected_src_ip.as_deref()) {
+        return error_response(StatusCode::UNAUTHORIZED, "invalid bearer");
+    }
 
     // 1b. Resolve owner. Per-user budgets need it; per-instance
     // policy/budget were a phase-2 deviation we're correcting here.
@@ -421,6 +426,32 @@ async fn handle(
     response
         .body(resp_body)
         .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "response build failed"))
+}
+
+fn source_ip_allowed(peer_ip: IpAddr, expected_src_ip: Option<&str>) -> bool {
+    let Some(expected_src_ip) = expected_src_ip
+        .map(str::trim)
+        .filter(|expected| !expected.is_empty())
+    else {
+        return true;
+    };
+    let Ok(expected_ip) = expected_src_ip.parse::<IpAddr>() else {
+        return false;
+    };
+    ct_ip_eq(peer_ip, expected_ip)
+}
+
+fn ct_ip_eq(a: IpAddr, b: IpAddr) -> bool {
+    use subtle::ConstantTimeEq;
+
+    bool::from(ip_octets(a).ct_eq(&ip_octets(b)))
+}
+
+fn ip_octets(ip: IpAddr) -> [u8; 16] {
+    match ip {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+        IpAddr::V6(v6) => v6.octets(),
+    }
 }
 
 /// Allowlist incoming headers — the curated set listed in
@@ -860,7 +891,12 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         format!("http://{addr}")
     }
