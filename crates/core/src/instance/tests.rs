@@ -2238,6 +2238,133 @@ async fn runtime_config_sync_recovers_configuring_rows() {
 }
 
 #[tokio::test]
+async fn runtime_config_sync_replays_mirrored_chats_for_configuring_rows() {
+    let pool = open_in_memory().await.unwrap();
+    let owner = "c0ffee00".repeat(4);
+    sqlx::query("INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)")
+        .bind(&owner)
+        .bind(&owner)
+        .bind(0i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let cube = MockCube::new();
+    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let instances: Arc<dyn InstanceStore> = Arc::new(SqlxInstanceStore::new(
+        pool.clone(),
+        crate::db::test_system_cipher(),
+    ));
+    let recorder = Arc::new(RecordingReconfigurer::default());
+    let keys = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ciphers: Arc<dyn crate::envelope::CipherDirectory> =
+        Arc::new(crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap());
+    let state_files = Arc::new(crate::state_files::StateFileService::new(
+        pool.clone(),
+        ciphers,
+    ));
+    let svc = Arc::new(
+        InstanceService::new(
+            cube,
+            instances.clone(),
+            tokens,
+            "https://dyson.example.com/llm",
+        )
+        .with_reconfigurer(recorder.clone())
+        .with_state_files(state_files.clone()),
+    );
+
+    let created = svc
+        .create(
+            &owner,
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("restore-chat".into()),
+                task: Some("keep the sidebar".into()),
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_pushes(&recorder, 1).await;
+    recorder.pushed.lock().unwrap().clear();
+    recorder.restored.lock().unwrap().clear();
+    recorder.events.lock().unwrap().clear();
+
+    state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &created.id,
+                owner_id: &owner,
+                namespace: "workspace",
+                path: "IDENTITY.md",
+                mime: Some("text/markdown"),
+                updated_at: 1_777_760_000,
+            },
+            b"# IDENTITY.md\n\n- **Name:** restore-chat",
+        )
+        .await
+        .unwrap();
+    state_files
+        .ingest(
+            crate::state_files::StateFileMeta {
+                instance_id: &created.id,
+                owner_id: &owner,
+                namespace: "chats",
+                path: "c-0001/transcript.json",
+                mime: Some("application/json"),
+                updated_at: 1_777_760_001,
+            },
+            br#"[{"role":"user","content":"this chat must survive Configuring recovery"}]"#,
+        )
+        .await
+        .unwrap();
+    instances
+        .update_status(&created.id, InstanceStatus::Configuring)
+        .await
+        .unwrap();
+
+    let (visited, succeeded) = svc
+        .sync_runtime_config_all()
+        .await
+        .expect("startup sync must tolerate Configuring rows with mirrored state");
+    assert_eq!((visited, succeeded), (1, 1));
+
+    let restored = recorder.restored.lock().unwrap();
+    assert!(
+        restored
+            .iter()
+            .any(|(_, _, body)| body.namespace == "chats"
+                && body.path == "c-0001/transcript.json"),
+        "Configuring recovery must replay mirrored chat state before marking the row Live; restored={restored:?}"
+    );
+    drop(restored);
+
+    let row = instances.get(&created.id).await.unwrap().unwrap();
+    assert_eq!(
+        row.status,
+        InstanceStatus::Live,
+        "successful Configuring state replay must mark the row Live"
+    );
+
+    let events = recorder.events.lock().unwrap();
+    assert!(
+        events.first().map(String::as_str) == Some("push")
+            && events
+                .iter()
+                .any(|event| event == "restore:chats:c-0001/transcript.json")
+            && events.last().map(String::as_str) == Some("push"),
+        "Configuring recovery must configure paths, replay chats, then re-enable state sync: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn runtime_config_sync_failure_is_visible_on_instance_probe_status() {
     let (svc, cube, tokens, instances) = build().await;
     let created = svc
