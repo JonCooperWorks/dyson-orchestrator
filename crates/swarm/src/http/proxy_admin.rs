@@ -205,6 +205,7 @@ mod tests {
             instances: instance_svc,
             snapshots: snapshot_svc,
             users: users_store,
+            sessions: Arc::new(crate::db::sessions::SqliteSessionStore::new(pool.clone())),
             admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
             prober: Arc::new(StubProber),
             tokens: tokens_store.clone(),

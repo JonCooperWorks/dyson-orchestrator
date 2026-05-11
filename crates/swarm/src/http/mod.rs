@@ -65,6 +65,7 @@ pub struct AppState {
     pub prober: Arc<dyn HealthProber>,
     pub tokens: Arc<dyn TokenStore>,
     pub users: Arc<dyn crate::traits::UserStore>,
+    pub sessions: Arc<dyn crate::traits::SessionStore>,
     pub admin_audit: Arc<dyn crate::traits::AdminAuditStore>,
     pub sandbox_domain: String,
     /// Public hostname swarm serves on, e.g. `"swarm.example.com"`.
@@ -345,6 +346,8 @@ mod tests {
         let users_store: Arc<dyn crate::traits::UserStore> = Arc::new(
             crate::db::users::SqlxUserStore::new(pool.clone(), cipher_dir.clone()),
         );
+        let sessions_store: Arc<dyn crate::traits::SessionStore> =
+            Arc::new(crate::db::sessions::SqliteSessionStore::new(pool.clone()));
         let instance_svc = Arc::new(InstanceService::new(
             cube.clone(),
             instances_store.clone(),
@@ -398,6 +401,7 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store,
             users: users_store.clone(),
+            sessions: sessions_store,
             admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
             sandbox_domain: "cube.test".into(),
             hostname: None,
@@ -598,7 +602,11 @@ mod tests {
             .expect("session response must set cookie")
             .to_str()
             .unwrap();
-        assert!(cookie.starts_with("dyson_swarm_session=access.jwt.token"));
+        assert!(cookie.starts_with("dyson_swarm_session=ses_"));
+        assert!(
+            !cookie.contains("access.jwt.token"),
+            "session cookie must not contain the OIDC JWT"
+        );
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Strict"));
         assert!(cookie.contains("Secure"));

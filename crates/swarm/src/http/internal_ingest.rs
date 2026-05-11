@@ -377,6 +377,7 @@ mod tests {
             prober: Arc::new(StubProber),
             tokens: tokens_store,
             users: users_store,
+            sessions: Arc::new(crate::db::sessions::SqliteSessionStore::new(pool.clone())),
             admin_audit: Arc::new(crate::db::audit::SqliteAdminAuditStore::new(pool.clone())),
             sandbox_domain: "cube.test".into(),
             hostname: None,

@@ -70,6 +70,15 @@ pub struct UserApiKey {
     pub revoked_at: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub id: String,
+    pub user_id: String,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
 #[async_trait]
 pub trait UserStore: Send + Sync {
     /// Create a brand-new row. The caller is responsible for the id (uuid).
@@ -98,6 +107,14 @@ pub trait UserStore: Send + Sync {
     async fn mint_api_key(&self, user_id: &str, label: Option<&str>) -> Result<String, StoreError>;
     async fn resolve_api_key(&self, token: &str) -> Result<Option<UserApiKey>, StoreError>;
     async fn revoke_api_key(&self, token: &str) -> Result<(), StoreError>;
+}
+
+#[async_trait]
+pub trait SessionStore: Send + Sync {
+    async fn insert(&self, row: &SessionRow) -> Result<(), StoreError>;
+    async fn get_active(&self, id: &str) -> Result<Option<SessionRow>, StoreError>;
+    async fn touch(&self, id: &str, now: i64) -> Result<(), StoreError>;
+    async fn revoke(&self, id: &str, now: i64) -> Result<(), StoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

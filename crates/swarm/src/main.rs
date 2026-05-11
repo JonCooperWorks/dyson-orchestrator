@@ -22,7 +22,7 @@ use dyson_swarm::{
     snapshot::SnapshotService,
     traits::{
         AdminAuditStore, AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore,
-        McpAuditStore, PolicyStore, SnapshotStore, TokenStore, UserStore,
+        McpAuditStore, PolicyStore, SessionStore, SnapshotStore, TokenStore, UserStore,
     },
     ttl,
 };
@@ -189,6 +189,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         pool.clone(),
         cipher_dir.clone(),
     ));
+    let sessions_store: Arc<dyn SessionStore> =
+        Arc::new(db::sessions::SqliteSessionStore::new(pool.clone()));
     let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
         pool.clone(),
         cipher_dir.clone(),
@@ -647,7 +649,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let user_auth = UserAuthState::new(
         Arc::new(ChainAuthenticator::new(auth_links)),
         users_store.clone(),
-    );
+    )
+    .with_sessions(sessions_store.clone());
 
     // Per-instance webhook ("tasks") plumbing.  Stores reuse the same
     // sqlite pool every other table sits on; the dispatcher uses the
@@ -718,6 +721,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         prober,
         tokens: tokens_store,
         users: users_store,
+        sessions: sessions_store,
         admin_audit: admin_audit_store,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
         hostname: cfg.hostname.clone(),

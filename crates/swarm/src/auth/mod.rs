@@ -31,6 +31,8 @@ use serde_json::Value as JsonValue;
 
 pub use admin::{AuthState, caller_has_role, require_admin_role};
 
+pub const SESSION_COOKIE_NAME: &str = "dyson_swarm_session";
+
 /// Identity returned by an [`Authenticator`]. The `subject` is the IdP-stable
 /// id (OIDC `sub` for JWTs, the api_key's `user_id` for bearers).
 #[derive(Debug, Clone)]
@@ -76,7 +78,10 @@ pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, headers: &HeaderMap) -> Result<UserIdentity, AuthError>;
 }
 
-pub use user::{CallerIdentity, UserAuthState, resolve_active_user, user_middleware};
+pub use user::{
+    CallerIdentity, UserAuthState, resolve_active_user, resolve_active_user_with_sessions,
+    user_middleware,
+};
 
 /// Pull the resolved caller out of an `axum::http::Extensions` map. Routes
 /// receive this via the `Extension(CallerIdentity)` extractor, but we keep

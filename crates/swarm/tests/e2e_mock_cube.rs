@@ -309,6 +309,9 @@ async fn full_walkthrough() {
         prober,
         tokens: tokens_store.clone(),
         users: users_store,
+        sessions: Arc::new(dyson_swarm::db::sessions::SqliteSessionStore::new(
+            pool.clone(),
+        )),
         admin_audit: Arc::new(dyson_swarm::db::audit::SqliteAdminAuditStore::new(
             pool.clone(),
         )),

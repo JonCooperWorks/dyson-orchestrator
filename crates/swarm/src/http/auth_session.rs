@@ -8,11 +8,13 @@ use axum::routing::post;
 use axum::{Extension, Router};
 use serde::Deserialize;
 
-use crate::auth::{CallerIdentity, UserAuthState, extract_bearer, user_middleware};
+use crate::auth::user::{is_session_id, read_session_cookie};
+use crate::auth::{
+    CallerIdentity, SESSION_COOKIE_NAME, UserAuthState, extract_bearer, user_middleware,
+};
+use crate::traits::SessionRow;
 
-use super::AppState;
-
-const COOKIE_NAME: &str = "dyson_swarm_session";
+use super::{AppState, store_err_to_status};
 
 #[derive(Debug, Deserialize)]
 struct SessionBody {
@@ -33,22 +35,47 @@ pub fn router(state: AppState, user_auth: UserAuthState) -> Router {
 
 async fn create(
     State(state): State<AppState>,
-    Extension(_caller): Extension<CallerIdentity>,
+    Extension(caller): Extension<CallerIdentity>,
     headers: HeaderMap,
     body: Option<Json<SessionBody>>,
 ) -> Response {
-    let Some(token) = extract_bearer(&headers) else {
+    if extract_bearer(&headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    let now = crate::now_secs();
+    let session_id = mint_session_id();
+    let row = SessionRow {
+        id: session_id.clone(),
+        user_id: caller.user_id,
+        created_at: now,
+        last_seen_at: now,
+        revoked_at: None,
+    };
+    if let Err(err) = state.sessions.insert(&row).await {
+        tracing::warn!(error = %err, "session create failed");
+        return store_err_to_status(err).into_response();
+    }
     let mut resp = StatusCode::NO_CONTENT.into_response();
-    let cookie = build_cookie(&state, &token, body.and_then(|Json(b)| b.expires_at), false);
+    let cookie = build_cookie(
+        &state,
+        &session_id,
+        body.and_then(|Json(b)| b.expires_at),
+        false,
+    );
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, value);
     }
     resp
 }
 
-async fn clear(State(state): State<AppState>) -> Response {
+async fn clear(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(session_id) = read_session_cookie(&headers)
+        && is_session_id(&session_id)
+        && let Err(err) = state.sessions.revoke(&session_id, crate::now_secs()).await
+    {
+        tracing::warn!(error = %err, "session revoke failed");
+        return store_err_to_status(err).into_response();
+    }
     let mut resp = StatusCode::NO_CONTENT.into_response();
     let cookie = build_cookie(&state, "", None, true);
     if let Ok(value) = HeaderValue::from_str(&cookie) {
@@ -59,7 +86,7 @@ async fn clear(State(state): State<AppState>) -> Response {
 
 fn build_cookie(state: &AppState, token: &str, expires_at: Option<i64>, clear: bool) -> String {
     let mut parts = vec![
-        format!("{COOKIE_NAME}={token}"),
+        format!("{SESSION_COOKIE_NAME}={token}"),
         "Path=/".to_owned(),
         "SameSite=Strict".to_owned(),
         "HttpOnly".to_owned(),
@@ -78,6 +105,10 @@ fn build_cookie(state: &AppState, token: &str, expires_at: Option<i64>, clear: b
         parts.push(format!("Max-Age={max_age}"));
     }
     parts.join("; ")
+}
+
+fn mint_session_id() -> String {
+    format!("ses_{}", uuid::Uuid::new_v4().simple())
 }
 
 fn cookie_domain(host: Option<&str>) -> Option<String> {

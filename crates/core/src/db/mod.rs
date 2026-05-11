@@ -23,6 +23,7 @@ pub mod mcp_catalog;
 pub mod policies;
 pub mod runtime_migrations;
 pub mod secrets;
+pub mod sessions;
 pub mod shares;
 pub mod skill_marketplace;
 pub mod snapshots;

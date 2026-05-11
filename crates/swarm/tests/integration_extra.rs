@@ -424,6 +424,9 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         prober,
         tokens: tokens_store.clone(),
         users: users_store.clone(),
+        sessions: Arc::new(dyson_swarm::db::sessions::SqliteSessionStore::new(
+            pool.clone(),
+        )),
         admin_audit: Arc::new(dyson_swarm::db::audit::SqliteAdminAuditStore::new(
             pool.clone(),
         )),

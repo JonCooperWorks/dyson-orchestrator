@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
-use crate::auth::{AuthError, Authenticator, UserIdentity};
-use crate::traits::{UserRow, UserStatus, UserStore};
+use crate::auth::{AuthError, Authenticator, SESSION_COOKIE_NAME, UserIdentity};
+use crate::traits::{SessionStore, UserRow, UserStatus, UserStore};
 
 /// Stamped on request extensions by [`user_middleware`]. Routes read it via
 /// the [`CallerExtractor`] (or directly from `req.extensions()`).
@@ -30,6 +30,7 @@ pub struct CallerIdentity {
 pub struct UserAuthState {
     pub authenticator: Arc<dyn Authenticator>,
     pub users: Arc<dyn UserStore>,
+    pub sessions: Option<Arc<dyn SessionStore>>,
 }
 
 impl UserAuthState {
@@ -37,7 +38,13 @@ impl UserAuthState {
         Self {
             authenticator,
             users,
+            sessions: None,
         }
+    }
+
+    pub fn with_sessions(mut self, sessions: Arc<dyn SessionStore>) -> Self {
+        self.sessions = Some(sessions);
+        self
     }
 }
 
@@ -49,6 +56,7 @@ pub async fn user_middleware(
     match resolve_caller(
         state.authenticator.as_ref(),
         state.users.as_ref(),
+        state.sessions.as_deref(),
         req.headers(),
     )
     .await
@@ -72,7 +80,18 @@ pub async fn resolve_active_user(
     users: &dyn UserStore,
     headers: &axum::http::HeaderMap,
 ) -> Result<String, Response> {
-    resolve_caller(authenticator, users, headers)
+    resolve_caller(authenticator, users, None, headers)
+        .await
+        .map(|c| c.user_id)
+}
+
+pub async fn resolve_active_user_with_sessions(
+    authenticator: &dyn Authenticator,
+    users: &dyn UserStore,
+    sessions: Option<&dyn SessionStore>,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, Response> {
+    resolve_caller(authenticator, users, sessions, headers)
         .await
         .map(|c| c.user_id)
 }
@@ -80,21 +99,31 @@ pub async fn resolve_active_user(
 async fn resolve_caller(
     authenticator: &dyn Authenticator,
     users: &dyn UserStore,
+    sessions: Option<&dyn SessionStore>,
     headers: &axum::http::HeaderMap,
 ) -> Result<CallerIdentity, Response> {
-    let identity = match authenticator.authenticate(headers).await {
-        Ok(id) => id,
-        Err(AuthError::Missing | AuthError::Unsupported) => {
-            return Err(StatusCode::UNAUTHORIZED.into_response());
+    let mut session_to_touch = None;
+    let identity = if crate::auth::extract_bearer(headers).is_some() {
+        authenticate_bearer(authenticator, headers).await?
+    } else if let Some(sessions) = sessions {
+        match resolve_session_identity(sessions, users, headers).await {
+            Ok((identity, session_id)) => {
+                session_to_touch = Some(session_id);
+                identity
+            }
+            Err(SessionResolveError::Missing) => {
+                authenticate_bearer(authenticator, headers).await?
+            }
+            Err(SessionResolveError::Invalid) => {
+                return Err(StatusCode::UNAUTHORIZED.into_response());
+            }
+            Err(SessionResolveError::Backend(e)) => {
+                tracing::warn!(error = %e, "session auth backend failure");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
         }
-        Err(AuthError::Invalid(reason)) => {
-            tracing::debug!(%reason, "auth invalid");
-            return Err(StatusCode::UNAUTHORIZED.into_response());
-        }
-        Err(AuthError::Backend(e)) => {
-            tracing::warn!(error = %e, "auth backend failure");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
+    } else {
+        authenticate_bearer(authenticator, headers).await?
     };
 
     let user = match resolve_or_provision(users, &identity).await {
@@ -118,11 +147,100 @@ async fn resolve_caller(
     if let Err(e) = users.touch_last_seen(&user.id).await {
         tracing::debug!(error = %e, user = %user.id, "touch_last_seen failed");
     }
+    if let (Some(sessions), Some(session_id)) = (sessions, session_to_touch.as_deref())
+        && let Err(e) = sessions.touch(session_id, crate::now_secs()).await
+    {
+        tracing::debug!(error = %e, session = %session_id, "session touch failed");
+    }
 
     Ok(CallerIdentity {
         user_id: user.id,
         identity,
     })
+}
+
+async fn authenticate_bearer(
+    authenticator: &dyn Authenticator,
+    headers: &axum::http::HeaderMap,
+) -> Result<UserIdentity, Response> {
+    let identity = match authenticator.authenticate(headers).await {
+        Ok(id) => id,
+        Err(AuthError::Missing | AuthError::Unsupported) => {
+            return Err(StatusCode::UNAUTHORIZED.into_response());
+        }
+        Err(AuthError::Invalid(reason)) => {
+            tracing::debug!(%reason, "auth invalid");
+            return Err(StatusCode::UNAUTHORIZED.into_response());
+        }
+        Err(AuthError::Backend(e)) => {
+            tracing::warn!(error = %e, "auth backend failure");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
+    Ok(identity)
+}
+
+enum SessionResolveError {
+    Missing,
+    Invalid,
+    Backend(String),
+}
+
+async fn resolve_session_identity(
+    sessions: &dyn SessionStore,
+    users: &dyn UserStore,
+    headers: &axum::http::HeaderMap,
+) -> Result<(UserIdentity, String), SessionResolveError> {
+    let session_id =
+        read_cookie(headers, SESSION_COOKIE_NAME).ok_or(SessionResolveError::Missing)?;
+    if !is_session_id(&session_id) {
+        return Err(SessionResolveError::Invalid);
+    }
+    let session = sessions
+        .get_active(&session_id)
+        .await
+        .map_err(|e| SessionResolveError::Backend(e.to_string()))?
+        .ok_or(SessionResolveError::Invalid)?;
+    let user = users
+        .get(&session.user_id)
+        .await
+        .map_err(|e| SessionResolveError::Backend(e.to_string()))?
+        .ok_or(SessionResolveError::Invalid)?;
+    Ok((
+        UserIdentity {
+            subject: user.subject,
+            email: user.email,
+            display_name: user.display_name,
+            source: crate::auth::AuthSource::Oidc,
+            claims: serde_json::Value::Null,
+        },
+        session_id,
+    ))
+}
+
+pub(crate) fn read_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    read_cookie(headers, SESSION_COOKIE_NAME)
+}
+
+fn read_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some((k, v)) = pair.split_once('=')
+            && k == name
+            && !v.is_empty()
+        {
+            return Some(v.to_owned());
+        }
+    }
+    None
+}
+
+pub(crate) fn is_session_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("ses_") else {
+        return false;
+    };
+    rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 async fn resolve_or_provision(
