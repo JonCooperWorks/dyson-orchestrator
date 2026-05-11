@@ -491,7 +491,8 @@ async fn tools_call_forward_writes_mcp_audit_row() {
     let (svc, token, _keys) = build_mcp_proxy_fixture(pool.clone(), upstream_url).await;
     let base = spawn_mcp_proxy(svc).await;
 
-    let resp = reqwest::Client::new()
+    let client = dyson_swarm_core::http::InternalHttpClient::new().unwrap();
+    let resp = client
         .post(format!("{base}/mcp/{MCP_TEST_INSTANCE}/{MCP_TEST_SERVER}"))
         .bearer_auth(token)
         .json(&serde_json::json!({
@@ -535,7 +536,7 @@ async fn tools_call_forward_is_rate_limited_per_owner_and_server() {
     let (upstream_url, calls) = spawn_mcp_upstream().await;
     let (svc, token, _keys) = build_mcp_proxy_fixture(pool, upstream_url).await;
     let base = spawn_mcp_proxy(svc).await;
-    let client = reqwest::Client::new();
+    let client = dyson_swarm_core::http::InternalHttpClient::new().unwrap();
 
     let mut saw_429 = false;
     for _ in 0..64 {
@@ -567,7 +568,7 @@ async fn tools_call_forward_is_rate_limited_per_owner_and_server() {
     );
 }
 
-async fn spawn_oversized_runtime_helper() -> (tempfile::TempDir, std::path::PathBuf) {
+fn spawn_oversized_runtime_helper() -> (tempfile::TempDir, std::path::PathBuf) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -603,7 +604,7 @@ async fn spawn_oversized_runtime_helper() -> (tempfile::TempDir, std::path::Path
 async fn runtime_forward_rejects_oversized_single_line_response() {
     let pool = open_in_memory().await.unwrap();
     create_test_mcp_audit_table(&pool).await;
-    let (_runtime_tmp, socket) = spawn_oversized_runtime_helper().await;
+    let (_runtime_tmp, socket) = spawn_oversized_runtime_helper();
     let entry = McpServerEntry {
         url: "docker://example/mcp".into(),
         auth: McpAuthSpec::None,
@@ -623,7 +624,8 @@ async fn runtime_forward_rejects_oversized_single_line_response() {
     let (svc, token, _keys) = build_mcp_proxy_fixture_for_entry(pool, entry, Some(socket)).await;
     let base = spawn_mcp_proxy(svc).await;
 
-    let resp = reqwest::Client::new()
+    let client = dyson_swarm_core::http::InternalHttpClient::new().unwrap();
+    let resp = client
         .post(format!("{base}/mcp/{MCP_TEST_INSTANCE}/{MCP_TEST_SERVER}"))
         .bearer_auth(token)
         .json(&serde_json::json!({

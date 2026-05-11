@@ -41,7 +41,7 @@ async fn create(
 ) -> Response {
     if extract_bearer(&headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
-    };
+    }
     let now = crate::now_secs();
     let session_id = mint_session_id();
     let row = SessionRow {
