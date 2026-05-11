@@ -382,6 +382,26 @@ async fn build_mcp_proxy_fixture(
     pool: SqlitePool,
     upstream_url: String,
 ) -> (Arc<McpService>, String, tempfile::TempDir) {
+    let entry = McpServerEntry {
+        url: upstream_url,
+        auth: McpAuthSpec::None,
+        headers: std::collections::HashMap::new(),
+        runtime: None,
+        docker_catalog: None,
+        raw_vscode_config: None,
+        oauth_tokens: None,
+        tools_catalog: None,
+        last_check_error: None,
+        enabled_tools: None,
+    };
+    build_mcp_proxy_fixture_for_entry(pool, entry, None).await
+}
+
+async fn build_mcp_proxy_fixture_for_entry(
+    pool: SqlitePool,
+    entry: McpServerEntry,
+    runtime_socket_path: Option<std::path::PathBuf>,
+) -> (Arc<McpService>, String, tempfile::TempDir) {
     sqlx::query(
         "INSERT OR IGNORE INTO users (id, subject, status, created_at) \
          VALUES (?, ?, 'active', 0)",
@@ -429,18 +449,6 @@ async fn build_mcp_proxy_fixture(
     let user_secret_store: Arc<dyn crate::traits::UserSecretStore> =
         Arc::new(SqlxUserSecretStore::new(pool.clone()));
     let user_secrets = Arc::new(UserSecretsService::new(user_secret_store, cipher_dir));
-    let entry = McpServerEntry {
-        url: upstream_url,
-        auth: McpAuthSpec::None,
-        headers: std::collections::HashMap::new(),
-        runtime: None,
-        docker_catalog: None,
-        raw_vscode_config: None,
-        oauth_tokens: None,
-        tools_catalog: None,
-        last_check_error: None,
-        enabled_tools: None,
-    };
     mcp_servers::put(
         &user_secrets,
         MCP_TEST_OWNER,
@@ -453,6 +461,7 @@ async fn build_mcp_proxy_fixture(
 
     let svc = McpService::new(tokens, instances, user_secrets, None)
         .unwrap()
+        .with_runtime_socket(runtime_socket_path)
         .with_mcp_audit(Arc::new(crate::db::audit::SqliteMcpAuditStore::new(
             pool.clone(),
         )))
@@ -555,5 +564,88 @@ async fn tools_call_forward_is_rate_limited_per_owner_and_server() {
     assert!(
         calls.load(Ordering::SeqCst) < 64,
         "MCP rate limit must refuse excess calls before forwarding upstream"
+    );
+}
+
+async fn spawn_oversized_runtime_helper() -> (tempfile::TempDir, std::path::PathBuf) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    const OVERSIZED_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("runtime.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request = String::new();
+        reader.read_line(&mut request).await.unwrap();
+        let mut stream = reader.into_inner();
+        stream
+            .write_all(
+                br#"{"status":200,"content_type":"application/json","body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"payload\":\""#,
+            )
+            .await
+            .unwrap();
+        let chunk = vec![b'a'; 1024 * 1024];
+        for _ in 0..(OVERSIZED_BODY_BYTES / chunk.len()) {
+            stream.write_all(&chunk).await.unwrap();
+        }
+        stream.write_all(br#"\"}}"}"#).await.unwrap();
+        stream.write_all(b"\n").await.unwrap();
+        stream.flush().await.unwrap();
+    });
+    (tmp, socket)
+}
+
+#[tokio::test]
+async fn runtime_forward_rejects_oversized_single_line_response() {
+    let pool = open_in_memory().await.unwrap();
+    create_test_mcp_audit_table(&pool).await;
+    let (_runtime_tmp, socket) = spawn_oversized_runtime_helper().await;
+    let entry = McpServerEntry {
+        url: "docker://example/mcp".into(),
+        auth: McpAuthSpec::None,
+        headers: std::collections::HashMap::new(),
+        runtime: Some(McpRuntimeSpec::DockerStdio {
+            command: "docker".into(),
+            args: vec!["run".into(), "example/mcp".into()],
+            env: std::collections::HashMap::new(),
+        }),
+        docker_catalog: None,
+        raw_vscode_config: None,
+        oauth_tokens: None,
+        tools_catalog: None,
+        last_check_error: None,
+        enabled_tools: None,
+    };
+    let (svc, token, _keys) =
+        build_mcp_proxy_fixture_for_entry(pool, entry, Some(socket)).await;
+    let base = spawn_mcp_proxy(svc).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/mcp/{MCP_TEST_INSTANCE}/{MCP_TEST_SERVER}"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "search", "arguments": {}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.bytes().await.unwrap();
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "oversized MCP runtime response must be refused with 502"
+    );
+    assert!(
+        body.len() < 1024 * 1024,
+        "oversized MCP runtime response must not be forwarded as a full client body"
     );
 }
