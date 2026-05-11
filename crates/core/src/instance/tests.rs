@@ -2081,6 +2081,56 @@ async fn startup_runtime_config_sync_visits_each_live_instance_with_its_token() 
 }
 
 #[tokio::test]
+async fn runtime_config_sync_recovers_configuring_rows() {
+    let (svc, _cube, _tokens, instances, recorder) = build_with_recorder().await;
+    let created = svc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_pushes(&recorder, 1).await;
+    recorder.pushed.lock().unwrap().clear();
+    instances
+        .update_status(&created.id, InstanceStatus::Configuring)
+        .await
+        .unwrap();
+
+    let (visited, succeeded) = svc
+        .sync_runtime_config_all()
+        .await
+        .expect("startup sync must tolerate Configuring rows");
+    assert_eq!(
+        visited, 1,
+        "startup sync must revisit Configuring rows left behind by a swarm crash"
+    );
+    assert_eq!(
+        succeeded, 1,
+        "Configuring row with a healthy sandbox should reconfigure successfully"
+    );
+    let row = instances.get(&created.id).await.unwrap().unwrap();
+    assert_eq!(
+        row.status,
+        InstanceStatus::Live,
+        "successful Configuring recovery must mark the row Live"
+    );
+    assert_eq!(
+        recorder.pushed.lock().unwrap().len(),
+        1,
+        "Configuring recovery must push the desired runtime config"
+    );
+}
+
+#[tokio::test]
 async fn runtime_config_sync_failure_is_visible_on_instance_probe_status() {
     let (svc, cube, tokens, instances) = build().await;
     let created = svc
