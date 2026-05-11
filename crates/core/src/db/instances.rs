@@ -495,7 +495,7 @@ impl InstanceStore for SqlxInstanceStore {
                 last_probe_status = NULL, \
                 last_active_at = ?7, \
                 rotated_to = NULL, \
-                status = 'live' \
+                status = 'configuring' \
              WHERE id = ?8",
         )
         .bind(new_cube_sandbox_id)

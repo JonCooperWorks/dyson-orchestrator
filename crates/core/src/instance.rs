@@ -634,17 +634,18 @@ impl InstanceService {
             })
     }
 
-    async fn push_configure_best_effort(
+    async fn push_configure_after_swap(
         &self,
         owner_id: &str,
         source: &InstanceRow,
         runtime_tokens: &RuntimeTokens,
         sandbox_id: &str,
         operation: &'static str,
-    ) {
-        let Some(reconfigurer) = self.reconfigurer.as_ref() else {
-            return;
-        };
+    ) -> Result<(), SwarmError> {
+        let reconfigurer = self
+            .reconfigurer
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("dyson reconfigurer not configured".into()))?;
         let body = self
             .configure_body_for_existing_row(
                 owner_id,
@@ -654,16 +655,13 @@ impl InstanceService {
                 &runtime_tokens.state_sync,
             )
             .await;
-        if let Err(err) =
-            push_with_retry(reconfigurer.as_ref(), &source.id, sandbox_id, &body).await
-        {
-            tracing::warn!(
-                instance = %source.id,
-                error = %err,
-                operation,
-                "in-place swap: configure-push failed; will be retried by next sweep"
-            );
-        }
+        push_with_retry(reconfigurer.as_ref(), &source.id, sandbox_id, &body)
+            .await
+            .map_err(|err| {
+                SwarmError::Internal(format!(
+                    "{operation} configure-push failed after swap: {err}"
+                ))
+            })
     }
 
     async fn destroy_old_sandbox_after_in_place_swap(
@@ -1514,22 +1512,22 @@ impl InstanceService {
         }
 
         // Phase 5: push the configure envelope so the new cube
-        // boots out of warmup-placeholder mode.  Mirrors the create
-        // path's body shape — name, task, models, image-gen,
-        // mcp_servers.  Best-effort: a failure here leaves the row
-        // pointing at a Live cube that hasn't been reconfigured yet;
-        // the runtime config sync sweep will retry the non-identity
-        // parts on the next swarm restart.
+        // boots out of warmup-placeholder mode.  The replacement row
+        // is still Configuring; only a successful configure push can
+        // promote it to Live.
         if !use_state_mirror {
-            self.push_configure_best_effort(
+            self.push_configure_after_swap(
                 owner_id,
                 source,
                 &runtime_tokens,
                 &info.sandbox_id,
                 "rotate",
             )
-            .await;
+            .await?;
         }
+        self.instances
+            .update_status(&source.id, InstanceStatus::Live)
+            .await?;
 
         // Phase 6: destroy the old cube.  Force=true so a stuck
         // cube doesn't leave the row half-live.  This is the only
@@ -1686,26 +1684,19 @@ impl InstanceService {
             return Err(e.into());
         }
 
-        if !use_state_mirror && let Some(reconfigurer) = self.reconfigurer.as_ref() {
-            let body = self
-                .configure_body_for_existing_row(
-                    owner_id,
-                    &source,
-                    &runtime_tokens.proxy,
-                    &runtime_tokens.ingest,
-                    &runtime_tokens.state_sync,
-                )
-                .await;
-            if let Err(err) =
-                push_with_retry(reconfigurer.as_ref(), &source.id, &info.sandbox_id, &body).await
-            {
-                tracing::warn!(
-                    instance = %source.id,
-                    error = %err,
-                    "restore-snapshot-in-place: configure-push failed; will be retried by next sweep"
-                );
-            }
+        if !use_state_mirror {
+            self.push_configure_after_swap(
+                owner_id,
+                &source,
+                &runtime_tokens,
+                &info.sandbox_id,
+                "restore-snapshot",
+            )
+            .await?;
         }
+        self.instances
+            .update_status(&source.id, InstanceStatus::Live)
+            .await?;
 
         if let Some(old) = old_sandbox_id.filter(|old| old != &info.sandbox_id)
             && let Err(err) = self.cube.destroy_sandbox(&old).await
@@ -1816,15 +1807,18 @@ impl InstanceService {
             .await?;
 
         if replay_state_files.is_none() {
-            self.push_configure_best_effort(
+            self.push_configure_after_swap(
                 owner_id,
                 source,
                 &runtime_tokens,
                 &info.sandbox_id,
                 "recreate",
             )
-            .await;
+            .await?;
         }
+        self.instances
+            .update_status(&source.id, InstanceStatus::Live)
+            .await?;
 
         self.destroy_old_sandbox_after_in_place_swap(source, old_sandbox_id, "recreate")
             .await;
@@ -1913,6 +1907,9 @@ impl InstanceService {
             let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
             return Err(err.into());
         }
+        self.instances
+            .update_status(&source.id, InstanceStatus::Live)
+            .await?;
 
         self.destroy_old_sandbox_after_in_place_swap(source, old_sandbox_id, "reset")
             .await;
