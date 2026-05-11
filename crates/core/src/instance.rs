@@ -991,6 +991,25 @@ impl InstanceService {
                 }
             };
             let result = async {
+                if row.status == InstanceStatus::Configuring
+                    && let Some(state_files) = self.state_files.as_ref()
+                    && self
+                        .has_durable_mirrored_state_files(&row.id, state_files)
+                        .await?
+                {
+                    return self
+                        .replay_state_files_and_configure(
+                            &row.owner_id,
+                            row,
+                            &tokens,
+                            sandbox_id,
+                            state_files,
+                            true,
+                            true,
+                            "runtime-config-sync",
+                        )
+                        .await;
+                }
                 let mut body = self
                     .configure_body_for_existing_row(
                         &row.owner_id,

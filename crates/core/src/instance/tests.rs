@@ -2340,8 +2340,7 @@ async fn runtime_config_sync_replays_mirrored_chats_for_configuring_rows() {
     assert!(
         restored
             .iter()
-            .any(|(_, _, body)| body.namespace == "chats"
-                && body.path == "c-0001/transcript.json"),
+            .any(|(_, _, body)| body.namespace == "chats" && body.path == "c-0001/transcript.json"),
         "Configuring recovery must replay mirrored chat state before marking the row Live; restored={restored:?}"
     );
     drop(restored);
