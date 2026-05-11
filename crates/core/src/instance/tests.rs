@@ -798,6 +798,13 @@ struct RecordingReconfigurer {
     pushed: Mutex<Vec<(String, String, ReconfigureBody)>>,
     restored: Mutex<Vec<(String, String, RestoreStateFileBody)>>,
     events: Mutex<Vec<String>>,
+    fail_push: Mutex<Option<String>>,
+}
+
+impl RecordingReconfigurer {
+    fn fail_pushes(&self, message: &str) {
+        *self.fail_push.lock().unwrap() = Some(message.to_owned());
+    }
 }
 
 #[async_trait]
@@ -808,6 +815,9 @@ impl DysonReconfigurer for RecordingReconfigurer {
         sandbox_id: &str,
         body: &ReconfigureBody,
     ) -> Result<(), String> {
+        if let Some(message) = self.fail_push.lock().unwrap().clone() {
+            return Err(message);
+        }
         self.pushed
             .lock()
             .unwrap()
@@ -2678,6 +2688,47 @@ async fn rotate_binary_visits_each_outdated_instance() {
     assert_eq!(post_b.task, "beta task");
     // Bearer survives — clients holding the old token keep working.
     assert_eq!(post_a.bearer_token, pre_a.bearer_token);
+}
+
+#[tokio::test]
+async fn rotate_in_place_configure_failure_never_marks_replacement_live() {
+    let (isvc, ssvc, _cube, instances, _users, recorder) = build_with_snapshot().await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl-old".into(),
+                name: Some("rotate me".into()),
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::default(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_pushes(&recorder, 1).await;
+    recorder.pushed.lock().unwrap().clear();
+    recorder.fail_pushes("dyson configure did not apply requested mcp_servers block");
+
+    let result = isvc
+        .rotate_in_place("legacy", &src.id, &ssvc, "tpl-new", None)
+        .await;
+    assert!(
+        result.is_err(),
+        "rotate must not report success when replacement configure-push fails"
+    );
+    let row = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(
+        row.status,
+        InstanceStatus::Configuring,
+        "replacement row must remain Configuring so user traffic is refused until recovery"
+    );
+    assert_eq!(
+        row.template_id, "tpl-new",
+        "failed configure should leave the replacement row visible for startup recovery"
+    );
 }
 
 #[tokio::test]
