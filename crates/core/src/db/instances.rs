@@ -332,7 +332,12 @@ impl InstanceStore for SqlxInstanceStore {
 
     async fn update_status(&self, id: &str, status: InstanceStatus) -> Result<(), StoreError> {
         let now = now_secs();
-        let result = sqlx::query(
+        let mut conn = self.pool.acquire().await.map_err(map_sqlx)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
+        let result = match sqlx::query(
             "UPDATE instances SET status = ?1, \
                                   destroyed_at = CASE WHEN ?1 = 'destroyed' THEN ?2 ELSE destroyed_at END \
              WHERE id = ?3",
@@ -340,12 +345,24 @@ impl InstanceStore for SqlxInstanceStore {
         .bind(status.as_str())
         .bind(now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
-        .map_err(map_sqlx)?;
+        .map_err(map_sqlx)
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(err);
+            }
+        };
         if result.rows_affected() == 0 {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
             return Err(StoreError::NotFound);
         }
+        sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
         Ok(())
     }
 
@@ -413,7 +430,8 @@ impl InstanceStore for SqlxInstanceStore {
     async fn record_probe(&self, id: &str, status: ProbeResult) -> Result<(), StoreError> {
         let json = serde_json::to_string(&status).map_err(|e| StoreError::Io(e.to_string()))?;
         let result = sqlx::query(
-            "UPDATE instances SET last_probe_at = ?, last_probe_status = ? WHERE id = ?",
+            "UPDATE instances SET last_probe_at = ?, last_probe_status = ? \
+             WHERE id = ? AND status != 'destroyed'",
         )
         .bind(now_secs())
         .bind(json)
@@ -428,12 +446,15 @@ impl InstanceStore for SqlxInstanceStore {
     }
 
     async fn set_rotated_to(&self, id: &str, target_id: &str) -> Result<(), StoreError> {
-        let result = sqlx::query("UPDATE instances SET rotated_to = ? WHERE id = ?")
-            .bind(target_id)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
+        let result = sqlx::query(
+            "UPDATE instances SET rotated_to = ? \
+             WHERE id = ? AND status != 'destroyed'",
+        )
+        .bind(target_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
         if result.rows_affected() == 0 {
             return Err(StoreError::NotFound);
         }
@@ -443,12 +464,15 @@ impl InstanceStore for SqlxInstanceStore {
     async fn set_models(&self, id: &str, models: &[String]) -> Result<(), StoreError> {
         let json = serde_json::to_string(models)
             .map_err(|e| StoreError::Io(format!("models encode: {e}")))?;
-        let result = sqlx::query("UPDATE instances SET models = ? WHERE id = ?")
-            .bind(json)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
+        let result = sqlx::query(
+            "UPDATE instances SET models = ? \
+             WHERE id = ? AND status != 'destroyed'",
+        )
+        .bind(json)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
         if result.rows_affected() == 0 {
             return Err(StoreError::NotFound);
         }
@@ -458,12 +482,15 @@ impl InstanceStore for SqlxInstanceStore {
     async fn set_tools(&self, id: &str, tools: &[String]) -> Result<(), StoreError> {
         let json = serde_json::to_string(tools)
             .map_err(|e| StoreError::Io(format!("tools encode: {e}")))?;
-        let result = sqlx::query("UPDATE instances SET tools = ? WHERE id = ?")
-            .bind(json)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
+        let result = sqlx::query(
+            "UPDATE instances SET tools = ? \
+             WHERE id = ? AND status != 'destroyed'",
+        )
+        .bind(json)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
         if result.rows_affected() == 0 {
             return Err(StoreError::NotFound);
         }
