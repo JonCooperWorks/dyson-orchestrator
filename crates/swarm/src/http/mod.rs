@@ -980,6 +980,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_dispatcher_healthz_requires_auth() {
+        let (mut state, users, instances) = build_state_with_instances().await;
+        state.hostname = Some("swarm.test".into());
+        let (_unused_auth, user_id) =
+            crate::auth::user::fixed_user_auth(users.clone(), "alice").await;
+        let now = crate::now_secs();
+        instances
+            .create(InstanceRow {
+                id: "abc".into(),
+                owner_id: user_id,
+                name: "healthz auth".into(),
+                task: "healthz auth".into(),
+                cube_sandbox_id: Some("sb-health".into()),
+                state_generation: uuid::Uuid::new_v4().simple().to_string(),
+                template_id: "tpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "instance-bearer".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: now,
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: now,
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: crate::network_policy::NetworkPolicy::default(),
+                network_policy_cidrs: vec![],
+                models: vec!["test-model".into()],
+                tools: vec![],
+            })
+            .await
+            .expect("insert test instance");
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/healthz"))
+            .header("host", "abc.swarm.test")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            401,
+            "dyson subdomain /healthz must require auth instead of forwarding anonymously",
+        );
+    }
+
+    #[tokio::test]
     async fn host_dispatcher_404s_unknown_subdomain() {
         // Sandbox subdomain shape, but no row with that id exists.
         // The dispatcher authenticates the user (alice), looks up the
