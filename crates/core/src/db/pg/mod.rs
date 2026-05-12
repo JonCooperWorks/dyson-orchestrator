@@ -8,14 +8,13 @@
 //! This module ships *empty* in this codebase. Phase 7 lays down the seam
 //! so adding Pg later is a contained, additive change:
 //!
-//! 1. Implement `PgInstanceStore`, `PgUserSecretStore`,
-//!    `PgSystemSecretStore`, `PgTokenStore`, `PgUserStore`,
-//!    `PgSnapshotStore`, `PgPolicyStore`, `PgAuditStore`,
-//!    `PgArtefactStore`, `PgStateFileStore`, and `PgShareStore`
-//!    — one per existing trait, mirroring the sqlite/*.rs files.
+//! 1. Implement one Pg store per trait (`PgInstanceStore`,
+//!    `PgTokenStore`, `PgUserStore`, `PgMcpDockerCatalogStore`,
+//!    `PgSkillMarketplaceSourceStore`, etc.), mirroring the sqlite
+//!    files under `crate::db`.
 //! 2. Add a `db::open_pg(url)` that builds a `PgPool` and runs
 //!    `migrations/postgres/`.
-//! 3. Replace the temporary `open_configured_sqlite` guard with a
+//! 3. Replace the temporary SQLite-backed `open_configured` guard with a
 //!    backend enum/runtime handle so `main.rs` wires Pg stores when
 //!    `database_backend = "postgres"`.
 //!

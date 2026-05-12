@@ -16,10 +16,13 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::config::{Config, DatabaseBackend};
+use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
-    AdminAuditStore, ArtefactCacheStore, AuditStore, McpAuditStore, PolicyStore, SessionStore,
-    ShareStore, SnapshotStore, StateFileStore,
+    AdminAuditStore, ArtefactCacheStore, AuditStore, DeliveryStore, InstanceStore, McpAuditStore,
+    McpDockerCatalogStore, PolicyStore, SessionStore, ShareStore, SkillMarketplaceSourceStore,
+    SnapshotStore, StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
+    WebhookStore,
 };
 
 pub mod artefacts;
@@ -99,8 +102,32 @@ pub async fn open_configured_sqlite(cfg: &Config) -> Result<SqlitePool, StoreErr
     }
 }
 
+pub async fn open_configured(cfg: &Config) -> Result<SqlitePool, StoreError> {
+    open_configured_sqlite(cfg).await
+}
+
 pub fn artefact_cache_store(pool: SqlitePool) -> Arc<dyn ArtefactCacheStore> {
     Arc::new(artefacts::SqlxArtefactStore::new(pool))
+}
+
+pub fn instance_store(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Arc<dyn InstanceStore> {
+    Arc::new(instances::SqlxInstanceStore::new(pool, cipher))
+}
+
+pub fn token_store(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Arc<dyn TokenStore> {
+    Arc::new(tokens::SqlxTokenStore::new(pool, cipher))
+}
+
+pub fn user_secret_store(pool: SqlitePool) -> Arc<dyn UserSecretStore> {
+    Arc::new(secrets::SqlxUserSecretStore::new(pool))
+}
+
+pub fn system_secret_store(pool: SqlitePool) -> Arc<dyn SystemSecretStore> {
+    Arc::new(secrets::SqlxSystemSecretStore::new(pool))
+}
+
+pub fn user_store(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Arc<dyn UserStore> {
+    Arc::new(users::SqlxUserStore::new(pool, ciphers))
 }
 
 pub fn snapshot_store(pool: SqlitePool) -> Arc<dyn SnapshotStore> {
@@ -133,6 +160,24 @@ pub fn state_file_store(pool: SqlitePool) -> Arc<dyn StateFileStore> {
 
 pub fn share_store(pool: SqlitePool) -> Arc<dyn ShareStore> {
     Arc::new(shares::SqlxShareStore::new(pool))
+}
+
+pub fn webhook_store(pool: SqlitePool) -> Arc<dyn WebhookStore> {
+    Arc::new(webhooks::SqlxWebhookStore::new(pool))
+}
+
+pub fn delivery_store(pool: SqlitePool) -> Arc<dyn DeliveryStore> {
+    Arc::new(webhooks::SqlxDeliveryStore::new(pool))
+}
+
+pub fn mcp_docker_catalog_store(pool: SqlitePool) -> Arc<dyn McpDockerCatalogStore> {
+    Arc::new(mcp_catalog::SqlxMcpDockerCatalogStore::new(pool))
+}
+
+pub fn skill_marketplace_source_store(pool: SqlitePool) -> Arc<dyn SkillMarketplaceSourceStore> {
+    Arc::new(skill_marketplace::SqlxSkillMarketplaceSourceStore::new(
+        pool,
+    ))
 }
 
 #[cfg(unix)]

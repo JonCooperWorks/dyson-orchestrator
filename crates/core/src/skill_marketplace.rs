@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use crate::db::skill_marketplace::{SkillMarketplaceSourceRow, SqlxSkillMarketplaceSourceStore};
 use crate::error::StoreError;
 use crate::http::ExternalHttpClient;
+use crate::traits::{SkillMarketplaceSourceRow, SkillMarketplaceSourceStore};
 use crate::upstream_policy::OutboundUrlPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -186,7 +186,7 @@ pub enum SkillMarketplaceError {
 
 #[derive(Clone)]
 pub struct SkillMarketplaceService {
-    store: Option<Arc<SqlxSkillMarketplaceSourceStore>>,
+    store: Option<Arc<dyn SkillMarketplaceSourceStore>>,
     external_http: ExternalHttpClient,
 }
 
@@ -196,7 +196,7 @@ struct LoadedIndex {
 }
 
 impl SkillMarketplaceService {
-    pub fn new(store: Arc<SqlxSkillMarketplaceSourceStore>) -> Self {
+    pub fn new(store: Arc<dyn SkillMarketplaceSourceStore>) -> Self {
         Self::from_store(
             Some(store),
             ExternalHttpClient::new(Arc::new(OutboundUrlPolicy::default())),
@@ -204,7 +204,7 @@ impl SkillMarketplaceService {
     }
 
     pub fn new_with_external_client(
-        store: Arc<SqlxSkillMarketplaceSourceStore>,
+        store: Arc<dyn SkillMarketplaceSourceStore>,
         external_http: ExternalHttpClient,
     ) -> Self {
         Self::from_store(Some(store), external_http)
@@ -218,7 +218,7 @@ impl SkillMarketplaceService {
     }
 
     fn from_store(
-        store: Option<Arc<SqlxSkillMarketplaceSourceStore>>,
+        store: Option<Arc<dyn SkillMarketplaceSourceStore>>,
         external_http: ExternalHttpClient,
     ) -> Self {
         Self {
@@ -391,7 +391,7 @@ impl SkillMarketplaceService {
         ))
     }
 
-    fn store(&self) -> Result<&Arc<SqlxSkillMarketplaceSourceStore>, SkillMarketplaceError> {
+    fn store(&self) -> Result<&Arc<dyn SkillMarketplaceSourceStore>, SkillMarketplaceError> {
         self.store.as_ref().ok_or_else(|| {
             SkillMarketplaceError::Store("skill marketplace source store is not configured".into())
         })
@@ -783,7 +783,7 @@ mod tests {
         let skill = "---\ndescription: Review code.\n---\n\nRead the diff.";
         let hash = sha256_hex(skill.as_bytes());
         let pool = open_in_memory().await.unwrap();
-        let store = Arc::new(SqlxSkillMarketplaceSourceStore::new(pool));
+        let store = crate::db::skill_marketplace_source_store(pool);
         store
             .upsert(
                 &SkillMarketplaceSourceConfig::Inline {
@@ -808,7 +808,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_db_sources_do_not_feed_the_catalog() {
         let pool = open_in_memory().await.unwrap();
-        let store = Arc::new(SqlxSkillMarketplaceSourceStore::new(pool));
+        let store = crate::db::skill_marketplace_source_store(pool);
         store
             .upsert(
                 &SkillMarketplaceSourceConfig::Inline {

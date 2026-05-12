@@ -12,9 +12,7 @@ use dyson_swarm::{
         Authenticator, UserAuthState, bearer::BearerAuthenticator, chain::ChainAuthenticator, oidc,
     },
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
-    config, cube_client, db,
-    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
-    http,
+    config, cube_client, db, http,
     instance::InstanceService,
     logging,
     probe::{self, HttpHealthProber},
@@ -118,7 +116,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
-    let pool = match db::open_configured_sqlite(&cfg).await {
+    let pool = match db::open_configured(&cfg).await {
         Ok(p) => p,
         Err(err) => {
             tracing::error!(
@@ -138,12 +136,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxUserSecretStore::new(pool.clone()),
-    );
-    let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> = Arc::new(
-        dyson_swarm::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
-    );
+    let user_secrets_store: Arc<dyn dyson_swarm::traits::UserSecretStore> =
+        db::user_secret_store(pool.clone());
+    let system_secrets_store: Arc<dyn dyson_swarm::traits::SystemSecretStore> =
+        db::system_secret_store(pool.clone());
     // Per-user envelope encryption directory.  Lazy-creates an age
     // identity per user inside `keys_dir` on first secret seal/open.
     let cipher_dir: Arc<dyn dyson_swarm::envelope::CipherDirectory> =
@@ -178,18 +174,14 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         }
     }
     let instances_store: Arc<dyn InstanceStore> =
-        Arc::new(SqlxInstanceStore::new(pool.clone(), token_cipher.clone()));
-    let tokens_store: Arc<dyn TokenStore> =
-        Arc::new(SqlxTokenStore::new(pool.clone(), token_cipher));
+        db::instance_store(pool.clone(), token_cipher.clone());
+    let tokens_store: Arc<dyn TokenStore> = db::token_store(pool.clone(), token_cipher);
     let snapshots_store: Arc<dyn SnapshotStore> = db::snapshot_store(pool.clone());
     let policies_store: Arc<dyn PolicyStore> = db::policy_store(pool.clone());
     let audit_store: Arc<dyn AuditStore> = db::audit_store(pool.clone());
     let mcp_audit_store: Arc<dyn McpAuditStore> = db::mcp_audit_store(pool.clone());
     let admin_audit_store: Arc<dyn AdminAuditStore> = db::admin_audit_store(pool.clone());
-    let users_store: Arc<dyn UserStore> = Arc::new(db::users::SqlxUserStore::new(
-        pool.clone(),
-        cipher_dir.clone(),
-    ));
+    let users_store: Arc<dyn UserStore> = db::user_store(pool.clone(), cipher_dir.clone());
     let sessions_store: Arc<dyn SessionStore> = db::session_store(pool.clone());
     let state_files = std::sync::Arc::new(dyson_swarm::state_files::StateFileService::new(
         db::state_file_store(pool.clone()),
@@ -203,9 +195,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let external_http = Arc::new(dyson_swarm_core::http::ExternalHttpClient::new(
         outbound_policy.clone(),
     ));
-    let skill_marketplace_store = Arc::new(
-        dyson_swarm::db::skill_marketplace::SqlxSkillMarketplaceSourceStore::new(pool.clone()),
-    );
+    let skill_marketplace_store = db::skill_marketplace_source_store(pool.clone());
     let skill_marketplace = Arc::new(
         dyson_swarm::skill_marketplace::SkillMarketplaceService::new_with_external_client(
             skill_marketplace_store,
@@ -556,8 +546,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             ),
             None => (None, Vec::new(), false),
         };
-    let mcp_catalog_store =
-        Arc::new(dyson_swarm::db::mcp_catalog::SqlxMcpDockerCatalogStore::new(pool.clone()));
+    let mcp_catalog_store = db::mcp_docker_catalog_store(pool.clone());
     if let Err(err) = mcp_catalog_store.seed_config(&docker_catalog).await {
         tracing::error!(error = %err, "mcp docker catalog seed failed");
         return ExitCode::from(2);
@@ -657,12 +646,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // shared cube-trusted reqwest client so it can reach a sandbox at
     // `<port>-<sandbox_id>.<sandbox_domain>` over cubeproxy's
     // mkcert-rooted TLS (same path `dyson_proxy::forward` takes).
-    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxWebhookStore::new(pool.clone()),
-    );
-    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> = Arc::new(
-        dyson_swarm::db::webhooks::SqlxDeliveryStore::new(pool.clone()),
-    );
+    let webhook_store: Arc<dyn dyson_swarm::traits::WebhookStore> = db::webhook_store(pool.clone());
+    let delivery_store: Arc<dyn dyson_swarm::traits::DeliveryStore> =
+        db::delivery_store(pool.clone());
     let webhook_dispatcher: Arc<dyn dyson_swarm::webhooks::WebhookDispatcher> = {
         let http_client = match http::dyson_proxy::build_client() {
             Ok(c) => c,

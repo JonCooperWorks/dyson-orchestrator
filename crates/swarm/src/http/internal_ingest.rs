@@ -3,7 +3,7 @@
 //! The dyson agent calls this from `Output::send_artefact` to push
 //! artefact metadata + body bytes to swarm.  Auth is a per-instance
 //! `it_<32hex>` bearer minted at instance create (see
-//! `db::tokens::SqlxTokenStore::mint_ingest`); the token's
+//! `TokenStore::mint_ingest`); the token's
 //! `instance_id` is authoritative for owner scoping, so the caller
 //! cannot forge metadata fields to write into another tenant's
 //! `artefact_cache` row or another tenant's owner-keyed cipher.

@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ProviderConfig;
 use crate::error::{BackupError, CubeError, StoreError};
+use crate::mcp_servers::{McpDockerCatalogServer, McpDockerCatalogStatus};
 use crate::network_policy::{NetworkPolicy, ResolvedPolicy};
+use crate::skill_marketplace::SkillMarketplaceSourceConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -328,6 +330,63 @@ pub struct McpAuditEntry {
     pub duration_ms: i64,
     pub ts: i64,
     pub completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpDockerCatalogRow {
+    pub server: McpDockerCatalogServer,
+    pub status: McpDockerCatalogStatus,
+    pub source: String,
+    pub requested_by_user_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub deleted_at: Option<i64>,
+}
+
+#[async_trait]
+pub trait McpDockerCatalogStore: Send + Sync {
+    /// Seed TOML-managed entries into the durable catalog store.
+    async fn seed_config(&self, servers: &[McpDockerCatalogServer]) -> Result<(), StoreError>;
+    async fn list(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError>;
+    async fn list_active(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError>;
+    async fn get(&self, id: &str) -> Result<Option<McpDockerCatalogRow>, StoreError>;
+    async fn get_active(&self, id: &str) -> Result<Option<McpDockerCatalogRow>, StoreError>;
+    async fn upsert_admin(
+        &self,
+        server: &McpDockerCatalogServer,
+    ) -> Result<McpDockerCatalogRow, StoreError>;
+    async fn request_user(
+        &self,
+        server: &McpDockerCatalogServer,
+        user_id: &str,
+    ) -> Result<McpDockerCatalogRow, StoreError>;
+    async fn delete(&self, id: &str) -> Result<bool, StoreError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillMarketplaceSourceRow {
+    pub source: SkillMarketplaceSourceConfig,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_fetch_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+#[async_trait]
+pub trait SkillMarketplaceSourceStore: Send + Sync {
+    async fn list(&self) -> Result<Vec<SkillMarketplaceSourceRow>, StoreError>;
+    async fn list_enabled(&self) -> Result<Vec<SkillMarketplaceSourceRow>, StoreError>;
+    async fn get(&self, id: &str) -> Result<Option<SkillMarketplaceSourceRow>, StoreError>;
+    async fn upsert(
+        &self,
+        source: &SkillMarketplaceSourceConfig,
+        enabled: bool,
+    ) -> Result<SkillMarketplaceSourceRow, StoreError>;
+    async fn delete(&self, id: &str) -> Result<bool, StoreError>;
+    async fn record_fetch_success(&self, id: &str) -> Result<(), StoreError>;
+    async fn record_fetch_error(&self, id: &str, error: &str) -> Result<(), StoreError>;
 }
 
 #[derive(Debug, Clone)]

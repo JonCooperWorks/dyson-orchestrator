@@ -26,7 +26,6 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{CallerIdentity, extract_bearer};
-use crate::db::mcp_catalog::{McpDockerCatalogRow, SqlxMcpDockerCatalogStore};
 use crate::error::StoreError;
 use crate::instance::InstanceService;
 use crate::mcp_servers::{
@@ -34,7 +33,10 @@ use crate::mcp_servers::{
     McpServerSpec, McpToolSummary, McpToolsCatalog, OAuthFlowCache, PendingFlow,
 };
 use crate::secrets::UserSecretsService;
-use crate::traits::{InstanceStore, McpAuditEntry, McpAuditStore, TokenStore};
+use crate::traits::{
+    InstanceStore, McpAuditEntry, McpAuditStore, McpDockerCatalogRow, McpDockerCatalogStore,
+    TokenStore,
+};
 use crate::upstream_policy::OutboundUrlPolicy;
 use dyson_swarm_core::http::ExternalHttpClient;
 
@@ -95,7 +97,7 @@ pub struct McpService {
     /// DB-backed source of admin-managed Docker MCP presets.  When
     /// absent, the static config vector above is used as a fallback so
     /// small unit tests can construct the service without a pool.
-    pub docker_catalog_store: Option<Arc<SqlxMcpDockerCatalogStore>>,
+    pub docker_catalog_store: Option<Arc<dyn McpDockerCatalogStore>>,
     /// Shared SSRF policy for remote HTTP/SSE MCP upstreams.  Docker
     /// runtime entries are local runtime requests and do not use this.
     pub mcp_upstream_policy: OutboundUrlPolicy,
@@ -153,7 +155,7 @@ impl McpService {
         self
     }
 
-    pub fn with_docker_catalog_store(mut self, store: Arc<SqlxMcpDockerCatalogStore>) -> Self {
+    pub fn with_docker_catalog_store(mut self, store: Arc<dyn McpDockerCatalogStore>) -> Self {
         self.docker_catalog_store = Some(store);
         self
     }

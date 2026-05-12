@@ -3,40 +3,23 @@
 //! Source rows are operator-managed metadata only. Installed skills remain
 //! per-instance Dyson workspace files and flow back through state sync.
 
+use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::skill_marketplace::{SkillMarketplaceSourceConfig, validate_marketplace_source_config};
+use crate::traits::{SkillMarketplaceSourceRow, SkillMarketplaceSourceStore};
 
 #[derive(Debug, Clone)]
 pub struct SqlxSkillMarketplaceSourceStore {
     pool: SqlitePool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillMarketplaceSourceRow {
-    pub source: SkillMarketplaceSourceConfig,
-    pub enabled: bool,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub last_fetch_at: Option<i64>,
-    pub last_success_at: Option<i64>,
-    pub last_error: Option<String>,
-}
-
 impl SqlxSkillMarketplaceSourceStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
-    }
-
-    pub async fn list(&self) -> Result<Vec<SkillMarketplaceSourceRow>, StoreError> {
-        self.list_visible(true).await
-    }
-
-    pub async fn list_enabled(&self) -> Result<Vec<SkillMarketplaceSourceRow>, StoreError> {
-        self.list_visible(false).await
     }
 
     async fn list_visible(
@@ -58,8 +41,19 @@ impl SqlxSkillMarketplaceSourceStore {
             .map_err(map_sqlx)?;
         rows.into_iter().map(row_to_source).collect()
     }
+}
 
-    pub async fn get(&self, id: &str) -> Result<Option<SkillMarketplaceSourceRow>, StoreError> {
+#[async_trait]
+impl SkillMarketplaceSourceStore for SqlxSkillMarketplaceSourceStore {
+    async fn list(&self) -> Result<Vec<SkillMarketplaceSourceRow>, StoreError> {
+        self.list_visible(true).await
+    }
+
+    async fn list_enabled(&self) -> Result<Vec<SkillMarketplaceSourceRow>, StoreError> {
+        self.list_visible(false).await
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<SkillMarketplaceSourceRow>, StoreError> {
         let row = sqlx::query(
             "SELECT id, source_type, location, enabled, created_at, updated_at, last_fetch_at, last_success_at, last_error \
              FROM skill_marketplace_sources \
@@ -72,7 +66,7 @@ impl SqlxSkillMarketplaceSourceStore {
         row.map(row_to_source).transpose()
     }
 
-    pub async fn upsert(
+    async fn upsert(
         &self,
         source: &SkillMarketplaceSourceConfig,
         enabled: bool,
@@ -105,7 +99,7 @@ impl SqlxSkillMarketplaceSourceStore {
             .ok_or_else(|| StoreError::Io("skill marketplace source vanished after upsert".into()))
     }
 
-    pub async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
         let now = now_secs();
         let result = sqlx::query(
             "UPDATE skill_marketplace_sources \
@@ -121,7 +115,7 @@ impl SqlxSkillMarketplaceSourceStore {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn record_fetch_success(&self, id: &str) -> Result<(), StoreError> {
+    async fn record_fetch_success(&self, id: &str) -> Result<(), StoreError> {
         let now = now_secs();
         sqlx::query(
             "UPDATE skill_marketplace_sources \
@@ -137,7 +131,7 @@ impl SqlxSkillMarketplaceSourceStore {
         Ok(())
     }
 
-    pub async fn record_fetch_error(&self, id: &str, error: &str) -> Result<(), StoreError> {
+    async fn record_fetch_error(&self, id: &str, error: &str) -> Result<(), StoreError> {
         let now = now_secs();
         let mut msg = error.to_owned();
         msg.truncate(2048);

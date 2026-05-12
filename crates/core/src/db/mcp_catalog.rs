@@ -4,6 +4,7 @@
 //! user selects a template, the rendered MCP server is written into that
 //! user's encrypted `user_secrets` row by the instance service.
 
+use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
@@ -13,21 +14,11 @@ use crate::mcp_servers::{
     validate_docker_catalog_server,
 };
 use crate::now_secs;
+use crate::traits::{McpDockerCatalogRow, McpDockerCatalogStore};
 
 #[derive(Debug, Clone)]
 pub struct SqlxMcpDockerCatalogStore {
     pool: SqlitePool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpDockerCatalogRow {
-    pub server: McpDockerCatalogServer,
-    pub status: McpDockerCatalogStatus,
-    pub source: String,
-    pub requested_by_user_id: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub deleted_at: Option<i64>,
 }
 
 impl SqlxMcpDockerCatalogStore {
@@ -35,11 +26,36 @@ impl SqlxMcpDockerCatalogStore {
         Self { pool }
     }
 
+    async fn list_visible(
+        &self,
+        status: Option<McpDockerCatalogStatus>,
+    ) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
+        let mut query = String::from(
+            "SELECT id, label, description, template, placeholders_json, status, source, requested_by_user_id, created_at, updated_at, deleted_at \
+             FROM mcp_docker_catalog \
+             WHERE deleted_at IS NULL",
+        );
+        if status.is_some() {
+            query.push_str(" AND status = ?");
+        }
+        query
+            .push_str(" ORDER BY status = 'pending' DESC, label COLLATE NOCASE, id COLLATE NOCASE");
+        let mut q = sqlx::query(&query);
+        if let Some(status) = status {
+            q = q.bind(status.as_str());
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(map_sqlx)?;
+        rows.into_iter().map(row_to_catalog).collect()
+    }
+}
+
+#[async_trait]
+impl McpDockerCatalogStore for SqlxMcpDockerCatalogStore {
     /// Seed TOML-managed entries into the DB.  Config-owned rows track
     /// config edits until an admin edits or deletes the row in the UI;
     /// deleted config rows stay tombstoned so a restart does not
     /// surprise-resurrect something the operator removed.
-    pub async fn seed_config(&self, servers: &[McpDockerCatalogServer]) -> Result<(), StoreError> {
+    async fn seed_config(&self, servers: &[McpDockerCatalogServer]) -> Result<(), StoreError> {
         for server in servers {
             validate_docker_catalog_server(server).map_err(StoreError::Malformed)?;
             let placeholders_json = placeholders_json(&server.placeholders)?;
@@ -72,38 +88,16 @@ impl SqlxMcpDockerCatalogStore {
         Ok(())
     }
 
-    pub async fn list(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
+    async fn list(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
         self.list_visible(None).await
     }
 
-    pub async fn list_active(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
+    async fn list_active(&self) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
         self.list_visible(Some(McpDockerCatalogStatus::Active))
             .await
     }
 
-    async fn list_visible(
-        &self,
-        status: Option<McpDockerCatalogStatus>,
-    ) -> Result<Vec<McpDockerCatalogRow>, StoreError> {
-        let mut query = String::from(
-            "SELECT id, label, description, template, placeholders_json, status, source, requested_by_user_id, created_at, updated_at, deleted_at \
-             FROM mcp_docker_catalog \
-             WHERE deleted_at IS NULL",
-        );
-        if status.is_some() {
-            query.push_str(" AND status = ?");
-        }
-        query
-            .push_str(" ORDER BY status = 'pending' DESC, label COLLATE NOCASE, id COLLATE NOCASE");
-        let mut q = sqlx::query(&query);
-        if let Some(status) = status {
-            q = q.bind(status.as_str());
-        }
-        let rows = q.fetch_all(&self.pool).await.map_err(map_sqlx)?;
-        rows.into_iter().map(row_to_catalog).collect()
-    }
-
-    pub async fn get(&self, id: &str) -> Result<Option<McpDockerCatalogRow>, StoreError> {
+    async fn get(&self, id: &str) -> Result<Option<McpDockerCatalogRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, label, description, template, placeholders_json, status, source, requested_by_user_id, created_at, updated_at, deleted_at \
              FROM mcp_docker_catalog \
@@ -116,14 +110,14 @@ impl SqlxMcpDockerCatalogStore {
         rows.map(row_to_catalog).transpose()
     }
 
-    pub async fn get_active(&self, id: &str) -> Result<Option<McpDockerCatalogRow>, StoreError> {
+    async fn get_active(&self, id: &str) -> Result<Option<McpDockerCatalogRow>, StoreError> {
         Ok(self
             .get(id)
             .await?
             .filter(|row| row.status == McpDockerCatalogStatus::Active))
     }
 
-    pub async fn upsert_admin(
+    async fn upsert_admin(
         &self,
         server: &McpDockerCatalogServer,
     ) -> Result<McpDockerCatalogRow, StoreError> {
@@ -159,7 +153,7 @@ impl SqlxMcpDockerCatalogStore {
             .ok_or_else(|| StoreError::Io("mcp catalog row vanished after upsert".into()))
     }
 
-    pub async fn request_user(
+    async fn request_user(
         &self,
         server: &McpDockerCatalogServer,
         user_id: &str,
@@ -220,7 +214,7 @@ impl SqlxMcpDockerCatalogStore {
             .ok_or_else(|| StoreError::Io("mcp catalog pending row vanished after request".into()))
     }
 
-    pub async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
         let now = now_secs();
         let result = sqlx::query(
             "UPDATE mcp_docker_catalog \

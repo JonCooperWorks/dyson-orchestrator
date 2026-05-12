@@ -13,7 +13,6 @@ use dyson_swarm_core::{
     api_client::ApiClient,
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
     config, cube_client, db,
-    db::{instances::SqlxInstanceStore, tokens::SqlxTokenStore},
     http::InternalHttpClient,
     instance::{InstanceService, SYSTEM_OWNER},
     snapshot::SnapshotService,
@@ -167,7 +166,7 @@ async fn run_mint_api_key(
         return ExitCode::from(2);
     }
 
-    let pool = match dyson_swarm_core::db::open_configured_sqlite(cfg).await {
+    let pool = match dyson_swarm_core::db::open_configured(cfg).await {
         Ok(p) => p,
         Err(err) => {
             eprintln!("db open: {err}");
@@ -184,8 +183,7 @@ async fn run_mint_api_key(
             return ExitCode::from(2);
         }
     };
-    let users = dyson_swarm_core::db::users::SqlxUserStore::new(pool, cipher_dir);
-    use dyson_swarm_core::traits::UserStore;
+    let users = dyson_swarm_core::db::user_store(pool, cipher_dir);
     match users.mint_api_key(&user_id, label.as_deref()).await {
         Ok(token) => {
             println!("{token}");
@@ -206,7 +204,7 @@ async fn run_mint_api_key(
 /// are required to reach cubeproxy.
 async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
     use dyson_swarm_core::dyson_reconfig::DysonReconfigurerHttp;
-    let pool = match dyson_swarm_core::db::open_configured_sqlite(cfg).await {
+    let pool = match dyson_swarm_core::db::open_configured(cfg).await {
         Ok(p) => p,
         Err(err) => {
             eprintln!("db open: {err}");
@@ -236,10 +234,7 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
         return ExitCode::from(2);
     }
     let instances_store: std::sync::Arc<dyn dyson_swarm_core::traits::InstanceStore> =
-        std::sync::Arc::new(dyson_swarm_core::db::instances::SqlxInstanceStore::new(
-            pool.clone(),
-            system_cipher,
-        ));
+        dyson_swarm_core::db::instance_store(pool.clone(), system_cipher);
     let row = match instances_store.get(&id).await {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -259,9 +254,7 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
         }
     };
     let system_secrets_store: std::sync::Arc<dyn dyson_swarm_core::traits::SystemSecretStore> =
-        std::sync::Arc::new(dyson_swarm_core::db::secrets::SqlxSystemSecretStore::new(
-            pool,
-        ));
+        dyson_swarm_core::db::system_secret_store(pool);
     let system_secrets = std::sync::Arc::new(dyson_swarm_core::secrets::SystemSecretsService::new(
         system_secrets_store,
         cipher_dir,
@@ -300,7 +293,7 @@ struct OpsServices {
 }
 
 async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String> {
-    let pool = db::open_configured_sqlite(cfg)
+    let pool = db::open_configured(cfg)
         .await
         .map_err(|e| format!("db open (backend {}): {e:#}", cfg.database_backend))?;
     let cube = Arc::new(
@@ -322,17 +315,14 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
             report.proxy_tokens_sealed, report.instance_bearers_sealed
         );
     }
-    let instances: Arc<dyn InstanceStore> =
-        Arc::new(SqlxInstanceStore::new(pool.clone(), system_cipher.clone()));
-    let tokens: Arc<dyn TokenStore> = Arc::new(SqlxTokenStore::new(pool.clone(), system_cipher));
+    let instances: Arc<dyn InstanceStore> = db::instance_store(pool.clone(), system_cipher.clone());
+    let tokens: Arc<dyn TokenStore> = db::token_store(pool.clone(), system_cipher);
     let snapshots_store: Arc<dyn SnapshotStore> = db::snapshot_store(pool.clone());
 
-    let system_secrets_store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> = Arc::new(
-        dyson_swarm_core::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
-    );
-    let user_secrets_store: Arc<dyn dyson_swarm_core::traits::UserSecretStore> = Arc::new(
-        dyson_swarm_core::db::secrets::SqlxUserSecretStore::new(pool.clone()),
-    );
+    let system_secrets_store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> =
+        db::system_secret_store(pool.clone());
+    let user_secrets_store: Arc<dyn dyson_swarm_core::traits::UserSecretStore> =
+        db::user_secret_store(pool.clone());
     let system_secrets_svc = Arc::new(dyson_swarm_core::secrets::SystemSecretsService::new(
         system_secrets_store,
         cipher_dir.clone(),
@@ -1170,7 +1160,7 @@ async fn run_secrets(
 /// directly and pipes through [`SystemSecretsService`].  No HTTP, no
 /// admin bearer.
 async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitCode {
-    let pool = match db::open_configured_sqlite(cfg).await {
+    let pool = match db::open_configured(cfg).await {
         Ok(p) => p,
         Err(err) => {
             eprintln!("error: db open failed: {err:#}");
@@ -1185,9 +1175,8 @@ async fn run_system_secret(cfg: &config::Config, action: SecretsAction) -> ExitC
                 return ExitCode::FAILURE;
             }
         };
-    let store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> = Arc::new(
-        dyson_swarm_core::db::secrets::SqlxSystemSecretStore::new(pool.clone()),
-    );
+    let store: Arc<dyn dyson_swarm_core::traits::SystemSecretStore> =
+        db::system_secret_store(pool.clone());
     let svc = dyson_swarm_core::secrets::SystemSecretsService::new(store, cipher_dir);
 
     match action {
