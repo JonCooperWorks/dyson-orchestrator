@@ -242,7 +242,7 @@ async fn resolve_artefact(
         &state.dyson_http,
         &state.sandbox_domain,
         &verified.instance,
-        &format!("/api/artefacts/{}", verified.row.artefact_id),
+        &dyson_chat_artefact_path(&verified.row.chat_id, &verified.row.artefact_id),
     )
     .await
     {
@@ -380,7 +380,7 @@ async fn lookup_title_and_kind(
     state: &AppState,
     verified: &crate::shares::service::VerifiedShare,
 ) -> (String, String) {
-    let path = format!("/api/conversations/{}/artefacts", verified.row.chat_id);
+    let path = dyson_chat_artefacts_path(&verified.row.chat_id);
     let resp = crate::instance_client::fetch_artefact(
         &state.dyson_http,
         &state.sandbox_domain,
@@ -437,6 +437,37 @@ fn fallback_title_kind(verified: &crate::shares::service::VerifiedShare) -> (Str
             .unwrap_or_else(|| "Artefact".to_owned()),
         "other".to_owned(),
     )
+}
+
+fn dyson_chat_artefacts_path(chat_id: &str) -> String {
+    format!(
+        "/api/conversations/{}/artefacts",
+        encode_path_segment(chat_id)
+    )
+}
+
+fn dyson_chat_artefact_path(chat_id: &str, artefact_id: &str) -> String {
+    format!(
+        "{}/{}",
+        dyson_chat_artefacts_path(chat_id),
+        encode_path_segment(artefact_id)
+    )
+}
+
+fn encode_path_segment(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                let _ = write!(&mut out, "%{b:02X}");
+            }
+        }
+    }
+    out
 }
 
 fn html_response(html: &str) -> Response<Body> {
@@ -525,6 +556,18 @@ mod tests {
         assert_eq!(
             r1.headers().get(header::CACHE_CONTROL),
             r2.headers().get(header::CACHE_CONTROL),
+        );
+    }
+
+    #[test]
+    fn public_share_fallback_uses_chat_scoped_dyson_paths() {
+        assert_eq!(
+            dyson_chat_artefacts_path("c/1"),
+            "/api/conversations/c%2F1/artefacts"
+        );
+        assert_eq!(
+            dyson_chat_artefact_path("c/1", "a/2"),
+            "/api/conversations/c%2F1/artefacts/a%2F2"
         );
     }
 }
