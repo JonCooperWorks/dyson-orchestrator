@@ -1011,19 +1011,7 @@ async fn verify_recreated_instance(
         ));
     }
 
-    let hostname = cfg
-        .hostname
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            "server.hostname is not configured; cannot verify public instance".to_owned()
-        })?;
-    let hostname = hostname
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/');
-    let base = format!("https://{}.{}", row.id, hostname);
+    let base = dyson_direct_base_url(&cfg.cube.sandbox_domain, new_sandbox_id);
     let client = InternalHttpClient::with_timeout(Duration::from_secs(
         cfg.health_probe_timeout_seconds.max(1),
     ))
@@ -1080,6 +1068,18 @@ async fn verify_recreated_instance(
         conversations_ok,
         conversation_count,
     })
+}
+
+fn dyson_direct_base_url(sandbox_domain: &str, sandbox_id: &str) -> String {
+    let cube_port = std::env::var("SWARM_CUBE_INTERNAL_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(80);
+    format!(
+        "https://{cube_port}-{}.{}",
+        sandbox_id,
+        sandbox_domain.trim_end_matches('/')
+    )
 }
 
 async fn bounded_body(resp: reqwest::Response) -> String {
@@ -1399,5 +1399,13 @@ mod tests {
 
         assert_eq!(deploy_recreate_owner_id(&row), "user-123");
         assert_ne!(deploy_recreate_owner_id(&row), SYSTEM_OWNER);
+    }
+
+    #[test]
+    fn deploy_recreate_verifier_targets_cubeproxy_directly() {
+        assert_eq!(
+            dyson_direct_base_url("cube.app/", "sandbox-1"),
+            "https://80-sandbox-1.cube.app"
+        );
     }
 }
