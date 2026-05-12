@@ -1012,7 +1012,7 @@ async fn verify_recreated_instance(
     }
 
     let base = dyson_direct_base_url(&cfg.cube.sandbox_domain, new_sandbox_id);
-    let client = InternalHttpClient::with_timeout(Duration::from_secs(
+    let client = deploy_recreate_verification_client(Duration::from_secs(
         cfg.health_probe_timeout_seconds.max(1),
     ))
     .map_err(|e| format!("verification client: {e}"))?;
@@ -1080,6 +1080,19 @@ fn dyson_direct_base_url(sandbox_domain: &str, sandbox_id: &str) -> String {
         sandbox_id,
         sandbox_domain.trim_end_matches('/')
     )
+}
+
+fn deploy_recreate_verification_client(
+    timeout: Duration,
+) -> Result<InternalHttpClient, reqwest::Error> {
+    let builder = reqwest::Client::builder().no_proxy().timeout(timeout);
+    let root_ca_path = dyson_swarm_core::dyson_reconfig::cube_root_ca_path_from_env();
+    let builder = dyson_swarm_core::dyson_reconfig::add_cube_root_ca(
+        builder,
+        root_ca_path.as_deref(),
+        "deploy_recreate_live",
+    );
+    InternalHttpClient::from_builder(builder)
 }
 
 async fn bounded_body(resp: reqwest::Response) -> String {
