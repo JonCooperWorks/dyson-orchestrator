@@ -612,7 +612,7 @@ async fn ensure_share_artefact_cached(
         &state.app.dyson_http,
         &state.app.sandbox_domain,
         instance,
-        &format!("/api/artefacts/{artefact_id}"),
+        &dyson_chat_artefact_path(chat_id, artefact_id),
     )
     .await
     .map_err(|_| ShareMintCacheError::BadGateway)?;
@@ -688,7 +688,7 @@ async fn lookup_dyson_artefact_for_share(
         &state.app.dyson_http,
         &state.app.sandbox_domain,
         instance,
-        &format!("/api/conversations/{chat_id}/artefacts"),
+        &dyson_chat_artefacts_path(chat_id),
     )
     .await
     .map_err(|_| ShareMintCacheError::BadGateway)?;
@@ -724,6 +724,21 @@ fn parse_dyson_artefact_meta_list(
         created_at: item.get("created_at").and_then(|v| v.as_i64()),
         metadata_json: item.get("metadata").map(|v| v.to_string()),
     })
+}
+
+fn dyson_chat_artefacts_path(chat_id: &str) -> String {
+    format!(
+        "/api/conversations/{}/artefacts",
+        encode_query_value(chat_id)
+    )
+}
+
+fn dyson_chat_artefact_path(chat_id: &str, artefact_id: &str) -> String {
+    format!(
+        "{}/{}",
+        dyson_chat_artefacts_path(chat_id),
+        encode_query_value(artefact_id)
+    )
 }
 
 /// 403 Forbidden with the canonical JSON shape the SPA's fetch layer
@@ -911,8 +926,8 @@ fn build_login_redirect(
 
 /// Minimal RFC 3986 percent-encoder for query values.  Escapes everything
 /// that isn't an unreserved character (ALPHA / DIGIT / `-` / `.` / `_` /
-/// `~`).  We keep it inline rather than pulling in `percent-encoding` —
-/// the only call site is the login redirect Location header.
+/// `~`).  We keep it inline rather than pulling in `percent-encoding`;
+/// the same encoding works for query values and path segments.
 fn encode_query_value(s: &str) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(s.len());
@@ -1026,6 +1041,14 @@ mod tests {
     fn share_mint_meta_parser_rejects_missing_artefact() {
         let err = parse_dyson_artefact_meta_list(br#"[{"id":"a1"}]"#, "missing").unwrap_err();
         assert!(matches!(err, ShareMintCacheError::NotFound));
+    }
+
+    #[test]
+    fn share_mint_uses_chat_scoped_dyson_artefact_body_path() {
+        assert_eq!(
+            dyson_chat_artefact_path("c/1", "a/2"),
+            "/api/conversations/c%2F1/artefacts/a%2F2"
+        );
     }
 
     // ── Origin / Referer allowlist (CSRF defence-in-depth) ────────────
