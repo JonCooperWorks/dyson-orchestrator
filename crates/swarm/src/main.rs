@@ -178,6 +178,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let policies_store: Arc<dyn PolicyStore> = stores.policies.clone();
     let audit_store: Arc<dyn AuditStore> = stores.audit.clone();
     let mcp_audit_store: Arc<dyn McpAuditStore> = stores.mcp_audit.clone();
+    let llm_tool_calls_store: Arc<dyn dyson_swarm::traits::LlmToolCallStore> =
+        stores.llm_tool_calls.clone();
     let admin_audit_store: Arc<dyn AdminAuditStore> = stores.admin_audit.clone();
     let users_store: Arc<dyn UserStore> = stores.users.clone();
     let sessions_store: Arc<dyn SessionStore> = stores.sessions.clone();
@@ -515,6 +517,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     }
     proxy = proxy.with_user_secrets(user_secrets_svc.clone());
     proxy = proxy.with_byo_config(cfg.byo.clone());
+    proxy = proxy.with_tool_call_audit(llm_tool_calls_store.clone(), cipher_dir.clone());
     if cfg.byo.allow_internal {
         tracing::warn!(
             "BYO internal upstreams enabled; tenants can point byo at private/local hosts"
@@ -705,6 +708,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         users: users_store,
         sessions: sessions_store,
         admin_audit: admin_audit_store,
+        llm_tool_calls: llm_tool_calls_store,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
         hostname: cfg.hostname.clone(),
         auth_config: Arc::new(http::auth_config::AuthConfig::from_toml(

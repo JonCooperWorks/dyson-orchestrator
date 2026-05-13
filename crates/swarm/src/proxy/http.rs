@@ -32,7 +32,7 @@ use crate::proxy::ProxyService;
 use crate::proxy::adapters::anthropic as anthropic_adapter;
 use crate::proxy::byok::{self, KeySource};
 use crate::proxy::policy_check::{EnforceContext, enforce};
-use crate::proxy::recording_body::RecordingBody;
+use crate::proxy::recording_body::{RecordingBody, ToolCallAuditContext, capped_json_bytes};
 use crate::proxy::upstream_policy::{
     ByoUpstreamError, ValidatedByoUpstream, validate_cached_byo_upstream,
 };
@@ -115,6 +115,7 @@ async fn handle(
             Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid json body"),
         }
     };
+    capture_tool_results(&state, &owner_id, &record.instance_id, &body_json).await;
 
     // 3. Policy + usage are keyed on owner_id, not instance_id, so a user
     // with N instances shares one budget envelope.
@@ -402,7 +403,22 @@ async fn handle(
     // mark `truncated` (D7 in the security review).
     let raw_stream = upstream_resp.bytes_stream();
     let resp_body = if let Some(id) = audit_id {
-        let recorded = RecordingBody::new(raw_stream, state.audit.clone(), id);
+        let recorded = match (&state.tool_calls, &state.ciphers) {
+            (Some(store), Some(ciphers)) => RecordingBody::new_with_tool_audit(
+                raw_stream,
+                state.audit.clone(),
+                id,
+                ToolCallAuditContext {
+                    provider: provider.clone(),
+                    owner_id: owner_id.clone(),
+                    instance_id: record.instance_id.clone(),
+                    llm_audit_id: id,
+                    store: store.clone(),
+                    ciphers: ciphers.clone(),
+                },
+            ),
+            _ => RecordingBody::new(raw_stream, state.audit.clone(), id),
+        };
         let mapped = futures::TryStreamExt::map_err(recorded, std::io::Error::other);
         Body::from_stream(mapped)
     } else {
@@ -580,6 +596,125 @@ async fn write_audit(state: &ProxyService, entry: AuditEntry) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CapturedToolResult {
+    pub tool_use_id: String,
+    pub content: serde_json::Value,
+    pub is_error: bool,
+}
+
+async fn capture_tool_results(
+    state: &ProxyService,
+    owner_id: &str,
+    instance_id: &str,
+    body_json: &serde_json::Value,
+) {
+    let results = extract_tool_results_from_request(body_json);
+    if results.is_empty() {
+        return;
+    }
+    let (Some(store), Some(ciphers)) = (&state.tool_calls, &state.ciphers) else {
+        return;
+    };
+    let cipher = match ciphers.for_user(owner_id) {
+        Ok(cipher) => cipher,
+        Err(err) => {
+            tracing::warn!(error = %err, user = %owner_id, "tool_result audit cipher load failed");
+            return;
+        }
+    };
+    let resulted_at = crate::now_secs();
+    for result in results {
+        let sealed = match cipher.seal(&capped_json_bytes(&result.content)) {
+            Ok(sealed) => sealed,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    tool_use_id = %result.tool_use_id,
+                    "tool_result audit seal failed",
+                );
+                continue;
+            }
+        };
+        match store
+            .attach_result(&result.tool_use_id, &sealed, result.is_error, resulted_at)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    tool_use_id = %result.tool_use_id,
+                    instance_id = %instance_id,
+                    "tool_result audit row not found or already paired",
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    tool_use_id = %result.tool_use_id,
+                    "tool_result audit attach failed",
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn extract_tool_results_from_request(
+    body_json: &serde_json::Value,
+) -> Vec<CapturedToolResult> {
+    let mut out = Vec::new();
+    let Some(messages) = body_json
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return out;
+    };
+    for message in messages {
+        if message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+            && let Some(tool_use_id) = message
+                .get("tool_call_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+        {
+            out.push(CapturedToolResult {
+                tool_use_id: tool_use_id.to_owned(),
+                content: message
+                    .get("content")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                is_error: false,
+            });
+        }
+        let Some(content) = message.get("content").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(tool_use_id) = block
+                .get("tool_use_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            out.push(CapturedToolResult {
+                tool_use_id: tool_use_id.to_owned(),
+                content: block
+                    .get("content")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                is_error: block
+                    .get("is_error")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
@@ -591,6 +726,7 @@ mod tests {
     use axum::http::HeaderMap as AxHeaderMap;
     use axum::routing::post;
     use futures::stream;
+    use sqlx::Row;
     use sqlx::SqlitePool;
 
     use crate::config::{ProviderConfig, Providers};
@@ -874,7 +1010,7 @@ mod tests {
         );
         let user_secrets = Arc::new(crate::secrets::UserSecretsService::new(
             user_secret_store,
-            cipher_dir,
+            cipher_dir.clone(),
         ));
 
         let svc = Arc::new(
@@ -885,7 +1021,13 @@ mod tests {
                     allow_localhost: false,
                     allow_internal: true,
                 })
-                .with_user_secrets(user_secrets.clone()),
+                .with_user_secrets(user_secrets.clone())
+                .with_tool_call_audit(
+                    Arc::new(crate::db::sqlite::audit::SqliteLlmToolCallStore::new(
+                        pool.clone(),
+                    )),
+                    cipher_dir,
+                ),
         );
         (svc, user_secrets, keys_tmp)
     }
@@ -903,6 +1045,78 @@ mod tests {
             .unwrap();
         });
         format!("http://{addr}")
+    }
+
+    struct ToolAuditDbRow {
+        llm_audit_id: Option<i64>,
+        tool_use_id: String,
+        tool_name: String,
+        input_sealed: Option<Vec<u8>>,
+        result_sealed: Option<Vec<u8>>,
+        is_error: Option<i64>,
+    }
+
+    async fn wait_for_tool_call_row(pool: &SqlitePool) -> ToolAuditDbRow {
+        for _ in 0..100 {
+            if let Some(row) = fetch_tool_call_row(pool, "call_1").await {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for llm_tool_call row");
+    }
+
+    async fn wait_for_tool_result_row(pool: &SqlitePool) -> ToolAuditDbRow {
+        for _ in 0..100 {
+            if let Some(row) = fetch_tool_call_result_row(pool, "call_1").await {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for llm_tool_call result row");
+    }
+
+    async fn fetch_tool_call_row(pool: &SqlitePool, tool_use_id: &str) -> Option<ToolAuditDbRow> {
+        let row = sqlx::query(
+            "SELECT llm_audit_id, tool_use_id, tool_name, input_sealed, result_sealed, is_error \
+             FROM llm_tool_call WHERE tool_use_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(tool_use_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()?;
+        Some(ToolAuditDbRow {
+            llm_audit_id: row.try_get("llm_audit_id").unwrap(),
+            tool_use_id: row.try_get("tool_use_id").unwrap(),
+            tool_name: row.try_get("tool_name").unwrap(),
+            input_sealed: row.try_get("input_sealed").unwrap(),
+            result_sealed: row.try_get("result_sealed").unwrap(),
+            is_error: row.try_get("is_error").unwrap(),
+        })
+    }
+
+    async fn fetch_tool_call_result_row(
+        pool: &SqlitePool,
+        tool_use_id: &str,
+    ) -> Option<ToolAuditDbRow> {
+        let row = sqlx::query(
+            "SELECT llm_audit_id, tool_use_id, tool_name, input_sealed, result_sealed, is_error \
+             FROM llm_tool_call \
+             WHERE tool_use_id = ? AND result_sealed IS NOT NULL \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(tool_use_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()?;
+        Some(ToolAuditDbRow {
+            llm_audit_id: row.try_get("llm_audit_id").unwrap(),
+            tool_use_id: row.try_get("tool_use_id").unwrap(),
+            tool_name: row.try_get("tool_name").unwrap(),
+            input_sealed: row.try_get("input_sealed").unwrap(),
+            result_sealed: row.try_get("result_sealed").unwrap(),
+            is_error: row.try_get("is_error").unwrap(),
+        })
     }
 
     #[tokio::test]
@@ -942,6 +1156,103 @@ mod tests {
         let body = resp.bytes().await.unwrap();
         assert_eq!(body.as_ref(), expected.as_slice());
         assert_eq!(upstream_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn extracts_anthropic_and_openai_tool_results_from_requests() {
+        let anthropic = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "done"},
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type":"text","text":"ok"}], "is_error": true}
+                ]
+            }]
+        });
+        let got = extract_tool_results_from_request(&anthropic);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].tool_use_id, "toolu_1");
+        assert!(got[0].is_error);
+
+        let openai = serde_json::json!({
+            "messages": [{
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "{\"ok\":true}"
+            }]
+        });
+        let got = extract_tool_results_from_request(&openai);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].tool_use_id, "call_1");
+        assert_eq!(got[0].content, serde_json::json!("{\"ok\":true}"));
+        assert!(!got[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn proxy_records_tool_call_and_attaches_next_tool_result() {
+        let chunks: Vec<Vec<u8>> = vec![
+            br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"cmd\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}
+
+"#
+            .to_vec(),
+            b"data: [DONE]\n\n".to_vec(),
+        ];
+        let (upstream_url, _) = spawn_streaming_upstream(chunks).await;
+
+        let pool = open_in_memory().await.unwrap();
+        let (svc, token, keys) = build_byok_seeded(
+            pool.clone(),
+            "openai",
+            upstream_url,
+            "sk-byok-audit",
+            permissive_policy(),
+        )
+        .await;
+        let proxy_base = spawn_proxy(svc).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"model": "gpt-4o", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.bytes().await.unwrap();
+
+        let row = wait_for_tool_call_row(&pool).await;
+        let cipher_dir = crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap();
+        let cipher = crate::envelope::CipherDirectory::for_user(&cipher_dir, TEST_OWNER).unwrap();
+        let input_plain = cipher.open(&row.input_sealed.unwrap()).unwrap();
+        let input: serde_json::Value = serde_json::from_slice(&input_plain).unwrap();
+        assert_eq!(row.tool_use_id, "call_1");
+        assert_eq!(row.tool_name, "bash");
+        assert_eq!(input, serde_json::json!({"cmd":"pwd"}));
+        assert!(row.llm_audit_id.is_some());
+
+        let resp = client
+            .post(format!("{proxy_base}/llm/openai/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [{
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "{\"cwd\":\"/workspace\"}"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.bytes().await.unwrap();
+
+        let row = wait_for_tool_result_row(&pool).await;
+        assert_eq!(row.is_error, Some(0));
+        let result_plain = cipher.open(&row.result_sealed.unwrap()).unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&result_plain).unwrap();
+        assert_eq!(result, serde_json::json!("{\"cwd\":\"/workspace\"}"));
     }
 
     #[tokio::test]

@@ -22,9 +22,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{ByoConfig, ProviderConfig, Providers};
+use crate::envelope::CipherDirectory;
 use crate::proxy::policy_check::{InstancePolicy, UsageSnapshot};
 use crate::proxy::upstream_policy::policy_from_byo;
-use crate::traits::{AuditStore, InstanceStore, PolicyStore, ProviderAdapter, TokenStore};
+use crate::traits::{
+    AuditStore, InstanceStore, LlmToolCallStore, PolicyStore, ProviderAdapter, TokenStore,
+};
 use dyson_swarm_core::http::{ExternalHttpClient, InternalHttpClient};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
@@ -39,6 +42,8 @@ pub struct ProxyService {
     pub instances: Arc<dyn InstanceStore>,
     pub policies: Arc<dyn PolicyStore>,
     pub audit: Arc<dyn AuditStore>,
+    pub tool_calls: Option<Arc<dyn LlmToolCallStore>>,
+    pub ciphers: Option<Arc<dyn CipherDirectory>>,
     pub providers: Providers,
     pub adapters: HashMap<&'static str, Arc<dyn ProviderAdapter>>,
     pub http: InternalHttpClient,
@@ -76,6 +81,8 @@ impl ProxyService {
             instances,
             policies,
             audit,
+            tool_calls: None,
+            ciphers: None,
             providers,
             adapters: adapters::registry(),
             http,
@@ -112,6 +119,16 @@ impl ProxyService {
     pub fn with_byo_config(mut self, byo: ByoConfig) -> Self {
         self.external_http = Arc::new(ExternalHttpClient::new(Arc::new(policy_from_byo(&byo))));
         self.byo = byo;
+        self
+    }
+
+    pub fn with_tool_call_audit(
+        mut self,
+        store: Arc<dyn LlmToolCallStore>,
+        ciphers: Arc<dyn CipherDirectory>,
+    ) -> Self {
+        self.tool_calls = Some(store);
+        self.ciphers = Some(ciphers);
         self
     }
 

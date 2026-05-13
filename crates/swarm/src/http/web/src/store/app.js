@@ -240,6 +240,7 @@ export function setMarketplaceCatalog(catalog) {
 //   #/i/<id>/runtime            → runtime KV block
 //   #/i/<id>/tasks…             → webhooks (legacy slug)
 //   #/i/<id>/artifacts…         → artifacts
+//   #/i/<id>/activity           → LLM tool-call activity
 //   #/i/<id>/shares…            → shared links
 //   #/new                       → dedicated hire page (replaces the old CreateModal)
 //   #/skills                    → marketplace catalog + fleet skill inventory
@@ -297,6 +298,8 @@ export function parseHashView() {
   };
   const instArtifacts = h.match(/^#\/i\/([^/?#]+)\/artifacts/);
   if (instArtifacts) return { name: 'instance-artifacts', id: decodeURIComponent(instArtifacts[1]) };
+  const activity = h.match(/^#\/i\/([^/?#]+)\/activity/);
+  if (activity) return { name: 'instance-activity', id: decodeURIComponent(activity[1]) };
   const section = h.match(/^#\/i\/([^/?#]+)\/([^/?#]+)/);
   if (section) {
     const id = decodeURIComponent(section[1]);
@@ -374,6 +377,8 @@ function sectionViewName(slug) {
       return 'instance-runtime';
     case 'skills':
       return 'instance-skills';
+    case 'activity':
+      return 'instance-activity';
     default:
       return null;
   }

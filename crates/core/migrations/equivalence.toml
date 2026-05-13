@@ -65,6 +65,11 @@ sqlite = "0d963825ad8b9e1b31a3805fe89ec215e9c040347b5346da87f2293059249dc7"
 postgres = "0527915b30438dd537165f825d2b90e1449d904e92ee077687edb976b641afa3"
 reason = "dialect syntax differs; logical schema matches sqlite"
 
+[equivalence.llm_tool_call]
+sqlite = "761b8005fcba933e26760803817dd3e4c263b32880daf2bf848b3e33212b40a1"
+postgres = "ac5e5254260c210061f880e7b6cd9cb64cf147f24e093343097742db11e19812"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
 [equivalence.mcp_audit]
 sqlite = "315d80f989b048bd8c39a3e4afdebdcee55e9306aed87a1e6e21e2277d811f63"
 postgres = "d5e389486ca0a9a579ba6cbd69824fba39a11d73149ebdbfd4b0e0504dcc7de9"

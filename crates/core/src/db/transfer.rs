@@ -302,6 +302,22 @@ const MCP_AUDIT: &[ColumnSpec] = &[
     col("completed", ColumnKind::I64),
 ];
 
+const LLM_TOOL_CALL: &[ColumnSpec] = &[
+    col("id", ColumnKind::I64),
+    col("llm_audit_id", ColumnKind::I64),
+    col("owner_id", ColumnKind::Text),
+    col("instance_id", ColumnKind::Text),
+    col("tool_use_id", ColumnKind::Text),
+    col("tool_name", ColumnKind::Text),
+    col("mcp_server", ColumnKind::Text),
+    col("input_sealed", ColumnKind::Bytes),
+    col("result_sealed", ColumnKind::Bytes),
+    col("is_error", ColumnKind::I64),
+    col("called_at", ColumnKind::I64),
+    col("resulted_at", ColumnKind::I64),
+    col("mcp_audit_id", ColumnKind::I64),
+];
+
 const ADMIN_AUDIT: &[ColumnSpec] = &[
     col("id", ColumnKind::I64),
     col("actor_subject", ColumnKind::Text),
@@ -435,6 +451,12 @@ const TABLES: &[TableSpec] = &[
         serial_column: Some("id"),
     },
     TableSpec {
+        name: "llm_tool_call",
+        columns: LLM_TOOL_CALL,
+        order_by: "id",
+        serial_column: Some("id"),
+    },
+    TableSpec {
         name: "admin_audit",
         columns: ADMIN_AUDIT,
         order_by: "id",
@@ -504,7 +526,9 @@ pub const fn table_names() -> &'static [&'static str] {
         "instance_state_files",
         "mcp_docker_catalog",
         "skill_marketplace_sources",
+        "agent_skill_publications",
         "mcp_audit",
+        "llm_tool_call",
         "admin_audit",
         "sessions",
     ];
@@ -1156,9 +1180,17 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
+            "INSERT INTO llm_tool_call \
+             (id, llm_audit_id, owner_id, instance_id, tool_use_id, tool_name, mcp_server, input_sealed, result_sealed, is_error, called_at, resulted_at, mcp_audit_id) \
+             VALUES (13, 7, 'u1', 'i1', 'tool-use-1', 'mcp__mcp-1__tool', 'mcp-1', x'0A0B', x'0C0D', 0, 331, 332, 11)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO admin_audit \
              (id, actor_subject, action, target_user, params_hash, ts) \
-             VALUES (12, 'admin', 'activate', 'u1', 'hash', 340)",
+             VALUES (14, 'admin', 'activate', 'u1', 'hash', 340)",
         )
         .execute(pool)
         .await

@@ -332,6 +332,52 @@ pub struct McpAuditEntry {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct LlmToolCallEntry {
+    pub llm_audit_id: Option<i64>,
+    pub owner_id: String,
+    pub instance_id: String,
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub mcp_server: Option<String>,
+    pub input_sealed: Option<Vec<u8>>,
+    pub called_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LlmToolCallStatusFilter {
+    #[default]
+    All,
+    Ok,
+    Err,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LlmToolCallFilters<'a> {
+    pub tool: Option<&'a str>,
+    pub status: LlmToolCallStatusFilter,
+    pub server: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmToolCallRow {
+    pub id: i64,
+    pub llm_audit_id: Option<i64>,
+    pub owner_id: String,
+    pub instance_id: String,
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub mcp_server: Option<String>,
+    pub input_sealed: Option<Vec<u8>>,
+    pub result_sealed: Option<Vec<u8>>,
+    pub is_error: Option<bool>,
+    pub called_at: i64,
+    pub resulted_at: Option<i64>,
+    pub mcp_audit_id: Option<i64>,
+    pub mcp_status: Option<i64>,
+    pub mcp_duration_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpDockerCatalogRow {
     pub server: McpDockerCatalogServer,
@@ -1059,6 +1105,41 @@ pub trait McpAuditStore: Send + Sync {
         status: i64,
         duration_ms: i64,
     ) -> Result<(), StoreError>;
+}
+
+#[async_trait]
+pub trait LlmToolCallStore: Send + Sync {
+    async fn insert_call(&self, entry: &LlmToolCallEntry) -> Result<i64, StoreError>;
+    async fn attach_result(
+        &self,
+        tool_use_id: &str,
+        result_sealed: &[u8],
+        is_error: bool,
+        resulted_at: i64,
+    ) -> Result<bool, StoreError>;
+    async fn list(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        filters: LlmToolCallFilters<'_>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<LlmToolCallRow>, StoreError>;
+    async fn stream_after(
+        &self,
+        owner_id: &str,
+        instance_id: &str,
+        cursor_id: i64,
+    ) -> Result<Vec<LlmToolCallRow>, StoreError>;
+    async fn link_mcp_audit(
+        &self,
+        tool_call_id: i64,
+        owner_id: &str,
+        instance_id: &str,
+        server_name: &str,
+        tool_name: &str,
+        called_at: i64,
+    ) -> Result<bool, StoreError>;
 }
 
 #[async_trait]

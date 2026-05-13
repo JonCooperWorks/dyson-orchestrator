@@ -3239,6 +3239,83 @@
 .audit-deleted-task { margin-left: 6px; }
 .audit-status-badge { margin-left: 6px; }
 
+/* LLM tool-call activity. */
+.activity-panel { position: relative; }
+.activity-live-on { color: var(--ok, #22c55e); }
+.activity-filters {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 96px minmax(120px, 1fr) minmax(180px, 2fr);
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.activity-filters select,
+.activity-filters input {
+  min-width: 0;
+}
+.activity-list {
+  display: grid;
+  gap: 6px;
+  max-height: 62vh;
+  overflow: auto;
+}
+.activity-row {
+  display: grid;
+  grid-template-columns: 96px minmax(160px, 1.4fr) 70px 32px minmax(160px, 2fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: inherit;
+  text-align: left;
+}
+.activity-row:hover { background: var(--bg-soft, rgba(255, 255, 255, 0.02)); }
+.activity-row-error { border-color: color-mix(in srgb, var(--warn, #f59e0b) 50%, var(--border)); }
+.activity-time,
+.activity-duration,
+.activity-status,
+.activity-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-time,
+.activity-duration {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+.activity-tool { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 100vw);
+  z-index: 40;
+  padding: 18px;
+  overflow: auto;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 30px rgba(0, 0, 0, 0.25);
+}
+.activity-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.activity-drawer h2,
+.activity-drawer h3 {
+  margin: 0 0 8px;
+}
+.activity-drawer h3 {
+  margin-top: 16px;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+}
+
 /* Detail page metadata + body view. */
 .audit-meta {
   display: grid;
@@ -3274,6 +3351,9 @@
   .audit-task-filter { width: 100%; }
   .audit-meta { grid-template-columns: 1fr; }
   .audit-meta dt { margin-top: 6px; }
+  .activity-filters { grid-template-columns: 1fr; }
+  .activity-row { grid-template-columns: 1fr; }
+  .activity-status { position: absolute; right: 18px; }
 }
 
 @media (max-width: 700px) {

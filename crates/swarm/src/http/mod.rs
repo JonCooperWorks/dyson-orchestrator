@@ -31,6 +31,7 @@ pub mod skill_marketplace;
 pub mod skills;
 pub mod snapshots;
 pub mod static_assets;
+pub mod tool_calls;
 pub mod webhooks;
 
 use std::path::PathBuf;
@@ -67,6 +68,7 @@ pub struct AppState {
     pub users: Arc<dyn crate::traits::UserStore>,
     pub sessions: Arc<dyn crate::traits::SessionStore>,
     pub admin_audit: Arc<dyn crate::traits::AdminAuditStore>,
+    pub llm_tool_calls: Arc<dyn crate::traits::LlmToolCallStore>,
     pub sandbox_domain: String,
     /// Public hostname swarm serves on, e.g. `"swarm.example.com"`.
     /// Drives the host-based dispatcher in
@@ -211,6 +213,7 @@ pub fn router(
         .merge(instance_artefacts::router(state.clone()))
         .merge(skill_marketplace::router(state.clone()))
         .merge(skills::router(state.clone()))
+        .merge(tool_calls::router(state.clone()))
         .merge(mcp_user_router)
         .layer(middleware::from_fn_with_state(
             user_auth.clone(),
@@ -276,10 +279,13 @@ mod tests {
     use crate::db::sqlite::instances::SqlxInstanceStore;
     use crate::db::sqlite::open_in_memory;
     use crate::db::sqlite::tokens::SqlxTokenStore;
+    use crate::network_policy::NetworkPolicy;
     use crate::traits::{
         BackupSink, CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus,
-        InstanceStore, ProbeResult, SandboxInfo, SnapshotInfo, SnapshotStore, TokenStore,
+        InstanceStore, LlmToolCallEntry, ProbeResult, SandboxInfo, SnapshotInfo, SnapshotStore,
+        TokenStore,
     };
+    use futures::StreamExt as _;
 
     struct StubProber;
 
@@ -411,6 +417,7 @@ mod tests {
             users: users_store.clone(),
             sessions: sessions_store,
             admin_audit: crate::db::sqlite::admin_audit_store(pool.clone()),
+            llm_tool_calls: crate::db::sqlite::llm_tool_call_store(pool.clone()),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(auth_config::AuthConfig::none()),
@@ -540,6 +547,84 @@ mod tests {
             }
         }
         UserAuthState::new(Arc::new(AlwaysMissing), users)
+    }
+
+    async fn seed_owned_instance(
+        instances: &Arc<dyn InstanceStore>,
+        owner_id: &str,
+        instance_id: &str,
+    ) {
+        instances
+            .create(InstanceRow {
+                id: instance_id.into(),
+                owner_id: owner_id.into(),
+                name: "agent".into(),
+                task: "task".into(),
+                cube_sandbox_id: Some("cube-1".into()),
+                state_generation: "gen-1".into(),
+                template_id: "tmpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "bearer".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: 0,
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: 0,
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: NetworkPolicy::NoLocalNet,
+                network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
+                tools: Vec::new(),
+            })
+            .await
+            .expect("seed instance");
+    }
+
+    fn seal_json_for_test(state: &AppState, owner_id: &str, value: serde_json::Value) -> Vec<u8> {
+        let cipher =
+            crate::envelope::CipherDirectory::for_user(state.ciphers.as_ref(), owner_id).unwrap();
+        cipher.seal(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    async fn seed_tool_call(
+        state: &AppState,
+        owner_id: &str,
+        instance_id: &str,
+        use_id: &str,
+        tool: &str,
+        server: Option<&str>,
+        called_at: i64,
+        result: Option<(serde_json::Value, bool, i64)>,
+    ) -> i64 {
+        let id = state
+            .llm_tool_calls
+            .insert_call(&LlmToolCallEntry {
+                llm_audit_id: None,
+                owner_id: owner_id.into(),
+                instance_id: instance_id.into(),
+                tool_use_id: use_id.into(),
+                tool_name: tool.into(),
+                mcp_server: server.map(str::to_owned),
+                input_sealed: Some(seal_json_for_test(
+                    state,
+                    owner_id,
+                    serde_json::json!({"tool": tool, "needle": use_id}),
+                )),
+                called_at,
+            })
+            .await
+            .unwrap();
+        if let Some((value, is_error, resulted_at)) = result {
+            let sealed = seal_json_for_test(state, owner_id, value);
+            state
+                .llm_tool_calls
+                .attach_result(use_id, &sealed, is_error, resulted_at)
+                .await
+                .unwrap();
+        }
+        id
     }
 
     #[tokio::test]
@@ -1111,6 +1196,194 @@ mod tests {
         assert_eq!(r.status(), 200);
         let body: serde_json::Value = r.json().await.unwrap();
         assert_eq!(body["mode"], "none");
+    }
+
+    #[tokio::test]
+    async fn tool_call_audit_list_filters_paginates_and_enforces_owner() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (alice_auth, alice_id) =
+            token_bound_user_auth(users.clone(), "alice", "alice-token").await;
+        seed_owned_instance(&instances, &alice_id, "inst-a").await;
+        let bash = seed_tool_call(
+            &state,
+            &alice_id,
+            "inst-a",
+            "use-bash",
+            "bash",
+            None,
+            10,
+            Some((serde_json::json!({"ok": true}), false, 12)),
+        )
+        .await;
+        let _ok = seed_tool_call(
+            &state,
+            &alice_id,
+            "inst-a",
+            "use-gh-ok",
+            "mcp__github__create_issue",
+            Some("github"),
+            20,
+            Some((serde_json::json!({"number": 1}), false, 24)),
+        )
+        .await;
+        let err = seed_tool_call(
+            &state,
+            &alice_id,
+            "inst-a",
+            "use-gh-err",
+            "mcp__github__close_issue",
+            Some("github"),
+            30,
+            Some((serde_json::json!({"error": "needle"}), true, 35)),
+        )
+        .await;
+        let base = spawn(
+            state.clone(),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            alice_auth,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let body: serde_json::Value = client
+            .get(format!(
+                "{base}/v1/instances/inst-a/audit/tool-calls?server=github&status=err&q=needle&limit=1"
+            ))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["id"], err);
+        assert_eq!(body["items"][0]["result"]["error"], "needle");
+        assert_eq!(body["next_cursor"], err);
+
+        let body: serde_json::Value = client
+            .get(format!(
+                "{base}/v1/instances/inst-a/audit/tool-calls?before={err}&limit=10"
+            ))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let ids: Vec<i64> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_i64().unwrap())
+            .collect();
+        assert!(ids.contains(&bash));
+
+        let (bob_auth, _bob_id) = token_bound_user_auth(users, "bob", "bob-token").await;
+        let bob_base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            bob_auth,
+        )
+        .await;
+        let r = client
+            .get(format!("{bob_base}/v1/instances/inst-a/audit/tool-calls"))
+            .bearer_auth("bob-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tool_call_audit_sse_sends_initial_event() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (alice_auth, alice_id) = token_bound_user_auth(users, "alice", "alice-token").await;
+        seed_owned_instance(&instances, &alice_id, "inst-a").await;
+        seed_tool_call(
+            &state, &alice_id, "inst-a", "use-bash", "bash", None, 10, None,
+        )
+        .await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            alice_auth,
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .get(format!(
+                "{base}/v1/instances/inst-a/audit/tool-calls/stream"
+            ))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let mut stream = resp.bytes_stream();
+        let chunk = stream.next().await.unwrap().unwrap();
+        let text = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(text.contains("event: tool_call"));
+        assert!(text.contains("\"tool_name\":\"bash\""));
+    }
+
+    #[tokio::test]
+    async fn tool_call_audit_sse_filters_followed_events() {
+        let (state, users, instances) = build_state_with_instances().await;
+        let (alice_auth, alice_id) = token_bound_user_auth(users, "alice", "alice-token").await;
+        seed_owned_instance(&instances, &alice_id, "inst-a").await;
+        let base = spawn(
+            state.clone(),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            alice_auth,
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .get(format!(
+                "{base}/v1/instances/inst-a/audit/tool-calls/stream?tool=bash"
+            ))
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let mut stream = resp.bytes_stream();
+
+        seed_tool_call(
+            &state,
+            &alice_id,
+            "inst-a",
+            "use-python",
+            "python",
+            None,
+            10,
+            None,
+        )
+        .await;
+        seed_tool_call(
+            &state, &alice_id, "inst-a", "use-bash", "bash", None, 20, None,
+        )
+        .await;
+
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(text.contains("\"tool_name\":\"bash\""));
+        assert!(!text.contains("\"tool_name\":\"python\""));
     }
 
     #[tokio::test]

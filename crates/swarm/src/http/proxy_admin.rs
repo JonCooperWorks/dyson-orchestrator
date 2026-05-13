@@ -211,6 +211,7 @@ mod tests {
             users: users_store,
             sessions: crate::db::sqlite::session_store(pool.clone()),
             admin_audit: crate::db::sqlite::admin_audit_store(pool.clone()),
+            llm_tool_calls: crate::db::sqlite::llm_tool_call_store(pool.clone()),
             prober: Arc::new(StubProber),
             tokens: tokens_store.clone(),
             sandbox_domain: "cube.test".into(),

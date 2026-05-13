@@ -13,9 +13,9 @@ use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
     AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
-    InstanceStore, McpAuditStore, McpDockerCatalogStore, PolicyStore, SessionStore, ShareStore,
-    SkillMarketplaceSourceStore, SnapshotStore, StateFileStore, SystemSecretStore, TokenStore,
-    UserSecretStore, UserStore, WebhookStore,
+    InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore, PolicyStore,
+    SessionStore, ShareStore, SkillMarketplaceSourceStore, SnapshotStore, StateFileStore,
+    SystemSecretStore, TokenStore, UserSecretStore, UserStore, WebhookStore,
 };
 
 #[cfg(feature = "postgres")]
@@ -53,6 +53,7 @@ pub struct BackendStores {
     pub policies: Arc<dyn PolicyStore>,
     pub audit: Arc<dyn AuditStore>,
     pub mcp_audit: Arc<dyn McpAuditStore>,
+    pub llm_tool_calls: Arc<dyn LlmToolCallStore>,
     pub admin_audit: Arc<dyn AdminAuditStore>,
     pub sessions: Arc<dyn SessionStore>,
     pub state_files: Arc<dyn StateFileStore>,
@@ -82,6 +83,7 @@ impl BackendStores {
             policies: sqlite::policy_store(pool.clone()),
             audit: sqlite::audit_store(pool.clone()),
             mcp_audit: sqlite::mcp_audit_store(pool.clone()),
+            llm_tool_calls: sqlite::llm_tool_call_store(pool.clone()),
             admin_audit: sqlite::admin_audit_store(pool.clone()),
             sessions: sqlite::session_store(pool.clone()),
             state_files: sqlite::state_file_store(pool.clone()),
@@ -115,6 +117,7 @@ impl BackendStores {
             policies: Arc::new(pg::policies::PgPolicyStore::new(pool.clone())),
             audit: Arc::new(pg::audit::PgAuditStore::new(pool.clone())),
             mcp_audit: Arc::new(pg::audit::PgMcpAuditStore::new(pool.clone())),
+            llm_tool_calls: Arc::new(pg::audit::PgLlmToolCallStore::new(pool.clone())),
             admin_audit: Arc::new(pg::audit::PgAdminAuditStore::new(pool.clone())),
             sessions: Arc::new(pg::sessions::PgSessionStore::new(pool.clone())),
             state_files: Arc::new(pg::state_files::PgStateFileStore::new(pool.clone())),

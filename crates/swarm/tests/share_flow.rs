@@ -285,6 +285,7 @@ async fn build() -> Fixture {
         users: users_store,
         sessions: dyson_swarm::db::sqlite::session_store(pool.clone()),
         admin_audit: dyson_swarm::db::sqlite::admin_audit_store(pool.clone()),
+        llm_tool_calls: dyson_swarm::db::sqlite::llm_tool_call_store(pool.clone()),
         sandbox_domain: "127.0.0.1".to_string(),
         hostname: Some(apex.clone()),
         auth_config: Arc::new(http::auth_config::AuthConfig::none()),

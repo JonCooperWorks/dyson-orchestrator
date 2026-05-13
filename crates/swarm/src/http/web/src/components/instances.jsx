@@ -25,6 +25,7 @@ import { InstanceArtifactsPage, ArtifactPage } from './artifacts.jsx';
 import { MarkdownBody } from './markdown.jsx';
 import { ShareAccessLogPage } from './shares.jsx';
 import { InstallSkillModal, SkillInventoryList } from './skills.jsx';
+import { ActivityPage } from './activity.jsx';
 
 // Links inside task markdown open in a new tab — the task pane is a
 // scratchpad, not a navigation target, and following a link in-place
@@ -82,6 +83,7 @@ export function instanceSectionFromView(view) {
     case 'instance-snapshots': return 'snapshots';
     case 'instance-runtime': return 'runtime';
     case 'instance-skills': return 'skills';
+    case 'instance-activity': return 'activity';
     case 'instance-tasks':
     case 'instance-task-new':
     case 'instance-task-edit':
@@ -112,6 +114,7 @@ export function sectionHref(id, section) {
     case 'skills': return `#/i/${enc}/skills`;
     case 'tasks': return `#/i/${enc}/tasks`;
     case 'artifacts': return `#/i/${enc}/artifacts`;
+    case 'activity': return `#/i/${enc}/activity`;
     default: return `#/i/${enc}`;
   }
 }
@@ -2417,6 +2420,7 @@ const DETAIL_SECTIONS = [
   { key: 'skills', label: 'skills' },
   { key: 'tasks', label: 'webhooks' },
   { key: 'artifacts', label: 'artifacts' },
+  { key: 'activity', label: 'Activity' },
 ];
 
 function InstanceDetail({ id, onNew, view }) {
@@ -2757,6 +2761,8 @@ function DetailSectionBody({ view, instance, activeSection }) {
     case 'tasks':
     case 'artifacts':
       return <InstanceAuxiliaryRoute view={view} instanceId={instance.id}/>;
+    case 'activity':
+      return <ActivityPage instanceId={instance.id} embedded/>;
     case 'summary':
     default:
       return <SummarySection instance={instance}/>;
@@ -2843,7 +2849,7 @@ function SkillsSection({ instance }) {
 
 function SummarySection({ instance }) {
   const configSections = DETAIL_SECTIONS.filter(s =>
-    !['summary', 'tasks', 'artifacts'].includes(s.key)
+    !['summary', 'tasks', 'artifacts', 'activity'].includes(s.key)
   );
   return (
     <>

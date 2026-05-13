@@ -18,9 +18,9 @@ use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
     AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
-    InstanceStore, McpAuditStore, McpDockerCatalogStore, PolicyStore, SessionStore, ShareStore,
-    SkillMarketplaceSourceStore, SnapshotStore, StateFileStore, SystemSecretStore, TokenStore,
-    UserSecretStore, UserStore, WebhookStore,
+    InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore, PolicyStore,
+    SessionStore, ShareStore, SkillMarketplaceSourceStore, SnapshotStore, StateFileStore,
+    SystemSecretStore, TokenStore, UserSecretStore, UserStore, WebhookStore,
 };
 
 pub mod agent_skill_publications;
@@ -130,6 +130,10 @@ pub fn audit_store(pool: SqlitePool) -> Arc<dyn AuditStore> {
 
 pub fn mcp_audit_store(pool: SqlitePool) -> Arc<dyn McpAuditStore> {
     Arc::new(audit::SqliteMcpAuditStore::new(pool))
+}
+
+pub fn llm_tool_call_store(pool: SqlitePool) -> Arc<dyn LlmToolCallStore> {
+    Arc::new(audit::SqliteLlmToolCallStore::new(pool))
 }
 
 pub fn admin_audit_store(pool: SqlitePool) -> Arc<dyn AdminAuditStore> {

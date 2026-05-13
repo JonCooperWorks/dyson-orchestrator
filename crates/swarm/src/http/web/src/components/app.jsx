@@ -52,6 +52,7 @@ function renderView(view) {
     case 'instance-snapshots':
     case 'instance-runtime':
     case 'instance-skills':
+    case 'instance-activity':
     case 'instance-tasks':
     case 'instance-task-new':
     case 'instance-task-edit':
