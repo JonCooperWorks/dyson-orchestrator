@@ -105,7 +105,7 @@ export function ActivityPage({ instanceId, embedded = false }) {
               {paused ? 'resume' : 'pause'}
             </button>
             <button type="button" className="btn btn-ghost btn-sm" onClick={doExport} disabled={!hasRows}>
-              Export
+              export
             </button>
           </div>
         </div>
@@ -181,13 +181,13 @@ function ActivityDrawer({ row, onClose }) {
         <dt>resulted_at</dt><dd>{row.resulted_at ? `${fmtTime(row.resulted_at, { style: 'locale' })} (${duration(row)})` : '…'}</dd>
         {row.mcp_server ? <><dt>mcp_server</dt><dd><code>{row.mcp_server}</code></dd></> : null}
       </dl>
-      <h3>INPUT</h3>
+      <h3>input</h3>
       <pre className="audit-body">{JSON.stringify(row.input, null, 2)}</pre>
-      <h3>RESULT</h3>
+      <h3>result</h3>
       <pre className="audit-body">{row.result ? JSON.stringify(row.result, null, 2) : '…'}</pre>
       {row.mcp_audit_id ? (
         <>
-          <h3>MCP TRANSPORT</h3>
+          <h3>mcp transport</h3>
           <pre className="audit-body">{JSON.stringify({
             mcp_audit_id: row.mcp_audit_id,
             status: row.mcp_status,

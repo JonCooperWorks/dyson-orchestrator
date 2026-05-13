@@ -200,7 +200,7 @@ describe('summary section', () => {
     renderSection({ name: 'instance', id: 'inst-test' }, makeRow());
 
     expect(await screen.findByText(/Security review/)).toBeInTheDocument();
-    expect(screen.getByText(/^activity$/)).toBeInTheDocument();
+    expect(screen.getAllByText(/^activity$/).length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: /^identity$/ })).toHaveAttribute(
       'href',
       '#/i/inst-test/identity',

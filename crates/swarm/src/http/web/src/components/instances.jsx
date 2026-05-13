@@ -2414,13 +2414,13 @@ const DETAIL_SECTIONS = [
   { key: 'model', label: 'model' },
   { key: 'network', label: 'network' },
   { key: 'tools', label: 'tools' },
-  { key: 'mcp', label: 'MCP' },
+  { key: 'mcp', label: 'mcp' },
   { key: 'snapshots', label: 'snapshots' },
   { key: 'runtime', label: 'runtime' },
   { key: 'skills', label: 'skills' },
   { key: 'tasks', label: 'webhooks' },
   { key: 'artifacts', label: 'artifacts' },
-  { key: 'activity', label: 'Activity' },
+  { key: 'activity', label: 'activity' },
 ];
 
 function InstanceDetail({ id, onNew, view }) {
