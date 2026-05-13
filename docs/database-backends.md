@@ -1,4 +1,4 @@
-# Multiple Databases
+# Database Backends
 
 Swarm supports two storage backends behind the same persistence traits:
 
