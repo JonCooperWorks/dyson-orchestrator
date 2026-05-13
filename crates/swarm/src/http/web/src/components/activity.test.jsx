@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import { ApiProvider } from '../hooks/useApi.jsx';
@@ -70,5 +70,34 @@ describe('ActivityPage', () => {
       'inst-a',
       expect.objectContaining({ status: 'ok' }),
     ));
+  });
+
+  test('updates an open drawer when a result attaches to an existing row', async () => {
+    const pending = {
+      ...rows[0],
+      result: null,
+      is_error: null,
+      resulted_at: null,
+    };
+    const completed = {
+      ...pending,
+      result: { stdout: 'audit-smoke' },
+      is_error: false,
+      resulted_at: pending.called_at + 3,
+    };
+    let pushToolCall;
+    streamToolCalls.mockImplementationOnce((client, instanceId, filters, onEvent) => {
+      pushToolCall = onEvent;
+      return () => {};
+    });
+    listToolCalls.mockResolvedValue({ items: [pending], next_cursor: pending.id });
+    renderActivity();
+
+    fireEvent.click(await screen.findByRole('listitem'));
+    expect(screen.queryByText(/audit-smoke/)).toBeNull();
+
+    act(() => pushToolCall(completed));
+
+    expect(await screen.findByText(/audit-smoke/)).toBeInTheDocument();
   });
 });

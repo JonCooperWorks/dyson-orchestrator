@@ -5,6 +5,7 @@ import { fmtTime } from '../utils/format.js';
 
 const PAGE_LIMIT = 100;
 const MEMORY_CAP = 1000;
+const RESULT_REFRESH_MS = 1500;
 
 export function ActivityPage({ instanceId, embedded = false }) {
   const { client } = useApi();
@@ -16,6 +17,16 @@ export function ActivityPage({ instanceId, embedded = false }) {
   const [live, setLive] = React.useState(true);
   const [paused, setPaused] = React.useState(false);
   const pausedBuffer = React.useRef([]);
+
+  const mergeIncomingRows = React.useCallback((incoming) => {
+    const clean = (Array.isArray(incoming) ? incoming : [incoming]).filter(Boolean);
+    if (clean.length === 0) return;
+    if (paused) {
+      pausedBuffer.current = mergeRows([...clean, ...pausedBuffer.current]);
+      return;
+    }
+    setRows(prev => mergeRows([...clean, ...(prev || [])]));
+  }, [paused]);
 
   React.useEffect(() => {
     const id = setTimeout(() => setDebounced(filters), 250);
@@ -44,16 +55,28 @@ export function ActivityPage({ instanceId, embedded = false }) {
       client,
       instanceId,
       { ...debounced, limit: 50 },
-      row => {
-        if (paused) {
-          pausedBuffer.current = [row, ...pausedBuffer.current].slice(0, MEMORY_CAP);
-          return;
-        }
-        setRows(prev => mergeRows([row, ...(prev || [])]));
-      },
+      row => mergeIncomingRows(row),
       e => setErr(e?.message || 'activity stream failed'),
     );
-  }, [client, instanceId, debounced, live, paused]);
+  }, [client, instanceId, debounced, live, mergeIncomingRows]);
+
+  React.useEffect(() => {
+    if (!live) return undefined;
+    let cancelled = false;
+    const id = setInterval(() => {
+      listToolCalls(client, instanceId, { ...debounced, limit: PAGE_LIMIT })
+        .then(page => {
+          if (!cancelled) mergeIncomingRows(page?.items || []);
+        })
+        .catch(e => {
+          if (!cancelled) setErr(e?.detail || e?.message || 'activity refresh failed');
+        });
+    }, RESULT_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [client, instanceId, debounced, live, mergeIncomingRows]);
 
   React.useEffect(() => {
     if (paused || pausedBuffer.current.length === 0) return;
@@ -61,6 +84,12 @@ export function ActivityPage({ instanceId, embedded = false }) {
     pausedBuffer.current = [];
     setRows(prev => mergeRows([...buffered, ...(prev || [])]));
   }, [paused]);
+
+  React.useEffect(() => {
+    if (!selected || !Array.isArray(rows)) return;
+    const updated = rows.find(row => row.id === selected.id);
+    if (updated && updated !== selected) setSelected(updated);
+  }, [rows, selected]);
 
   const toolOptions = unique(rows, 'tool_name');
   const serverOptions = unique(rows, 'mcp_server');
