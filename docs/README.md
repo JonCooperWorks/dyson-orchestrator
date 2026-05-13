@@ -18,6 +18,7 @@ stores encrypted state, brokers LLM and MCP traffic, and serves the web UI.
 | [Auth and Keys](auth-and-keys.md) | OIDC, user API keys, proxy tokens, admin-role gate, host-side break-glass mint |
 | [Artefacts](artefacts.md) | Cache layout, ingest path, cold reads, sweep, owner scoping, SPA artefact surfaces |
 | [Shares](shares.md) | Signed public URL tokens, `jti` owner routes, cache-first reads, rendering, access audit |
+| [Audit](audit.md) | LLM request audit, MCP transport audit, sealed tool-call forensics, Activity tab and API |
 | [LLM Proxy](llm-proxy.md) | `/llm/*` request path, policy enforcement, key resolution, streaming behaviour, audit |
 | [Restore and Clone](restore-and-clone.md) | Snapshot restore, full clone, empty clone, reset/recreate/rotation semantics |
 | [MCP and OAuth](mcp-and-oauth.md) | MCP server storage, proxying, OAuth start/callback, path-scoped discovery, operator expectations |

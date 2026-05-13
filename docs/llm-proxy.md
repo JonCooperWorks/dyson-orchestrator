@@ -80,6 +80,12 @@ Audit rows track:
 Rows are inserted before the response body is fully consumed so a crash or
 client disconnect still leaves forensic evidence.
 
+Model-emitted tool calls are audited separately in `llm_tool_call`. Swarm
+captures the call side from streaming Anthropic/OpenAI-compatible tool-use
+events, seals the input under the owner age identity, and attaches the sealed
+`tool_result` when Dyson sends it back on the next turn. See [Audit](audit.md)
+for the table, API, and Activity tab details.
+
 ## Relationship To The Egress Proxy
 
 The egress proxy enforces network policy at the destination layer. The LLM

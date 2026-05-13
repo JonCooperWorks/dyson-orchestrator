@@ -6,6 +6,8 @@ and rebuilt safely.
 For the full source-of-truth matrix, see [State Ownership](state-ownership.md).
 For backend selection and SQLite/Postgres transfer, see
 [Database Backends](database-backends.md).
+For the forensic tables and server-side decrypted Activity view, see
+[Audit](audit.md).
 
 ## Main Persistence Layers
 
@@ -24,6 +26,8 @@ The SQLite database holds metadata and indexes:
 - artefact cache metadata
 - mirrored state-file metadata
 - LLM audit rows
+- MCP audit rows
+- sealed LLM tool-call audit rows
 
 ### Local filesystem cache
 
