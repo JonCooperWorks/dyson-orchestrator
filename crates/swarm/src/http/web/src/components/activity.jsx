@@ -2,6 +2,7 @@ import React from 'react';
 import { useApi } from '../hooks/useApi.jsx';
 import { exportToolCallsNdjson, listToolCallFacets, listToolCalls, streamToolCalls } from '../api/audit.js';
 import { fmtTime } from '../utils/format.js';
+import { EmptyState } from './ui.jsx';
 
 const PAGE_LIMIT = 100;
 const MEMORY_CAP = 1000;
@@ -319,16 +320,16 @@ export function ActivityPage({ instanceId, embedded = false }) {
                     aria-label="search tool payloads"
                   />
                   {filters.q ? (
-                    <button type="button" className="activity-chip-clear activity-search-clear" onClick={() => setSearch('')} aria-label="clear payload search">
+                    <button type="button" className="btn btn-ghost btn-sm activity-search-clear" onClick={() => setSearch('')} aria-label="clear payload search">
                       x
                     </button>
                   ) : null}
-                  <button type="button" className="activity-density-toggle" onClick={toggleDensity}>
+                  <button type="button" className="btn btn-ghost btn-sm activity-density-toggle" onClick={toggleDensity}>
                     density: {density}
                   </button>
                   <button
                     type="button"
-                    className={`activity-live-button ${paused ? 'activity-live-paused' : 'activity-live-on'}`}
+                    className={`btn btn-ghost btn-sm activity-live-button ${paused ? 'activity-live-paused' : 'activity-live-on'}`}
                     onClick={togglePaused}
                   >
                     {paused ? `paused${bufferedCount ? ` · ${bufferedCount} new` : ''}` : 'live'}
@@ -342,17 +343,22 @@ export function ActivityPage({ instanceId, embedded = false }) {
 
             {!hasRows ? (
               hasActiveFilters ? (
-                <div className="activity-empty-filtered">
-                  <p className="muted small">no calls match these filters — clear filters</p>
-                  <button type="button" className="btn btn-ghost btn-sm" onClick={clearAllFilters}>clear filters</button>
-                </div>
+                <EmptyState
+                  glyph="∅"
+                  title="no calls match these filters"
+                  actions={<button type="button" className="btn btn-ghost btn-sm" onClick={clearAllFilters}>clear filters</button>}
+                >
+                  clear filters to return to the full activity stream.
+                </EmptyState>
               ) : (
-                <p className="muted small">no tool calls yet — the agent hasn't called any tools on this instance.</p>
+                <EmptyState glyph="∅" title="no tool calls yet">
+                  the agent hasn't called any tools on this instance.
+                </EmptyState>
               )
             ) : (
               <>
                 {newAwayCount > 0 ? (
-                  <button type="button" className="activity-new-pill" onClick={jumpToTop}>↑ {newAwayCount} new</button>
+                  <button type="button" className="btn btn-ghost btn-sm activity-new-pill" onClick={jumpToTop}>↑ {newAwayCount} new</button>
                 ) : null}
                 <div
                   className={`activity-list activity-density-${density}`}
@@ -388,12 +394,12 @@ function FilterChip({ label, value, options, open, onOpen, onSelect, onClear }) 
   return (
     <div className="activity-filter-chip-wrap">
       <div className={`activity-filter-chip ${active ? 'activity-filter-chip-active' : ''}`}>
-        <button type="button" className="activity-filter-chip-main" onClick={onOpen}>
+        <button type="button" className="btn btn-ghost btn-sm activity-filter-chip-main" onClick={onOpen}>
           <span>{label}: {shown}</span>
           <span aria-hidden="true">▼</span>
         </button>
         {active ? (
-          <button type="button" className="activity-chip-clear" onClick={onClear} aria-label={`clear ${label} filter`}>
+          <button type="button" className="btn btn-ghost btn-sm activity-filter-clear" onClick={onClear} aria-label={`clear ${label} filter`}>
             x
           </button>
         ) : null}
@@ -408,7 +414,7 @@ function FilterChip({ label, value, options, open, onOpen, onSelect, onClear }) 
                 role="option"
                 aria-selected={option === value}
                 key={optionLabel}
-                className={option === value ? 'selected' : ''}
+                className={`btn btn-ghost btn-sm ${option === value ? 'selected' : ''}`}
                 onClick={() => onSelect(option)}
               >
                 {optionLabel}

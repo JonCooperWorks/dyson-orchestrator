@@ -17,3 +17,14 @@ describe('section tab highlights', () => {
     expect(panelsCss).toMatch(/\.detail-section-chip\s*\{[\s\S]*border-radius:\s*0;/);
   });
 });
+
+describe('activity controls', () => {
+  test('use the app control radius rather than pill styling', () => {
+    const start = panelsCss.indexOf('/* LLM tool-call activity. */');
+    const end = panelsCss.indexOf('/* Detail page metadata + body view. */');
+    const activityCss = panelsCss.slice(start, end);
+
+    expect(activityCss).toContain('border-radius: var(--radius)');
+    expect(activityCss).not.toMatch(/border-radius:\s*999px/);
+  });
+});
