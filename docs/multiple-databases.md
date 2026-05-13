@@ -8,8 +8,7 @@ Swarm supports two storage backends behind the same persistence traits:
   machine and support external backup/replication tooling.
 
 There is no automatic startup migration between backends. Switching databases
-is an explicit operator action through `swarm db transfer` or
-`swarmctl db transfer`.
+is an explicit operator action through `swarmctl db transfer`.
 
 ## Selection
 
@@ -59,7 +58,7 @@ the pinned hash.
 Use:
 
 ```sh
-swarm db transfer \
+swarmctl db transfer \
   --from sqlite \
   --to postgres \
   --source-url /var/lib/dyson-swarm/state.db \
@@ -81,7 +80,7 @@ keeps sealed ciphertext, hashes, lookup prefixes, and audit columns byte-faithfu
 1. Stop `dyson-swarm` and `dyson-egress-proxy`.
 2. Snapshot the SQLite file and keep the age key directory with it.
 3. Stand up an empty Postgres database.
-4. Run `swarm db transfer --from sqlite --to postgres ... --confirm`.
+4. Run `swarmctl db transfer --from sqlite --to postgres ... --confirm`.
 5. Flip `database_backend=postgres` and `database_url` in the deploy config.
 6. Redeploy from `deploy/scripts/bring-up.sh`.
 7. Run `deploy/scripts/bring-up.sh smoke`.

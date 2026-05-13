@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::Parser;
 
 use dyson_swarm::{
     auth::AuthState,
@@ -63,50 +63,6 @@ struct ServerArgs {
     /// Disable the auth check on /v1/* routes. Loud and dangerous.
     #[arg(long = "dangerous-no-auth", default_value_t = false)]
     dangerous_no_auth: bool,
-
-    #[command(subcommand)]
-    command: Option<ServerCommand>,
-}
-
-#[derive(Debug, Subcommand)]
-enum ServerCommand {
-    /// Explicit database maintenance commands.
-    Db {
-        #[command(subcommand)]
-        action: DbAction,
-    },
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum DbBackendArg {
-    Sqlite,
-    Postgres,
-}
-
-impl From<DbBackendArg> for config::DatabaseBackend {
-    fn from(value: DbBackendArg) -> Self {
-        match value {
-            DbBackendArg::Sqlite => Self::Sqlite,
-            DbBackendArg::Postgres => Self::Postgres,
-        }
-    }
-}
-
-#[derive(Debug, Subcommand)]
-enum DbAction {
-    /// Destructively transfer all rows between two empty/migrated backends.
-    Transfer {
-        #[arg(long)]
-        from: DbBackendArg,
-        #[arg(long)]
-        to: DbBackendArg,
-        #[arg(long)]
-        source_url: String,
-        #[arg(long)]
-        target_url: String,
-        #[arg(long, default_value_t = false)]
-        confirm: bool,
-    },
 }
 
 const DANGEROUS_BANNER: &str = "\
@@ -137,9 +93,6 @@ async fn main() -> ExitCode {
         }
     }
     let args = ServerArgs::parse();
-    if let Some(ServerCommand::Db { action }) = args.command {
-        return run_db(action).await;
-    }
     if args.dangerous_no_auth {
         if !env_flag("SWARM_DEV_MODE") && !env_flag("SWARM_DANGEROUS_NO_AUTH_OK") {
             eprintln!(
@@ -160,42 +113,6 @@ async fn main() -> ExitCode {
     };
 
     run_server(cfg, args.dangerous_no_auth).await
-}
-
-async fn run_db(action: DbAction) -> ExitCode {
-    match action {
-        DbAction::Transfer {
-            from,
-            to,
-            source_url,
-            target_url,
-            confirm,
-        } => {
-            const RED: &str = "\x1b[31;1m";
-            const RESET: &str = "\x1b[0m";
-            if !confirm {
-                eprintln!(
-                    "{RED}DESTRUCTIVE DATABASE TRANSFER REFUSED{RESET}\n\
-                     target: {target_url}\n\
-                     This command writes every migrated table into the target and requires an empty target.\n\
-                     Re-run with --confirm only after verifying the target URL."
-                );
-                return ExitCode::from(2);
-            }
-            match db::transfer::run(from.into(), to.into(), &source_url, &target_url).await {
-                Ok(report) => {
-                    for item in report.counts {
-                        println!("{}\t{}", item.table, item.rows);
-                    }
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("error: db transfer failed: {err:#}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-    }
 }
 
 async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
