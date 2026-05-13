@@ -55,6 +55,10 @@ the pinned hash.
 
 ## Transfer Command
 
+`db transfer` intentionally lives only on `swarmctl`. The `swarm` server
+binary does not expose database maintenance subcommands; keep destructive
+operator actions out of the long-running service entry point.
+
 Use:
 
 ```sh
