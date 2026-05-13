@@ -1,34 +1,46 @@
-//! Versioned data migrations that need runtime secrets.
+//! SQLite versioned data migrations that need runtime secrets.
 //!
 //! SQLx migrations own schema. This module mirrors Dyson's in-process
 //! migration chain for data rewrites that need application code or envelope
 //! keys. Migrations are idempotent, versioned in sqlite, and run at startup
 //! before stores that expect the current on-disk shape are constructed.
 
+use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::map_sqlx;
 use crate::db::tokens::token_lookup_key;
+use crate::db::{RuntimeMigrationReport as MigrationReport, RuntimeMigrator};
 use crate::envelope::EnvelopeCipher;
 use crate::error::StoreError;
 use crate::now_secs;
 
-pub const CURRENT_VERSION: i64 = 2;
+const CURRENT_VERSION: i64 = 2;
 
 const MIGRATION_NAME: &str = "runtime_secret_sealing";
 const AGE_ARMOR_HEADER: &str = "-----BEGIN AGE ENCRYPTED FILE-----";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MigrationReport {
-    pub applied: bool,
-    pub proxy_tokens_sealed: usize,
-    pub instance_bearers_sealed: usize,
-    pub proxy_token_lookups_backfilled: usize,
-}
-
 enum Step {
     SealRuntimeSecrets,
     BackfillProxyTokenLookup,
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteRuntimeMigrator {
+    pool: SqlitePool,
+}
+
+impl SqliteRuntimeMigrator {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl RuntimeMigrator for SqliteRuntimeMigrator {
+    async fn migrate(&self, cipher: &dyn EnvelopeCipher) -> Result<MigrationReport, StoreError> {
+        migrate(&self.pool, cipher).await
+    }
 }
 
 struct Migration {
@@ -52,7 +64,7 @@ const fn migrations() -> &'static [Migration] {
     ]
 }
 
-pub async fn migrate(
+async fn migrate(
     pool: &SqlitePool,
     cipher: &dyn EnvelopeCipher,
 ) -> Result<MigrationReport, StoreError> {

@@ -21,5 +21,7 @@
 //! See `migrations/postgres/*.sql` for the schema (kept in lockstep with
 //! the sqlite migrations).
 
+pub mod runtime_migrations;
+
 #[cfg(feature = "postgres")]
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");

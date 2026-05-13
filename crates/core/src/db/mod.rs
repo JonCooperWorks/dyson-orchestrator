@@ -12,6 +12,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
@@ -30,7 +31,7 @@ pub mod audit;
 pub mod instances;
 pub mod mcp_catalog;
 pub mod policies;
-pub mod runtime_migrations;
+mod runtime_migrations;
 pub mod secrets;
 pub mod sessions;
 pub mod shares;
@@ -45,6 +46,22 @@ pub mod webhooks;
 pub mod pg;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeMigrationReport {
+    pub applied: bool,
+    pub proxy_tokens_sealed: usize,
+    pub instance_bearers_sealed: usize,
+    pub proxy_token_lookups_backfilled: usize,
+}
+
+#[async_trait]
+pub trait RuntimeMigrator: Send + Sync {
+    async fn migrate(
+        &self,
+        cipher: &dyn EnvelopeCipher,
+    ) -> Result<RuntimeMigrationReport, StoreError>;
+}
 
 /// Translate a [`sqlx::Error`] into the crate-level [`StoreError`] flavour
 /// callers expect. Shared so every store can use the same mapping —
@@ -104,6 +121,15 @@ pub async fn open_configured_sqlite(cfg: &Config) -> Result<SqlitePool, StoreErr
 
 pub async fn open_configured(cfg: &Config) -> Result<SqlitePool, StoreError> {
     open_configured_sqlite(cfg).await
+}
+
+pub fn runtime_migrator(pool: SqlitePool) -> Arc<dyn RuntimeMigrator> {
+    Arc::new(runtime_migrations::SqliteRuntimeMigrator::new(pool))
+}
+
+#[cfg(feature = "postgres")]
+pub fn postgres_runtime_migrator() -> Arc<dyn RuntimeMigrator> {
+    Arc::new(pg::runtime_migrations::PgRuntimeMigrator::new())
 }
 
 pub fn artefact_cache_store(pool: SqlitePool) -> Arc<dyn ArtefactCacheStore> {

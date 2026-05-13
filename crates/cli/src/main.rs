@@ -227,8 +227,9 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(err) =
-        dyson_swarm_core::db::runtime_migrations::migrate(&pool, system_cipher.as_ref()).await
+    if let Err(err) = dyson_swarm_core::db::runtime_migrator(pool.clone())
+        .migrate(system_cipher.as_ref())
+        .await
     {
         eprintln!("runtime data migration: {err}");
         return ExitCode::from(2);
@@ -306,7 +307,8 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
     let system_cipher = cipher_dir
         .system()
         .map_err(|e| format!("system envelope init: {e:#}"))?;
-    let report = db::runtime_migrations::migrate(&pool, system_cipher.as_ref())
+    let report = db::runtime_migrator(pool.clone())
+        .migrate(system_cipher.as_ref())
         .await
         .map_err(|e| format!("runtime data migration: {e:#}"))?;
     if report.applied {

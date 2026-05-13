@@ -157,7 +157,10 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match db::runtime_migrations::migrate(&pool, token_cipher.as_ref()).await {
+    match db::runtime_migrator(pool.clone())
+        .migrate(token_cipher.as_ref())
+        .await
+    {
         Ok(report) => {
             if report.applied {
                 tracing::info!(
