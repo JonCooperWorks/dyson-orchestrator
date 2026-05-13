@@ -92,3 +92,17 @@ Two swarm-side stores matter operationally:
 
 These are what let rotation and restore preserve useful state while still
 treating the sandbox itself as disposable.
+
+## Agent Skill Publication
+
+Skills learned or authored inside an agent are mirrored as normal workspace
+state under `instance_state_files`, but they are private by default. They can
+contain operator notes, environment details, or credential hints.
+
+The public marketplace projection is gated by `agent_skill_publications`.
+Publishing records only the instance id, owner id, skill name, actor, and
+timestamp; the skill body continues to come from the encrypted state-file
+mirror. A user may publish or unpublish a skill from their own instance, and an
+admin may do the same for any non-destroyed instance. Unpublished skills and
+destroyed-instance publications are not returned from marketplace catalog or
+content endpoints.

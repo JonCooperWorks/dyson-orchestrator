@@ -281,6 +281,15 @@ const SKILL_MARKETPLACE_SOURCES: &[ColumnSpec] = &[
     col("last_error", ColumnKind::Text),
 ];
 
+const AGENT_SKILL_PUBLICATIONS: &[ColumnSpec] = &[
+    col("instance_id", ColumnKind::Text),
+    col("owner_id", ColumnKind::Text),
+    col("skill", ColumnKind::Text),
+    col("published_by", ColumnKind::Text),
+    col("published_at", ColumnKind::I64),
+    col("revoked_at", ColumnKind::I64),
+];
+
 const MCP_AUDIT: &[ColumnSpec] = &[
     col("id", ColumnKind::I64),
     col("owner_id", ColumnKind::Text),
@@ -411,6 +420,12 @@ const TABLES: &[TableSpec] = &[
         name: "skill_marketplace_sources",
         columns: SKILL_MARKETPLACE_SOURCES,
         order_by: "id",
+        serial_column: None,
+    },
+    TableSpec {
+        name: "agent_skill_publications",
+        columns: AGENT_SKILL_PUBLICATIONS,
+        order_by: "instance_id, skill",
         serial_column: None,
     },
     TableSpec {
@@ -1120,6 +1135,14 @@ mod tests {
             "INSERT INTO skill_marketplace_sources \
              (id, source_type, location, enabled, created_at, updated_at, deleted_at, last_fetch_at, last_success_at, last_error) \
              VALUES ('skills-1', 'inline', '{\"skills\":[]}', 1, 320, 321, NULL, 322, 323, NULL)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_skill_publications \
+             (instance_id, owner_id, skill, published_by, published_at, revoked_at) \
+             VALUES ('i1', 'u1', 'debug-logs', 'u1', 324, NULL)",
         )
         .execute(pool)
         .await

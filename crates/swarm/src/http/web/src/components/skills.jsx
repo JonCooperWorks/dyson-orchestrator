@@ -565,19 +565,55 @@ export function SkillInventoryList({ rows, instanceId = null, onChanged = null }
   const [busySkill, setBusySkill] = React.useState('');
   const [errBySkill, setErrBySkill] = React.useState({});
 
+  const refreshAfterSkillChange = async (targetInstanceId) => {
+    const next = typeof client.listInstanceSkills === 'function'
+      ? await client.listInstanceSkills(targetInstanceId).catch(() => null)
+      : null;
+    if (Array.isArray(next)) setSkillsFor(targetInstanceId, next);
+    if (typeof client.listMarketplaceSkills === 'function') {
+      const catalog = await client.listMarketplaceSkills().catch(() => null);
+      if (catalog) setMarketplaceCatalog(catalog);
+    }
+    onChanged?.(next);
+  };
+
+  const togglePublication = async (row) => {
+    const targetInstanceId = instanceId || row.instance_id;
+    if (!targetInstanceId || !row.skill || !isPublishableAgentSkill(row)) return;
+    const publishing = !row.public;
+    const ok = publishing
+      ? window.confirm(`Publish ${row.skill} to everyone in the marketplace?`)
+      : window.confirm(`Remove ${row.skill} from the public marketplace?`);
+    if (!ok) return;
+    const busyKey = `publish:${row.skill}`;
+    setBusySkill(busyKey);
+    setErrBySkill(prev => ({ ...prev, [row.skill]: '' }));
+    try {
+      if (publishing) {
+        await client.publishSkillFromInstance(targetInstanceId, row.skill);
+      } else {
+        await client.unpublishSkillFromInstance(targetInstanceId, row.skill);
+      }
+      await refreshAfterSkillChange(targetInstanceId);
+    } catch (e) {
+      setErrBySkill(prev => ({
+        ...prev,
+        [row.skill]: e?.detail?.error || e?.detail || e?.message || 'publication failed',
+      }));
+    } finally {
+      setBusySkill('');
+    }
+  };
+
   const uninstall = async (row) => {
     const targetInstanceId = instanceId || row.instance_id;
     if (!targetInstanceId || !row.skill) return;
     if (!window.confirm(`Uninstall ${row.skill} from this agent?`)) return;
-    setBusySkill(row.skill);
+    setBusySkill(`uninstall:${row.skill}`);
     setErrBySkill(prev => ({ ...prev, [row.skill]: '' }));
     try {
       await client.uninstallSkillFromInstance(targetInstanceId, row.skill);
-      const next = typeof client.listInstanceSkills === 'function'
-        ? await client.listInstanceSkills(targetInstanceId).catch(() => null)
-        : null;
-      if (Array.isArray(next)) setSkillsFor(targetInstanceId, next);
-      onChanged?.(next);
+      await refreshAfterSkillChange(targetInstanceId);
     } catch (e) {
       setErrBySkill(prev => ({
         ...prev,
@@ -593,7 +629,13 @@ export function SkillInventoryList({ rows, instanceId = null, onChanged = null }
   }
   return (
     <div className="skill-inventory-list">
-      {rows.map(row => (
+      {rows.map(row => {
+        const publishBusy = busySkill === `publish:${row.skill}`;
+        const uninstallBusy = busySkill === `uninstall:${row.skill}`;
+        const canPublish = !!client.publishSkillFromInstance
+          && !!client.unpublishSkillFromInstance
+          && isPublishableAgentSkill(row);
+        return (
         <div
           key={`${row.instance_id}/${row.skill}`}
           className="mcp-row skill-inventory-row"
@@ -606,6 +648,7 @@ export function SkillInventoryList({ rows, instanceId = null, onChanged = null }
               {row.version ? <span className="muted small">v{row.version}</span> : null}
               {!row.has_metadata ? <span className="badge badge-warn">no metadata</span> : null}
               {!row.has_body ? <span className="badge badge-warn">missing body</span> : null}
+              {row.public ? <span className="badge badge-info">public</span> : null}
             </div>
             <div className="muted small skill-row-description skill-row-description-wrap">{row.description || '—'}</div>
             <div className="mono muted small skill-row-path">
@@ -613,19 +656,31 @@ export function SkillInventoryList({ rows, instanceId = null, onChanged = null }
             </div>
             {errBySkill[row.skill] ? <div className="error" style={{marginTop:6}}>{errBySkill[row.skill]}</div> : null}
           </div>
+          {canPublish ? (
+            <button
+              type="button"
+              className={`btn ${row.public ? 'btn-ghost' : 'btn-primary'} btn-sm`}
+              onClick={() => togglePublication(row)}
+              disabled={publishBusy || uninstallBusy}
+              aria-label={`${row.public ? 'Unpublish' : 'Publish'} ${row.skill}`}
+            >
+              {publishBusy ? (row.public ? 'unpublishing…' : 'publishing…') : (row.public ? 'unpublish' : 'publish')}
+            </button>
+          ) : null}
           {client.uninstallSkillFromInstance ? (
             <button
               type="button"
               className="btn btn-ghost btn-sm skill-uninstall-button"
               onClick={() => uninstall(row)}
-              disabled={busySkill === row.skill}
+              disabled={publishBusy || uninstallBusy}
               aria-label={`Uninstall ${row.skill}`}
             >
-              {busySkill === row.skill ? 'uninstalling…' : 'uninstall'}
+              {uninstallBusy ? 'uninstalling…' : 'uninstall'}
             </button>
           ) : null}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -708,6 +763,12 @@ function packageToCatalogSkill(body) {
 function installedSkill(rows, skill) {
   if (!skill) return null;
   return (rows || []).find(row => row.skill === skill.name) || null;
+}
+
+function isPublishableAgentSkill(row) {
+  if (!row?.has_body) return false;
+  const marketplace = String(row.marketplace_id || '');
+  return row.origin_kind !== 'marketplace' || marketplace.startsWith('agent-');
 }
 
 function skillKey(marketplace, skill) {

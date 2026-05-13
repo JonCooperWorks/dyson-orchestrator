@@ -212,6 +212,10 @@ describe('SwarmClient', () => {
       force: true,
     });
     await client.uninstallSkillFromInstance('inst/1', 'code/review');
+    await client.publishSkillFromInstance('inst/1', 'code/review');
+    await client.unpublishSkillFromInstance('inst/1', 'code/review');
+    await client.adminPublishSkillFromInstance('inst/1', 'code/review');
+    await client.adminUnpublishSkillFromInstance('inst/1', 'code/review');
 
     expect(fetchImpl.mock.calls[0][0]).toBe('/v1/skill-marketplaces');
     expect(fetchImpl.mock.calls[1][0]).toBe('/v1/skill-marketplaces/skills');
@@ -228,6 +232,14 @@ describe('SwarmClient', () => {
     });
     expect(fetchImpl.mock.calls[7][0]).toBe('/v1/instances/inst%2F1/skills/code%2Freview');
     expect(fetchImpl.mock.calls[7][1].method).toBe('DELETE');
+    expect(fetchImpl.mock.calls[8][0]).toBe('/v1/instances/inst%2F1/skills/code%2Freview/publication');
+    expect(fetchImpl.mock.calls[8][1].method).toBe('PUT');
+    expect(fetchImpl.mock.calls[9][0]).toBe('/v1/instances/inst%2F1/skills/code%2Freview/publication');
+    expect(fetchImpl.mock.calls[9][1].method).toBe('DELETE');
+    expect(fetchImpl.mock.calls[10][0]).toBe('/v1/admin/instances/inst%2F1/skills/code%2Freview/publication');
+    expect(fetchImpl.mock.calls[10][1].method).toBe('PUT');
+    expect(fetchImpl.mock.calls[11][0]).toBe('/v1/admin/instances/inst%2F1/skills/code%2Freview/publication');
+    expect(fetchImpl.mock.calls[11][1].method).toBe('DELETE');
   });
 
   test('204 No Content returns null instead of throwing on JSON parse', async () => {

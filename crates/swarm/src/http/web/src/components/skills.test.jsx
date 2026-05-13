@@ -173,4 +173,69 @@ describe('SkillCatalogRow', () => {
     });
     expect(onChanged).toHaveBeenCalled();
   });
+
+  test('instance skill inventory can publish an agent-authored skill explicitly', async () => {
+    const refreshed = [{
+      instance_id: 'inst-1',
+      skill: 'debug-logs',
+      description: 'Read logs before guessing.',
+      origin_kind: 'local',
+      marketplace_id: null,
+      version: '0.1.0',
+      updated_at: 100,
+      synced_at: 102,
+      has_body: true,
+      has_metadata: true,
+      source_path: 'workspace/skills/debug-logs/SKILL.md',
+      public: true,
+      public_marketplace_id: 'agent-inst-1',
+    }];
+    const client = {
+      publishSkillFromInstance: vi.fn(async () => ({
+        instance_id: 'inst-1',
+        skill: 'debug-logs',
+        public: true,
+      })),
+      unpublishSkillFromInstance: vi.fn(),
+      listInstanceSkills: vi.fn(async () => refreshed),
+      listMarketplaceSkills: vi.fn(async () => ({
+        sources: [{ id: 'agent-inst-1' }],
+        skills: [{ marketplace_id: 'agent-inst-1', name: 'debug-logs' }],
+        errors: [],
+      })),
+    };
+    const onChanged = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <SkillInventoryList
+          instanceId="inst-1"
+          onChanged={onChanged}
+          rows={[{
+            instance_id: 'inst-1',
+            skill: 'debug-logs',
+            description: 'Read logs before guessing.',
+            origin_kind: 'local',
+            marketplace_id: null,
+            version: '0.1.0',
+            updated_at: 100,
+            synced_at: 101,
+            has_body: true,
+            has_metadata: true,
+            source_path: 'workspace/skills/debug-logs/SKILL.md',
+            public: false,
+          }]}
+        />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Publish debug-logs' }));
+
+    await waitFor(() => {
+      expect(client.publishSkillFromInstance).toHaveBeenCalledWith('inst-1', 'debug-logs');
+    });
+    expect(client.listMarketplaceSkills).toHaveBeenCalled();
+    expect(onChanged).toHaveBeenCalledWith(refreshed);
+  });
 });

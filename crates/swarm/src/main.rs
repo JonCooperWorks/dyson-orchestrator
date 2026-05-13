@@ -726,6 +726,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         artefact_cache,
         state_files,
         skill_marketplace,
+        agent_skill_publications: stores.agent_skill_publications.clone(),
         mcp_runtime_socket,
     };
     let app = http::router(

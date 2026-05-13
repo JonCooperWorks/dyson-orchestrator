@@ -129,6 +129,10 @@ pub struct AppState {
     /// Shared skill marketplace catalog. Swarm owns catalog ingestion;
     /// Dyson instances install selected packages into their own workspaces.
     pub skill_marketplace: Arc<crate::skill_marketplace::SkillMarketplaceService>,
+    /// Explicit public opt-in rows for agent-authored skills. A mirrored
+    /// workspace skill can contain sensitive local instructions, so it only
+    /// enters the marketplace after a user/admin publishes it here.
+    pub agent_skill_publications: Arc<dyn crate::traits::AgentSkillPublicationStore>,
     /// Unix socket for the MCP runtime helper. Instance destroy uses
     /// it to tell the helper to stop any Docker/stdout sessions keyed
     /// to the instance before the sealed MCP rows disappear.
@@ -425,6 +429,9 @@ mod tests {
             artefact_cache,
             state_files,
             skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::empty()),
+            agent_skill_publications: crate::db::sqlite::agent_skill_publication_store(
+                pool.clone(),
+            ),
             mcp_runtime_socket: None,
         };
         (state, users_store, instances_store)

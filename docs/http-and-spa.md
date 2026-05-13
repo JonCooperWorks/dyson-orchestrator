@@ -37,6 +37,7 @@ Main areas:
 
 - instances list/detail/edit
 - artefacts and shares
+- skill marketplace, fleet inventory, and per-agent publish/unpublish controls
 - tasks/webhooks and delivery audit
 - MCP server management
 - BYOK management

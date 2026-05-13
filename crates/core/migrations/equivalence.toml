@@ -10,6 +10,11 @@ sqlite = "6eff4508f1b9ae6d7cec4868a82bb9e0431e4f69fbe4c396bc14143d47b85cfd"
 postgres = "8b12c46d731b15abb25ef45a978c504c63d86cb7ee04315d58617de5c0eb52c2"
 reason = "dialect syntax differs; logical schema matches sqlite"
 
+[equivalence.agent_skill_publications]
+sqlite = "f6a6cc5274ea2bed5164656cfde9d21732d50b1ceefc417c5b1cf1ab32cd6d79"
+postgres = "d63a3949fcd11eb2621148823c9c52b163215acd9b053a3843e5c8567880346a"
+reason = "dialect syntax differs; logical schema matches sqlite"
+
 [equivalence.apikey_envelope]
 sqlite = "2def1811ac0e7275677b0b82eea3fc787eda881356b5c1d12c34dd45b343c229"
 postgres = "7d8e05f99f2f816a68e3a3cf2559627b9d0c317a90e83ee029c7e093e52ab85e"

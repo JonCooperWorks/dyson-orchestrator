@@ -389,6 +389,43 @@ pub trait SkillMarketplaceSourceStore: Send + Sync {
     async fn record_fetch_error(&self, id: &str, error: &str) -> Result<(), StoreError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSkillPublicationRow {
+    pub instance_id: String,
+    pub owner_id: String,
+    pub skill: String,
+    pub published_by: String,
+    pub published_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AgentSkillPublicationSpec<'a> {
+    pub instance_id: &'a str,
+    pub owner_id: &'a str,
+    pub skill: &'a str,
+    pub published_by: &'a str,
+}
+
+#[async_trait]
+pub trait AgentSkillPublicationStore: Send + Sync {
+    async fn publish(
+        &self,
+        spec: AgentSkillPublicationSpec<'_>,
+    ) -> Result<AgentSkillPublicationRow, StoreError>;
+    async fn revoke(&self, instance_id: &str, skill: &str) -> Result<bool, StoreError>;
+    async fn find(
+        &self,
+        instance_id: &str,
+        skill: &str,
+    ) -> Result<Option<AgentSkillPublicationRow>, StoreError>;
+    async fn list_public(&self) -> Result<Vec<AgentSkillPublicationRow>, StoreError>;
+    async fn list_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<AgentSkillPublicationRow>, StoreError>;
+}
+
 #[derive(Debug, Clone)]
 pub struct AdminAuditEntry {
     pub actor_subject: String,

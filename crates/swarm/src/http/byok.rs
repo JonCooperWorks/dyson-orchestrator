@@ -532,6 +532,9 @@ mod tests {
             artefact_cache,
             state_files,
             skill_marketplace: Arc::new(crate::skill_marketplace::SkillMarketplaceService::empty()),
+            agent_skill_publications: crate::db::sqlite::agent_skill_publication_store(
+                pool.clone(),
+            ),
             mcp_runtime_socket: None,
         };
         // We don't return the upstream URL here; tests close over their

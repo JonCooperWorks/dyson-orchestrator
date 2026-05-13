@@ -239,6 +239,7 @@ struct Stack {
     or_prov: Arc<RecordingProvisioning>,
     users: Arc<dyn UserStore>,
     skill_marketplace: Arc<SkillMarketplaceService>,
+    state_files: Arc<dyson_swarm::state_files::StateFileService>,
     reconfigurer: Arc<RecordingReconfigurer>,
 }
 
@@ -445,6 +446,9 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         artefact_cache,
         state_files: state_files.clone(),
         skill_marketplace: skill_marketplace.clone(),
+        agent_skill_publications: dyson_swarm::db::sqlite::agent_skill_publication_store(
+            pool.clone(),
+        ),
         mcp_runtime_socket: None,
     };
     let app = http::router(
@@ -467,6 +471,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
         or_prov,
         users: users_store,
         skill_marketplace,
+        state_files,
         reconfigurer,
     }
 }
@@ -908,6 +913,103 @@ async fn skill_install_endpoint_validates_ownership_status_and_collisions() {
     assert_eq!(not_live["error"], "instance_not_live");
 }
 
+#[tokio::test]
+async fn agent_skills_enter_marketplace_only_after_explicit_publication() {
+    let stack = build_stack("system-admin").await;
+    let admin = reqwest::Client::new();
+
+    let alice_id = create_user(&admin, &stack.base, "alice-pub", true).await;
+    let bob_id = create_user(&admin, &stack.base, "bob-pub", true).await;
+    let alice_token = mint_api_key(&admin, &stack.base, &alice_id).await;
+    let bob_token = mint_api_key(&admin, &stack.base, &bob_id).await;
+    let instance_id = create_live_instance(&admin, &stack.base, &alice_token).await;
+    ingest_agent_skill(&stack, &instance_id, &alice_id, "debug-logs").await;
+    let marketplace = format!("agent-{instance_id}");
+
+    let catalog = marketplace_catalog(&admin, &stack.base, &bob_token).await;
+    assert!(
+        !catalog_has_skill(&catalog, &marketplace, "debug-logs"),
+        "unpublished agent skills must not be projected into marketplace"
+    );
+
+    let denied = admin
+        .put(format!(
+            "{}/v1/instances/{instance_id}/skills/debug-logs/publication",
+            stack.base
+        ))
+        .bearer_auth(&bob_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+
+    let published = admin
+        .put(format!(
+            "{}/v1/instances/{instance_id}/skills/debug-logs/publication",
+            stack.base
+        ))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(published.status(), 200);
+    let published: serde_json::Value = published.json().await.unwrap();
+    assert_eq!(published["public"], true);
+    assert_eq!(published["marketplace_id"], marketplace);
+
+    let skills = admin
+        .get(format!("{}/v1/instances/{instance_id}/skills", stack.base))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(skills.status(), 200);
+    let skills: Vec<serde_json::Value> = skills.json().await.unwrap();
+    assert!(skills.iter().any(|row| {
+        row["skill"] == "debug-logs"
+            && row["public"] == true
+            && row["public_marketplace_id"] == marketplace
+    }));
+
+    let catalog = marketplace_catalog(&admin, &stack.base, &bob_token).await;
+    assert!(catalog_has_skill(&catalog, &marketplace, "debug-logs"));
+    let content = admin
+        .get(format!(
+            "{}/v1/skill-marketplaces/{marketplace}/skills/debug-logs/content",
+            stack.base
+        ))
+        .bearer_auth(&bob_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(content.status(), 200);
+
+    let unpublished = admin
+        .delete(format!(
+            "{}/v1/instances/{instance_id}/skills/debug-logs/publication",
+            stack.base
+        ))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unpublished.status(), 200);
+    let catalog = marketplace_catalog(&admin, &stack.base, &bob_token).await;
+    assert!(!catalog_has_skill(&catalog, &marketplace, "debug-logs"));
+
+    let admin_published = admin
+        .put(format!(
+            "{}/v1/admin/instances/{instance_id}/skills/debug-logs/publication",
+            stack.base
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_published.status(), 200);
+    let catalog = marketplace_catalog(&admin, &stack.base, &bob_token).await;
+    assert!(catalog_has_skill(&catalog, &marketplace, "debug-logs"));
+}
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
@@ -947,6 +1049,50 @@ async fn add_test_marketplace(stack: &Stack, id: &str, skill: &str, version: &st
         )
         .await
         .unwrap();
+}
+
+async fn ingest_agent_skill(stack: &Stack, instance_id: &str, owner_id: &str, skill: &str) {
+    let path = format!("skills/{skill}/SKILL.md");
+    let body = format!(
+        "---\ndescription: Read logs before guessing.\n---\n# Debug Logs\n\nUse this skill to inspect runtime logs for {instance_id}.\n"
+    );
+    stack
+        .state_files
+        .ingest(
+            dyson_swarm::state_files::StateFileMeta {
+                instance_id,
+                owner_id,
+                namespace: "workspace",
+                path: &path,
+                mime: Some("text/markdown"),
+                updated_at: 1_800_000_000,
+            },
+            body.as_bytes(),
+        )
+        .await
+        .unwrap();
+}
+
+async fn marketplace_catalog(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> serde_json::Value {
+    let r = client
+        .get(format!("{base}/v1/skill-marketplaces/skills"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    r.json().await.unwrap()
+}
+
+fn catalog_has_skill(catalog: &serde_json::Value, marketplace: &str, skill: &str) -> bool {
+    catalog["skills"].as_array().is_some_and(|rows| {
+        rows.iter()
+            .any(|row| row["marketplace_id"] == marketplace && row["name"] == skill)
+    })
 }
 
 async fn create_live_instance(client: &reqwest::Client, base: &str, token: &str) -> String {

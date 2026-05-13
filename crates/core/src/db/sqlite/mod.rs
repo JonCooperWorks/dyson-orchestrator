@@ -17,12 +17,13 @@ use crate::config::{Config, DatabaseBackend};
 use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
-    AdminAuditStore, ArtefactCacheStore, AuditStore, DeliveryStore, InstanceStore, McpAuditStore,
-    McpDockerCatalogStore, PolicyStore, SessionStore, ShareStore, SkillMarketplaceSourceStore,
-    SnapshotStore, StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
-    WebhookStore,
+    AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
+    InstanceStore, McpAuditStore, McpDockerCatalogStore, PolicyStore, SessionStore, ShareStore,
+    SkillMarketplaceSourceStore, SnapshotStore, StateFileStore, SystemSecretStore, TokenStore,
+    UserSecretStore, UserStore, WebhookStore,
 };
 
+pub mod agent_skill_publications;
 pub mod artefacts;
 pub mod audit;
 pub mod instances;
@@ -163,6 +164,10 @@ pub fn skill_marketplace_source_store(pool: SqlitePool) -> Arc<dyn SkillMarketpl
     Arc::new(skill_marketplace::SqlxSkillMarketplaceSourceStore::new(
         pool,
     ))
+}
+
+pub fn agent_skill_publication_store(pool: SqlitePool) -> Arc<dyn AgentSkillPublicationStore> {
+    Arc::new(agent_skill_publications::SqlxAgentSkillPublicationStore::new(pool))
 }
 
 #[cfg(unix)]

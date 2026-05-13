@@ -1,5 +1,7 @@
 //! Skill marketplace catalog routes.
 
+use std::collections::BTreeSet;
+
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -15,7 +17,9 @@ use crate::skill_marketplace::{
     SkillMarketplaceSourceConfig, SkillMarketplaceSourceView, SkillPackageBody, SkillPackageDetail,
     skill_body_preview, skill_body_sha256, validate_skill_body, validate_skill_name,
 };
-use crate::traits::{InstanceRow, InstanceStatus, ListFilter};
+use crate::traits::{
+    AgentSkillPublicationRow, AgentSkillPublicationSpec, InstanceRow, InstanceStatus,
+};
 
 const STATE_TOKEN_PREFIX: &str = "st_";
 const AGENT_MARKETPLACE_PREFIX: &str = "agent-";
@@ -63,6 +67,10 @@ pub fn admin_router(state: AppState) -> Router {
             "/v1/admin/skill-marketplaces/:marketplace",
             put(admin_put_source).delete(admin_delete_source),
         )
+        .route(
+            "/v1/admin/instances/:id/skills/:skill/publication",
+            put(admin_publish_agent_skill).delete(admin_unpublish_agent_skill),
+        )
         .with_state(state)
 }
 
@@ -85,13 +93,11 @@ async fn list_skills(
 
 async fn skill_detail(
     State(state): State<AppState>,
-    Extension(caller): Extension<CallerIdentity>,
+    Extension(_caller): Extension<CallerIdentity>,
     Path((marketplace, skill)): Path<(String, String)>,
 ) -> impl IntoResponse {
     if is_agent_marketplace(&marketplace) {
-        return json_result(
-            agent_skill_detail(&state, &caller.user_id, &marketplace, &skill).await,
-        );
+        return json_result(agent_skill_detail(&state, &marketplace, &skill).await);
     }
     json_result(state.skill_marketplace.detail(&marketplace, &skill).await)
 }
@@ -111,7 +117,8 @@ pub(crate) async fn skill_content_for_owner(
     skill: &str,
 ) -> Result<SkillPackageBody, SkillMarketplaceError> {
     if is_agent_marketplace(marketplace) {
-        return agent_skill_content(state, owner_id, marketplace, skill).await;
+        let _ = owner_id;
+        return agent_skill_content(state, marketplace, skill).await;
     }
     state.skill_marketplace.content(marketplace, skill).await
 }
@@ -146,7 +153,8 @@ async fn internal_skill_detail(
 ) -> impl IntoResponse {
     match authorize_state_token_owner(&state, &headers).await {
         Ok(owner_id) if is_agent_marketplace(&marketplace) => {
-            json_result(agent_skill_detail(&state, &owner_id, &marketplace, &skill).await)
+            let _ = owner_id;
+            json_result(agent_skill_detail(&state, &marketplace, &skill).await)
         }
         Ok(_) => json_result(state.skill_marketplace.detail(&marketplace, &skill).await),
         Err(status) => status.into_response(),
@@ -205,55 +213,26 @@ async fn authorize_state_token_owner(
 
 async fn source_views_for_owner(
     state: &AppState,
-    owner_id: &str,
+    _owner_id: &str,
 ) -> Result<Vec<SkillMarketplaceSourceView>, SkillMarketplaceError> {
     let mut sources = state.skill_marketplace.source_views().await?;
-    let instances = live_instances_for_owner(state, owner_id)
-        .await
-        .map_err(|status| {
-            SkillMarketplaceError::Store(format!("agent skill scan failed: {status}"))
-        })?;
-    sources.extend(agent_source_views(state, &instances).await);
+    sources.extend(agent_source_views(state).await?);
     Ok(sources)
 }
 
 async fn catalog_for_owner(state: &AppState, owner_id: &str) -> CatalogListing {
+    let _ = owner_id;
     let mut listing = state.skill_marketplace.catalog().await;
-    match live_instances_for_owner(state, owner_id).await {
-        Ok(instances) => {
-            let agent_catalog = agent_catalog(state, &instances).await;
-            listing.sources.extend(agent_catalog.sources);
-            listing.skills.extend(agent_catalog.skills);
-            listing.errors.extend(agent_catalog.errors);
-            listing.skills.sort_by(|a, b| {
-                a.name
-                    .cmp(&b.name)
-                    .then_with(|| a.marketplace_id.cmp(&b.marketplace_id))
-            });
-        }
-        Err(status) => listing.errors.push(CatalogError {
-            marketplace_id: "agent-skills".into(),
-            error: format!("agent skill scan failed: {status}"),
-        }),
-    }
+    let agent_catalog = agent_catalog(state).await;
+    listing.sources.extend(agent_catalog.sources);
+    listing.skills.extend(agent_catalog.skills);
+    listing.errors.extend(agent_catalog.errors);
+    listing.skills.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.marketplace_id.cmp(&b.marketplace_id))
+    });
     listing
-}
-
-async fn live_instances_for_owner(
-    state: &AppState,
-    owner_id: &str,
-) -> Result<Vec<InstanceRow>, StatusCode> {
-    state
-        .instances
-        .list(
-            owner_id,
-            ListFilter {
-                status: Some(InstanceStatus::Live),
-                include_destroyed: false,
-            },
-        )
-        .await
-        .map_err(super::instances::swarm_err_to_status)
 }
 
 struct AgentCatalog {
@@ -262,15 +241,43 @@ struct AgentCatalog {
     errors: Vec<CatalogError>,
 }
 
-async fn agent_catalog(state: &AppState, instances: &[InstanceRow]) -> AgentCatalog {
+async fn agent_catalog(state: &AppState) -> AgentCatalog {
     let mut sources = Vec::new();
     let mut skills = Vec::new();
     let mut errors = Vec::new();
-    for instance in instances {
-        let marketplace_id = agent_marketplace_id(&instance.id);
+    let publications = match state.agent_skill_publications.list_public().await {
+        Ok(rows) => rows,
+        Err(err) => {
+            return AgentCatalog {
+                sources,
+                skills,
+                errors: vec![CatalogError {
+                    marketplace_id: "agent-skills".into(),
+                    error: err.to_string(),
+                }],
+            };
+        }
+    };
+    let mut added_sources = BTreeSet::new();
+    for publication in publications {
+        let marketplace_id = agent_marketplace_id(&publication.instance_id);
+        let instance = match state.instances.get_unscoped(&publication.instance_id).await {
+            Ok(row) => row,
+            Err(SwarmError::NotFound) => continue,
+            Err(err) => {
+                errors.push(CatalogError {
+                    marketplace_id,
+                    error: err.to_string(),
+                });
+                continue;
+            }
+        };
+        if instance.status == InstanceStatus::Destroyed {
+            continue;
+        }
         let rows = match crate::skill_inventory::list_instance_skills(
             state.state_files.as_ref(),
-            &instance.id,
+            &publication.instance_id,
         )
         .await
         {
@@ -289,22 +296,21 @@ async fn agent_catalog(state: &AppState, instances: &[InstanceRow]) -> AgentCata
             }
         };
 
-        let mut added_source = false;
-        for row in rows {
-            if !is_agent_created_skill(&row) {
-                continue;
-            }
-            if !added_source {
-                sources.push(agent_source_view(instance));
-                added_source = true;
-            }
-            match agent_catalog_skill(instance, &row) {
-                Ok(skill) => skills.push(skill),
-                Err(e) => errors.push(CatalogError {
-                    marketplace_id: agent_marketplace_id(&instance.id),
-                    error: e.to_string(),
-                }),
-            }
+        let Some(row) = rows
+            .into_iter()
+            .find(|row| row.skill == publication.skill && is_agent_created_skill(row))
+        else {
+            continue;
+        };
+        if added_sources.insert(publication.instance_id.clone()) {
+            sources.push(agent_source_view(&instance));
+        }
+        match agent_catalog_skill(&instance, &row) {
+            Ok(skill) => skills.push(skill),
+            Err(e) => errors.push(CatalogError {
+                marketplace_id: agent_marketplace_id(&instance.id),
+                error: e.to_string(),
+            }),
         }
     }
     AgentCatalog {
@@ -316,27 +322,18 @@ async fn agent_catalog(state: &AppState, instances: &[InstanceRow]) -> AgentCata
 
 async fn agent_source_views(
     state: &AppState,
-    instances: &[InstanceRow],
-) -> Vec<SkillMarketplaceSourceView> {
-    let mut sources = Vec::new();
-    for instance in instances {
-        match crate::skill_inventory::list_instance_skills(state.state_files.as_ref(), &instance.id)
-            .await
-        {
-            Ok(rows) if rows.iter().any(is_agent_created_skill) => {
-                sources.push(agent_source_view(instance));
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    instance = %instance.id,
-                    "skill marketplace: agent skill source scan failed"
-                );
-            }
-        }
+) -> Result<Vec<SkillMarketplaceSourceView>, SkillMarketplaceError> {
+    let catalog = agent_catalog(state).await;
+    if catalog.sources.is_empty() && !catalog.errors.is_empty() {
+        let errors = catalog
+            .errors
+            .into_iter()
+            .map(|e| format!("{}: {}", e.marketplace_id, e.error))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(SkillMarketplaceError::Store(errors));
     }
-    sources
+    Ok(catalog.sources)
 }
 
 fn is_agent_created_skill(row: &crate::skill_inventory::SkillInventoryEntry) -> bool {
@@ -383,11 +380,10 @@ fn agent_skill_tags(origin_kind: &str) -> Vec<String> {
 
 async fn agent_skill_detail(
     state: &AppState,
-    owner_id: &str,
     marketplace: &str,
     skill: &str,
 ) -> Result<SkillPackageDetail, SkillMarketplaceError> {
-    let (skill, body) = load_agent_skill(state, owner_id, marketplace, skill).await?;
+    let (skill, body) = load_agent_skill(state, marketplace, skill).await?;
     Ok(SkillPackageDetail {
         skill,
         preview: skill_body_preview(&body),
@@ -397,11 +393,10 @@ async fn agent_skill_detail(
 
 async fn agent_skill_content(
     state: &AppState,
-    owner_id: &str,
     marketplace: &str,
     skill: &str,
 ) -> Result<SkillPackageBody, SkillMarketplaceError> {
-    let (skill, body) = load_agent_skill(state, owner_id, marketplace, skill).await?;
+    let (skill, body) = load_agent_skill(state, marketplace, skill).await?;
     let computed_sha256 = skill_body_sha256(&body);
     Ok(SkillPackageBody {
         marketplace_id: skill.marketplace_id,
@@ -417,22 +412,32 @@ async fn agent_skill_content(
 
 async fn load_agent_skill(
     state: &AppState,
-    owner_id: &str,
     marketplace: &str,
     skill: &str,
 ) -> Result<(CatalogSkill, String), SkillMarketplaceError> {
     let instance_id = agent_marketplace_instance_id(marketplace)
         .ok_or_else(|| SkillMarketplaceError::MarketplaceNotFound(marketplace.to_owned()))?;
     validate_skill_name(skill)?;
+    let publication = state
+        .agent_skill_publications
+        .find(instance_id, skill)
+        .await
+        .map_err(|e| SkillMarketplaceError::Store(e.to_string()))?
+        .filter(|row| row.revoked_at.is_none())
+        .ok_or_else(|| SkillMarketplaceError::SkillNotFound {
+            marketplace: marketplace.to_owned(),
+            skill: skill.to_owned(),
+        })?;
     let instance = state
         .instances
-        .get(owner_id, instance_id)
+        .get_unscoped(instance_id)
         .await
         .map_err(|e| skill_marketplace_error_for_instance_lookup(e, marketplace))?;
-    if !matches!(instance.status, InstanceStatus::Live) {
-        return Err(SkillMarketplaceError::MarketplaceNotFound(
-            marketplace.to_owned(),
-        ));
+    if instance.owner_id != publication.owner_id || instance.status == InstanceStatus::Destroyed {
+        return Err(SkillMarketplaceError::SkillNotFound {
+            marketplace: marketplace.to_owned(),
+            skill: skill.to_owned(),
+        });
     }
     let rows =
         crate::skill_inventory::list_instance_skills(state.state_files.as_ref(), &instance.id)
@@ -458,6 +463,144 @@ async fn load_agent_skill(
     })?;
     validate_skill_body(&body)?;
     Ok((agent_catalog_skill(&instance, &row)?, body))
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+pub struct AgentSkillPublicationView {
+    pub instance_id: String,
+    pub owner_id: String,
+    pub skill: String,
+    pub marketplace_id: String,
+    pub published_by: String,
+    pub published_at: i64,
+    pub public: bool,
+}
+
+pub(crate) async fn publish_agent_skill_for_caller(
+    state: &AppState,
+    actor_user_id: &str,
+    instance_id: &str,
+    skill: &str,
+    admin: bool,
+) -> Result<AgentSkillPublicationView, SkillMarketplaceError> {
+    validate_skill_name(skill)?;
+    let instance = lookup_publish_instance(state, actor_user_id, instance_id, admin).await?;
+    ensure_agent_skill_publishable(state, &instance, skill).await?;
+    let row = state
+        .agent_skill_publications
+        .publish(AgentSkillPublicationSpec {
+            instance_id: &instance.id,
+            owner_id: &instance.owner_id,
+            skill,
+            published_by: actor_user_id,
+        })
+        .await
+        .map_err(|e| SkillMarketplaceError::Store(e.to_string()))?;
+    Ok(publication_view(row))
+}
+
+pub(crate) async fn unpublish_agent_skill_for_caller(
+    state: &AppState,
+    actor_user_id: &str,
+    instance_id: &str,
+    skill: &str,
+    admin: bool,
+) -> Result<AgentSkillPublicationView, SkillMarketplaceError> {
+    validate_skill_name(skill)?;
+    let instance = lookup_publish_instance(state, actor_user_id, instance_id, admin).await?;
+    let existing = state
+        .agent_skill_publications
+        .find(&instance.id, skill)
+        .await
+        .map_err(|e| SkillMarketplaceError::Store(e.to_string()))?
+        .filter(|row| row.revoked_at.is_none())
+        .ok_or_else(|| SkillMarketplaceError::SkillNotFound {
+            marketplace: agent_marketplace_id(&instance.id),
+            skill: skill.to_owned(),
+        })?;
+    if existing.owner_id != instance.owner_id {
+        return Err(SkillMarketplaceError::SkillNotFound {
+            marketplace: agent_marketplace_id(&instance.id),
+            skill: skill.to_owned(),
+        });
+    }
+    let _ = state
+        .agent_skill_publications
+        .revoke(&instance.id, skill)
+        .await
+        .map_err(|e| SkillMarketplaceError::Store(e.to_string()))?;
+    let mut view = publication_view(existing);
+    view.public = false;
+    Ok(view)
+}
+
+async fn lookup_publish_instance(
+    state: &AppState,
+    actor_user_id: &str,
+    instance_id: &str,
+    admin: bool,
+) -> Result<InstanceRow, SkillMarketplaceError> {
+    let instance = if admin {
+        state
+            .instances
+            .get_unscoped(instance_id)
+            .await
+            .map_err(|e| skill_marketplace_error_for_instance_lookup(e, instance_id))
+    } else {
+        state
+            .instances
+            .get(actor_user_id, instance_id)
+            .await
+            .map_err(|e| skill_marketplace_error_for_instance_lookup(e, instance_id))
+    }?;
+    if instance.status == InstanceStatus::Destroyed {
+        return Err(SkillMarketplaceError::MarketplaceNotFound(
+            instance_id.to_owned(),
+        ));
+    }
+    Ok(instance)
+}
+
+async fn ensure_agent_skill_publishable(
+    state: &AppState,
+    instance: &InstanceRow,
+    skill: &str,
+) -> Result<(), SkillMarketplaceError> {
+    let rows =
+        crate::skill_inventory::list_instance_skills(state.state_files.as_ref(), &instance.id)
+            .await
+            .map_err(|e| SkillMarketplaceError::Store(e.to_string()))?;
+    let row = rows
+        .into_iter()
+        .find(|row| row.skill == skill && is_agent_created_skill(row))
+        .ok_or_else(|| SkillMarketplaceError::SkillNotFound {
+            marketplace: agent_marketplace_id(&instance.id),
+            skill: skill.to_owned(),
+        })?;
+    let body = crate::skill_inventory::read_instance_skill_body(
+        state.state_files.as_ref(),
+        &instance.id,
+        &row.skill,
+    )
+    .await
+    .map_err(|e| SkillMarketplaceError::Store(e.to_string()))?
+    .ok_or_else(|| SkillMarketplaceError::SkillNotFound {
+        marketplace: agent_marketplace_id(&instance.id),
+        skill: skill.to_owned(),
+    })?;
+    validate_skill_body(&body)
+}
+
+fn publication_view(row: AgentSkillPublicationRow) -> AgentSkillPublicationView {
+    AgentSkillPublicationView {
+        marketplace_id: agent_marketplace_id(&row.instance_id),
+        instance_id: row.instance_id,
+        owner_id: row.owner_id,
+        skill: row.skill,
+        published_by: row.published_by,
+        published_at: row.published_at,
+        public: row.revoked_at.is_none(),
+    }
 }
 
 fn skill_marketplace_error_for_instance_lookup(
@@ -556,6 +699,30 @@ async fn admin_delete_source(
     }
 }
 
+async fn admin_publish_agent_skill(
+    State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
+    Path((id, skill)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let actor = caller
+        .as_ref()
+        .map(|Extension(caller)| caller.user_id.as_str())
+        .unwrap_or("admin");
+    json_result(publish_agent_skill_for_caller(&state, actor, &id, &skill, true).await)
+}
+
+async fn admin_unpublish_agent_skill(
+    State(state): State<AppState>,
+    caller: Option<Extension<CallerIdentity>>,
+    Path((id, skill)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let actor = caller
+        .as_ref()
+        .map(|Extension(caller)| caller.user_id.as_str())
+        .unwrap_or("admin");
+    json_result(unpublish_agent_skill_for_caller(&state, actor, &id, &skill, true).await)
+}
+
 fn source_from_admin_body(
     id: String,
     body: AdminPutSkillMarketplaceSourceBody,
@@ -596,7 +763,7 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-fn json_result<T: serde::Serialize>(
+pub(crate) fn json_result<T: serde::Serialize>(
     result: Result<T, SkillMarketplaceError>,
 ) -> axum::response::Response {
     match result {

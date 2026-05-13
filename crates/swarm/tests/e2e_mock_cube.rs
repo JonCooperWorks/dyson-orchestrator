@@ -331,6 +331,9 @@ async fn full_walkthrough() {
         skill_marketplace: Arc::new(
             dyson_swarm::skill_marketplace::SkillMarketplaceService::empty(),
         ),
+        agent_skill_publications: dyson_swarm::db::sqlite::agent_skill_publication_store(
+            pool.clone(),
+        ),
         mcp_runtime_socket: None,
     };
     // Stage 5 retired the legacy `admin-token` shared bearer; this e2e

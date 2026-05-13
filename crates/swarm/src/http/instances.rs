@@ -6,10 +6,12 @@
 //! - `GET    /v1/instances/:id/url`      → just the sandbox URL
 //! - `POST   /v1/instances/:id/probe`    → run a probe synchronously
 
+use std::collections::HashMap;
+
 use axum::extract::{Extension, Path, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +40,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/instances/:id/skills/:skill",
             delete(uninstall_instance_skill),
+        )
+        .route(
+            "/v1/instances/:id/skills/:skill/publication",
+            put(publish_instance_skill).delete(unpublish_instance_skill),
         )
         .route("/v1/instances/:id/probe", post(probe_instance))
         .route("/v1/instances/:id/change-network", post(change_network))
@@ -552,13 +558,43 @@ async fn instance_skills(
     State(state): State<AppState>,
     Extension(caller): Extension<CallerIdentity>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::skill_inventory::SkillInventoryEntry>>, StatusCode> {
-    match state.instances.get(&caller.user_id, &id).await {
-        Ok(_) => {}
+) -> Result<Json<Vec<InstanceSkillView>>, StatusCode> {
+    let instance = match state.instances.get(&caller.user_id, &id).await {
+        Ok(row) => row,
         Err(e) => return Err(swarm_err_to_status(e)),
-    }
+    };
+    let active_publications = match state.agent_skill_publications.list_for_instance(&id).await {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|row| row.revoked_at.is_none() && row.owner_id == instance.owner_id)
+            .map(|row| (row.skill.clone(), row))
+            .collect::<HashMap<_, _>>(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                instance = %id,
+                "instance skills: publication lookup failed"
+            );
+            return Err(store_err_to_status(e));
+        }
+    };
     match crate::skill_inventory::list_instance_skills(state.state_files.as_ref(), &id).await {
-        Ok(skills) => Ok(Json(skills)),
+        Ok(skills) => Ok(Json(
+            skills
+                .into_iter()
+                .map(|skill| {
+                    let publication = active_publications.get(&skill.skill);
+                    InstanceSkillView {
+                        public: publication.is_some(),
+                        published_at: publication.map(|row| row.published_at),
+                        published_by: publication.map(|row| row.published_by.clone()),
+                        public_marketplace_id: publication
+                            .map(|row| format!("agent-{}", row.instance_id)),
+                        skill,
+                    }
+                })
+                .collect(),
+        )),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -568,6 +604,50 @@ async fn instance_skills(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct InstanceSkillView {
+    #[serde(flatten)]
+    skill: crate::skill_inventory::SkillInventoryEntry,
+    public: bool,
+    published_at: Option<i64>,
+    published_by: Option<String>,
+    public_marketplace_id: Option<String>,
+}
+
+async fn publish_instance_skill(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path((id, skill)): Path<(String, String)>,
+) -> impl IntoResponse {
+    super::skill_marketplace::json_result(
+        super::skill_marketplace::publish_agent_skill_for_caller(
+            &state,
+            &caller.user_id,
+            &id,
+            &skill,
+            false,
+        )
+        .await,
+    )
+}
+
+async fn unpublish_instance_skill(
+    State(state): State<AppState>,
+    Extension(caller): Extension<CallerIdentity>,
+    Path((id, skill)): Path<(String, String)>,
+) -> impl IntoResponse {
+    super::skill_marketplace::json_result(
+        super::skill_marketplace::unpublish_agent_skill_for_caller(
+            &state,
+            &caller.user_id,
+            &id,
+            &skill,
+            false,
+        )
+        .await,
+    )
 }
 
 #[derive(Debug, Deserialize)]

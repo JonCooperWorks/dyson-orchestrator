@@ -233,6 +233,34 @@ export class SwarmClient {
     );
   }
 
+  publishSkillFromInstance(instanceId, skill) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/skills/${encodeURIComponent(skill)}/publication`,
+      { method: 'PUT' },
+    );
+  }
+
+  unpublishSkillFromInstance(instanceId, skill) {
+    return this._json(
+      `/v1/instances/${encodeURIComponent(instanceId)}/skills/${encodeURIComponent(skill)}/publication`,
+      { method: 'DELETE' },
+    );
+  }
+
+  adminPublishSkillFromInstance(instanceId, skill) {
+    return this._json(
+      `/v1/admin/instances/${encodeURIComponent(instanceId)}/skills/${encodeURIComponent(skill)}/publication`,
+      { method: 'PUT' },
+    );
+  }
+
+  adminUnpublishSkillFromInstance(instanceId, skill) {
+    return this._json(
+      `/v1/admin/instances/${encodeURIComponent(instanceId)}/skills/${encodeURIComponent(skill)}/publication`,
+      { method: 'DELETE' },
+    );
+  }
+
   // ─── Per-instance webhooks ("tasks" in UI copy) ────────────────────
   //
   // Each row is `{ name, description, auth_scheme, enabled, has_secret,

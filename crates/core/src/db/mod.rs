@@ -12,10 +12,10 @@ use crate::config::{Config, DatabaseBackend};
 use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
-    AdminAuditStore, ArtefactCacheStore, AuditStore, DeliveryStore, InstanceStore, McpAuditStore,
-    McpDockerCatalogStore, PolicyStore, SessionStore, ShareStore, SkillMarketplaceSourceStore,
-    SnapshotStore, StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
-    WebhookStore,
+    AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
+    InstanceStore, McpAuditStore, McpDockerCatalogStore, PolicyStore, SessionStore, ShareStore,
+    SkillMarketplaceSourceStore, SnapshotStore, StateFileStore, SystemSecretStore, TokenStore,
+    UserSecretStore, UserStore, WebhookStore,
 };
 
 #[cfg(feature = "postgres")]
@@ -61,6 +61,7 @@ pub struct BackendStores {
     pub deliveries: Arc<dyn DeliveryStore>,
     pub mcp_docker_catalog: Arc<dyn McpDockerCatalogStore>,
     pub skill_marketplace_sources: Arc<dyn SkillMarketplaceSourceStore>,
+    pub agent_skill_publications: Arc<dyn AgentSkillPublicationStore>,
     pub runtime_migrator: Arc<dyn RuntimeMigrator>,
 }
 
@@ -89,6 +90,7 @@ impl BackendStores {
             deliveries: sqlite::delivery_store(pool.clone()),
             mcp_docker_catalog: sqlite::mcp_docker_catalog_store(pool.clone()),
             skill_marketplace_sources: sqlite::skill_marketplace_source_store(pool.clone()),
+            agent_skill_publications: sqlite::agent_skill_publication_store(pool.clone()),
             runtime_migrator: sqlite::runtime_migrator(pool),
         }
     }
@@ -124,6 +126,9 @@ impl BackendStores {
             )),
             skill_marketplace_sources: Arc::new(
                 pg::skill_marketplace::PgSkillMarketplaceSourceStore::new(pool.clone()),
+            ),
+            agent_skill_publications: Arc::new(
+                pg::agent_skill_publications::PgAgentSkillPublicationStore::new(pool.clone()),
             ),
             runtime_migrator: postgres_runtime_migrator(),
         }
