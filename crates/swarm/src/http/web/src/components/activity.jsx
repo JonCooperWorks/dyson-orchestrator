@@ -259,10 +259,6 @@ export function ActivityPage({ instanceId, embedded = false }) {
 
   return (
     <Shell className={embedded ? 'instance-subpage' : 'page page-edit'}>
-      <header className={embedded ? 'subpage-header' : 'page-header'}>
-        <h1 className={embedded ? 'subpage-title' : 'page-title'}>activity</h1>
-      </header>
-
       <section
         className="panel activity-panel"
         role="region"

@@ -68,6 +68,16 @@ const mcpRow = {
 };
 
 describe('ActivityPage', () => {
+  test('does not render a duplicate Activity h1 inside the instance pane', async () => {
+    listToolCalls.mockResolvedValue({ items: rows, next_cursor: 1 });
+    renderActivity();
+
+    await screen.findByRole('region', { name: /tool-call activity/i });
+
+    expect(screen.queryByRole('heading', { level: 1, name: /activity/i })).toBeNull();
+    expect(screen.getByText('tool calls')).toBeInTheDocument();
+  });
+
   test('renders the empty state without filters', async () => {
     listToolCalls.mockResolvedValue({ items: [], next_cursor: null });
     listToolCallFacets.mockResolvedValueOnce({ tools: [], servers: [] });
