@@ -7,8 +7,9 @@ const panelsCss = readFileSync(join(process.cwd(), 'src/styles/panels.css'), 'ut
 
 describe('mobile form controls', () => {
   test('keeps mobile inputs at 16px or larger so iOS does not zoom on focus', () => {
-    expect(layoutCss).toMatch(/@media \(max-width: 700px\)[\s\S]*font-size:\s*16px/);
-    expect(panelsCss).toMatch(/@media \(max-width: 700px\)[\s\S]*\.mcp-json-textarea[\s\S]*font-size:\s*16px/);
+    expect(layoutCss).toMatch(/@media \(max-width: 760px\)[\s\S]*input:not\(\[type\]\)[\s\S]*textarea\s*\{[\s\S]*font-size:\s*16px\s*!important/);
+    expect(mobileBlock(layoutCss)).not.toContain(':where(');
+    expect(panelsCss).toMatch(/@media \(max-width: 760px\)[\s\S]*\.mcp-json-textarea[\s\S]*font-size:\s*16px\s*!important/);
   });
 });
 
@@ -28,3 +29,8 @@ describe('activity controls', () => {
     expect(activityCss).not.toMatch(/border-radius:\s*999px/);
   });
 });
+
+function mobileBlock(css) {
+  const match = css.match(/@media \(max-width: 760px\)\s*\{([\s\S]*?)\n\}/);
+  return match?.[1] || '';
+}

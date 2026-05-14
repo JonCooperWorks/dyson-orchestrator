@@ -3533,18 +3533,16 @@
   .activity-status { position: absolute; right: 18px; }
 }
 
-@media (max-width: 700px) {
+@media (max-width: 760px) {
   .byok-key-input,
   .mcp-json-textarea,
-  .admin-catalog-form .field :where(
-    input:not([type]),
-    input[type="text"],
-    input[type="password"],
-    input[type="url"],
-    input[type="email"],
-    select,
-    textarea
-  ) {
-    font-size: 16px;
+  .admin-catalog-form .field input:not([type]),
+  .admin-catalog-form .field input[type="text"],
+  .admin-catalog-form .field input[type="password"],
+  .admin-catalog-form .field input[type="url"],
+  .admin-catalog-form .field input[type="email"],
+  .admin-catalog-form .field select,
+  .admin-catalog-form .field textarea {
+    font-size: 16px !important;
   }
 }
