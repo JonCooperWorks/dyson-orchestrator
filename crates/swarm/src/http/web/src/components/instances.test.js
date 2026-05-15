@@ -107,6 +107,50 @@ describe('instance section rail routing', () => {
     expect(screen.getByText('Beta').closest('a')).toHaveAttribute('href', '#/i/b/tasks');
   });
 
+  test('submitting the network editor posts the selected policy body', async () => {
+    const row = {
+      id: 'a',
+      name: 'Alpha',
+      status: 'live',
+      task: 'Run useful work.',
+      created_at: 0,
+      last_active_at: 0,
+      last_probe_at: null,
+      open_url: 'https://a.example.test',
+      network_policy: { kind: 'nolocalnet', entries: [] },
+      network_policy_cidrs: [],
+    };
+    const changeInstanceNetwork = vi.fn().mockResolvedValue({
+      ...row,
+      network_policy: { kind: 'airgap', entries: [] },
+      network_policy_cidrs: ['10.0.0.1/32'],
+    });
+    setInstances([row]);
+    const client = {
+      getInstance: () => Promise.resolve(row),
+      listInstances: () => Promise.resolve([row]),
+      listWebhooks: () => Promise.resolve([]),
+      listShares: () => Promise.resolve([]),
+      listInstanceSkills: () => Promise.resolve([]),
+      changeInstanceNetwork,
+    };
+
+    render(
+      React.createElement(ApiProvider, { client, auth: { config: { cube_profiles: [] } } },
+        React.createElement(InstancesView, { view: { name: 'instance-network', id: 'a' } }),
+      ),
+    );
+
+    fireEvent.click(await screen.findByLabelText(/Air-gapped/i));
+    fireEvent.click(screen.getByRole('button', { name: 'apply' }));
+
+    await waitFor(() => {
+      expect(changeInstanceNetwork).toHaveBeenCalledWith('a', {
+        kind: 'airgap',
+      });
+    });
+  });
+
   test('marks the active section in the section nav', () => {
     const row = {
       id: 'a',

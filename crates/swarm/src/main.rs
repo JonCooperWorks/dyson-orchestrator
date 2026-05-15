@@ -267,6 +267,9 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         allow_localhost: cfg.byo.allow_localhost,
         allow_internal: cfg.byo.allow_internal,
     });
+    let egress_sync: Arc<dyn dyson_swarm::egress_policy_sync::EgressPolicySync> =
+        Arc::new(dyson_swarm::egress_policy_sync::SystemdEgressPolicySync::new());
+    instance_svc = instance_svc.with_egress_policy_sync(egress_sync.clone());
     let user_secrets_svc = Arc::new(dyson_swarm::secrets::UserSecretsService::new(
         user_secrets_store,
         cipher_dir.clone(),
@@ -709,6 +712,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         sessions: sessions_store,
         admin_audit: admin_audit_store,
         llm_tool_calls: llm_tool_calls_store,
+        egress_sync,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),
         hostname: cfg.hostname.clone(),
         auth_config: Arc::new(http::auth_config::AuthConfig::from_toml(

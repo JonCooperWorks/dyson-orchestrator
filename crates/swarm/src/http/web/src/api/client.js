@@ -105,9 +105,8 @@ export class SwarmClient {
   }
 
   /// Change the instance's egress profile.  CubeAPI doesn't expose
-  /// a runtime PATCH for the eBPF maps, so swarm orchestrates a
-  /// snapshot+restore+destroy: workspace state survives, but the
-  /// instance ID changes.  Caller should redirect to the new id.
+  /// a runtime PATCH for the eBPF maps, so swarm rotates in place:
+  /// workspace state and instance identity survive under a fresh cube.
   changeInstanceNetwork(id, networkPolicy) {
     return this._json(
       `/v1/instances/${encodeURIComponent(id)}/change-network`,

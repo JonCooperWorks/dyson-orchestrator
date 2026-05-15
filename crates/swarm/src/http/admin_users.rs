@@ -622,6 +622,7 @@ mod tests {
             sessions: crate::db::sqlite::session_store(pool.clone()),
             admin_audit: crate::db::sqlite::admin_audit_store(pool.clone()),
             llm_tool_calls: crate::db::sqlite::llm_tool_call_store(pool.clone()),
+            egress_sync: Arc::new(crate::egress_policy_sync::NoopEgressPolicySync::new()),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(crate::http::auth_config::AuthConfig::none()),

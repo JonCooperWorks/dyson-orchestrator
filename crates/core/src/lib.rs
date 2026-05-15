@@ -15,6 +15,8 @@ pub mod db;
 #[cfg(feature = "full")]
 pub mod dyson_reconfig;
 #[cfg(feature = "full")]
+pub mod egress_policy_sync;
+#[cfg(feature = "full")]
 pub mod envelope;
 #[cfg(feature = "full")]
 pub mod error;

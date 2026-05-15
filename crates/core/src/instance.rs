@@ -16,6 +16,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use uuid::Uuid;
 
+use crate::egress_policy_sync::{EgressPolicySync, NoopEgressPolicySync};
 use crate::error::SwarmError;
 use crate::mcp_servers::{self, McpAuthSpec, McpServerSpec};
 use crate::upstream_policy::{OutboundUrlPolicy, validate_outbound_url};
@@ -211,6 +212,11 @@ pub struct InstanceService {
     /// authority, so redeploys do not surface empty state or accept
     /// stale writes from an older cube.
     state_files: Option<crate::state_files::StateFiles>,
+    /// Pushes the DB-backed egress policy map to the host proxy after
+    /// sandbox ids or policies change.  The implementation is
+    /// best-effort: the systemd timer remains the safety net, but UI
+    /// edits should take effect immediately on the happy path.
+    egress_sync: Arc<dyn EgressPolicySync>,
 }
 
 fn mint_state_generation() -> String {
@@ -323,6 +329,7 @@ impl InstanceService {
             mcp_upstream_policy: OutboundUrlPolicy::default(),
             mcp_secrets: None,
             state_files: None,
+            egress_sync: Arc::new(NoopEgressPolicySync::new()),
         }
     }
 
@@ -380,6 +387,13 @@ impl InstanceService {
     /// source before state sync is re-enabled.
     pub fn with_state_files(mut self, state_files: crate::state_files::StateFiles) -> Self {
         self.state_files = Some(state_files);
+        self
+    }
+
+    /// Builder-style: plug in the production egress policy synchronizer.
+    /// Tests keep the default no-op counter.
+    pub fn with_egress_policy_sync(mut self, sync: Arc<dyn EgressPolicySync>) -> Self {
+        self.egress_sync = sync;
         self
     }
 
@@ -575,6 +589,17 @@ impl InstanceService {
             .bind_expected_src_ip(instance_id, source_ip)
             .await?;
         Ok(())
+    }
+
+    async fn refresh_egress_policy_best_effort(&self, instance_id: &str, operation: &'static str) {
+        if let Err(err) = self.egress_sync.refresh().await {
+            tracing::warn!(
+                instance = %instance_id,
+                operation,
+                error = %err,
+                "egress-policy-sync: refresh failed; timer remains safety net"
+            );
+        }
     }
 
     async fn replay_state_files_and_configure(
@@ -1039,6 +1064,8 @@ impl InstanceService {
                         self.instances
                             .update_status(&row.id, InstanceStatus::Live)
                             .await?;
+                        self.refresh_egress_policy_best_effort(&row.id, "runtime-config-sync")
+                            .await;
                     }
                     succeeded += 1;
                     tracing::debug!(instance = %row.id, "runtime-config-sync: pushed");
@@ -1580,6 +1607,8 @@ impl InstanceService {
         self.instances
             .update_status(&source.id, InstanceStatus::Live)
             .await?;
+        self.refresh_egress_policy_best_effort(&source.id, "rotate")
+            .await;
 
         // Phase 6: destroy the old cube.  Force=true so a stuck
         // cube doesn't leave the row half-live.  This is the only
@@ -1751,6 +1780,8 @@ impl InstanceService {
         self.instances
             .update_status(&source.id, InstanceStatus::Live)
             .await?;
+        self.refresh_egress_policy_best_effort(&source.id, "restore-snapshot")
+            .await;
 
         if let Some(old) = old_sandbox_id.filter(|old| old != &info.sandbox_id)
             && let Err(err) = self.cube.destroy_sandbox(&old).await
@@ -1873,6 +1904,8 @@ impl InstanceService {
         self.instances
             .update_status(&source.id, InstanceStatus::Live)
             .await?;
+        self.refresh_egress_policy_best_effort(&source.id, "recreate")
+            .await;
 
         self.destroy_old_sandbox_after_in_place_swap(source, old_sandbox_id, "recreate")
             .await;
@@ -1964,6 +1997,8 @@ impl InstanceService {
         self.instances
             .update_status(&source.id, InstanceStatus::Live)
             .await?;
+        self.refresh_egress_policy_best_effort(&source.id, "reset")
+            .await;
 
         self.destroy_old_sandbox_after_in_place_swap(source, old_sandbox_id, "reset")
             .await;
@@ -2527,6 +2562,9 @@ impl InstanceService {
                 },
             )
             .await?;
+        if self.reconfigurer.is_none() {
+            self.refresh_egress_policy_best_effort(&id, "create").await;
+        }
 
         // Caddy's on_demand TLS for `<id>.<hostname>` is warmed by the
         // SPA in the background (no-cors fetch + <link rel="preconnect">
@@ -2691,6 +2729,7 @@ impl InstanceService {
             self.instances
                 .update_status(&id, InstanceStatus::Live)
                 .await?;
+            self.refresh_egress_policy_best_effort(&id, "create").await;
         }
 
         Ok(CreatedInstance {
@@ -3832,6 +3871,9 @@ impl InstanceService {
                 },
             )
             .await?;
+        if self.reconfigurer.is_none() {
+            self.refresh_egress_policy_best_effort(&id, "restore").await;
+        }
 
         // A restored sandbox may inherit dyson.json from the snapshot
         // it booted from. Re-project the fresh swarm id, bearer-side
@@ -3867,6 +3909,7 @@ impl InstanceService {
             self.instances
                 .update_status(&id, InstanceStatus::Live)
                 .await?;
+            self.refresh_egress_policy_best_effort(&id, "restore").await;
         }
 
         Ok(CreatedInstance {

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use crate::db::sqlite::instances::SqlxInstanceStore;
 use crate::db::sqlite::open_in_memory;
 use crate::db::sqlite::tokens::SqlxTokenStore;
+use crate::egress_policy_sync::{EgressPolicySync, NoopEgressPolicySync};
 use crate::error::CubeError;
 use crate::traits::{CubeClient, SandboxInfo, SnapshotInfo};
 
@@ -2721,12 +2722,41 @@ impl crate::network_policy::HostResolver for PolicyMockResolver {
     }
 }
 
+struct FailingEgressPolicySync;
+
+#[async_trait]
+impl EgressPolicySync for FailingEgressPolicySync {
+    async fn refresh(&self) -> Result<(), SwarmError> {
+        Err(SwarmError::Internal("synthetic egress sync failure".into()))
+    }
+}
+
 /// Same as `build_with_snapshot`, but stamps an LLM CIDR and a
 /// configurable host resolver on the InstanceService so the
 /// network-policy resolver path is exercised.
 async fn build_with_snapshot_and_policy(
     llm_cidr: Option<&str>,
     resolver: Arc<dyn crate::network_policy::HostResolver>,
+) -> (
+    Arc<InstanceService>,
+    Arc<SnapshotService>,
+    Arc<MockCube>,
+    Arc<dyn InstanceStore>,
+    Arc<dyn UserStore>,
+    Arc<RecordingReconfigurer>,
+) {
+    build_with_snapshot_and_policy_with_egress(
+        llm_cidr,
+        resolver,
+        Arc::new(NoopEgressPolicySync::new()),
+    )
+    .await
+}
+
+async fn build_with_snapshot_and_policy_with_egress(
+    llm_cidr: Option<&str>,
+    resolver: Arc<dyn crate::network_policy::HostResolver>,
+    egress_sync: Arc<dyn EgressPolicySync>,
 ) -> (
     Arc<InstanceService>,
     Arc<SnapshotService>,
@@ -2764,7 +2794,8 @@ async fn build_with_snapshot_and_policy(
         )
         .with_reconfigurer(recorder.clone())
         .with_llm_cidr(llm_cidr.map(str::to_owned))
-        .with_resolver(resolver),
+        .with_resolver(resolver)
+        .with_egress_policy_sync(egress_sync),
     );
     let backup: Arc<dyn BackupSink> = Arc::new(LocalDiskBackupSink::new(cube.clone()));
     let ssvc = Arc::new(SnapshotService::new(
@@ -3570,6 +3601,152 @@ async fn change_network_takes_snapshot_swaps_policy_in_place() {
     let last = cube.last_create();
     assert!(!last.resolved_policy.allow_internet_access);
     assert_eq!(last.resolved_policy.allow_out, vec!["10.0.0.1/32"]);
+}
+
+#[tokio::test]
+async fn change_network_policy_triggers_egress_sync() {
+    let sync = NoopEgressPolicySync::new();
+    let (isvc, ssvc, _cube, instances, _users, _recorder) =
+        build_with_snapshot_and_policy_with_egress(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+            Arc::new(sync.clone()),
+        )
+        .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    sync.clear();
+
+    isvc.change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Airgap)
+        .await
+        .unwrap();
+
+    assert_eq!(sync.call_count(), 1);
+    let row = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(row.network_policy, NetworkPolicy::Airgap);
+    assert_eq!(row.status, InstanceStatus::Live);
+}
+
+#[tokio::test]
+async fn rotate_in_place_with_new_policy_triggers_egress_sync() {
+    let sync = NoopEgressPolicySync::new();
+    let (isvc, ssvc, _cube, instances, _users, _recorder) =
+        build_with_snapshot_and_policy_with_egress(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+            Arc::new(sync.clone()),
+        )
+        .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    sync.clear();
+
+    isvc.rotate_in_place("legacy", &src.id, &ssvc, "tpl", Some(NetworkPolicy::Airgap))
+        .await
+        .unwrap();
+
+    assert_eq!(sync.call_count(), 1);
+    let row = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(row.network_policy, NetworkPolicy::Airgap);
+}
+
+#[tokio::test]
+async fn rotate_in_place_without_policy_change_still_triggers_egress_sync() {
+    let sync = NoopEgressPolicySync::new();
+    let (isvc, ssvc, _cube, instances, _users, _recorder) =
+        build_with_snapshot_and_policy_with_egress(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+            Arc::new(sync.clone()),
+        )
+        .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl-old".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    sync.clear();
+
+    isvc.rotate_in_place("legacy", &src.id, &ssvc, "tpl-new", None)
+        .await
+        .unwrap();
+
+    assert_eq!(sync.call_count(), 1);
+    let row = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(row.network_policy, NetworkPolicy::Open);
+    assert_eq!(row.template_id, "tpl-new");
+}
+
+#[tokio::test]
+async fn egress_sync_failure_does_not_fail_the_policy_change() {
+    let (isvc, ssvc, _cube, instances, _users, _recorder) =
+        build_with_snapshot_and_policy_with_egress(
+            Some("10.0.0.1/32"),
+            Arc::new(PolicyMockResolver::default()),
+            Arc::new(FailingEgressPolicySync),
+        )
+        .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: None,
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let row = isvc
+        .change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Airgap)
+        .await
+        .unwrap();
+
+    assert_eq!(row.network_policy, NetworkPolicy::Airgap);
+    let stored = instances.get(&src.id).await.unwrap().unwrap();
+    assert_eq!(stored.network_policy, NetworkPolicy::Airgap);
+    assert_eq!(stored.status, InstanceStatus::Live);
 }
 
 #[tokio::test]

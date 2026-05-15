@@ -18,6 +18,7 @@ pub mod auth_config;
 pub mod auth_session;
 pub mod byok;
 pub mod dyson_proxy;
+pub mod egress_admin;
 pub mod healthz;
 pub mod instance_artefacts;
 pub mod instances;
@@ -69,6 +70,7 @@ pub struct AppState {
     pub sessions: Arc<dyn crate::traits::SessionStore>,
     pub admin_audit: Arc<dyn crate::traits::AdminAuditStore>,
     pub llm_tool_calls: Arc<dyn crate::traits::LlmToolCallStore>,
+    pub egress_sync: Arc<dyn crate::egress_policy_sync::EgressPolicySync>,
     pub sandbox_domain: String,
     /// Public hostname swarm serves on, e.g. `"swarm.example.com"`.
     /// Drives the host-based dispatcher in
@@ -189,6 +191,7 @@ pub fn router(
     let admin_handlers = proxy_admin::router(state.clone())
         .merge(crate::http::admin_users::router(state.clone()))
         .merge(instances::admin_router(state.clone()))
+        .merge(egress_admin::router(state.clone()))
         .merge(skill_marketplace::admin_router(state.clone()))
         .merge(mcp_admin_router);
     let admin = if auth.dangerous_no_auth {
@@ -418,6 +421,7 @@ mod tests {
             sessions: sessions_store,
             admin_audit: crate::db::sqlite::admin_audit_store(pool.clone()),
             llm_tool_calls: crate::db::sqlite::llm_tool_call_store(pool.clone()),
+            egress_sync: Arc::new(crate::egress_policy_sync::NoopEgressPolicySync::new()),
             sandbox_domain: "cube.test".into(),
             hostname: None,
             auth_config: Arc::new(auth_config::AuthConfig::none()),
