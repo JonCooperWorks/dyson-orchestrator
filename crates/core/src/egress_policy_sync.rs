@@ -28,7 +28,7 @@ impl EgressPolicySync for SystemdEgressPolicySync {
         )
         .await;
         systemctl(
-            &["kill", "--signal=SIGHUP", "dyson-egress-proxy"],
+            &["kill", "--signal=SIGHUP", "dyson-egress-proxy.service"],
             "egress proxy reload",
         )
         .await;
@@ -37,12 +37,7 @@ impl EgressPolicySync for SystemdEgressPolicySync {
 }
 
 async fn systemctl(args: &[&str], action: &'static str) {
-    match Command::new("sudo")
-        .args(["-n", "/usr/bin/systemctl"])
-        .args(args)
-        .status()
-        .await
-    {
+    match Command::new("systemctl").args(args).status().await {
         Ok(status) if status.success() => {
             tracing::debug!(action, "egress-policy-sync: systemctl succeeded");
         }
