@@ -17,7 +17,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use uuid::Uuid;
 
 use crate::egress_policy_sync::{EgressPolicySync, NoopEgressPolicySync};
-use crate::error::SwarmError;
+use crate::error::{CubeError, SwarmError};
 use crate::mcp_servers::{self, McpAuthSpec, McpServerSpec};
 use crate::upstream_policy::{OutboundUrlPolicy, validate_outbound_url};
 
@@ -116,6 +116,16 @@ fn is_non_retryable_reconfigure_error(error: &str) -> bool {
         || error.contains("did not apply requested")
         || error.contains("configure response had ok=false")
         || error.contains("/api/admin/configure response parse")
+}
+
+fn is_snapshot_endpoint_unavailable(error: &SwarmError) -> bool {
+    let SwarmError::Cube(CubeError::Status { status, body }) = error else {
+        return false;
+    };
+    *status == 404
+        || body.contains("CubeMaster returned error code 404")
+        || body.contains("404 page not found")
+        || body.contains("snapshot unavailable")
 }
 
 fn looks_like_full_identity_doc(body: &str) -> bool {
@@ -1251,8 +1261,10 @@ impl InstanceService {
     /// maps (see the swarm README's "Network policies" section), so
     /// the implementation pivots to a fresh cube under the SAME swarm
     /// id via [`rotate_in_place`] — DNS, bearer token, secrets, and
-    /// webhook URLs all survive.  Workspace state survives via the
-    /// snapshot.
+    /// webhook URLs all survive.  Workspace state normally survives
+    /// via the snapshot; hosts on Cube builds without snapshot
+    /// endpoints fall back to the snapshotless recreate path where
+    /// swarm's sealed state mirror is authoritative.
     ///
     /// Owner-scoped via `get_for_owner`; admin uses `SYSTEM_OWNER`/`"*"`
     /// to override.  Validates the new policy BEFORE taking a
@@ -1278,14 +1290,28 @@ impl InstanceService {
             ));
         }
         let target_template = source.template_id.clone();
-        self.rotate_in_place(
-            owner_id,
-            instance_id,
-            snapshot_svc,
-            &target_template,
-            Some(new_policy),
-        )
-        .await
+        let rotated = self
+            .rotate_in_place(
+                owner_id,
+                instance_id,
+                snapshot_svc,
+                &target_template,
+                Some(new_policy.clone()),
+            )
+            .await;
+        match rotated {
+            Ok(row) => Ok(row),
+            Err(err) if is_snapshot_endpoint_unavailable(&err) => {
+                tracing::warn!(
+                    instance = %instance_id,
+                    error = %err,
+                    "change-network: cube snapshot endpoint unavailable; falling back to snapshotless recreate"
+                );
+                self.recreate_in_place(owner_id, instance_id, &target_template, Some(new_policy))
+                    .await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// In-place rotation: pivot a Live row onto a new template (and

@@ -3750,6 +3750,49 @@ async fn egress_sync_failure_does_not_fail_the_policy_change() {
 }
 
 #[tokio::test]
+async fn change_network_falls_back_to_recreate_when_snapshot_endpoint_is_missing() {
+    let (isvc, ssvc, cube, instances, _users, _recorder) = build_with_snapshot_and_policy(
+        Some("10.0.0.1/32"),
+        Arc::new(PolicyMockResolver::default()),
+    )
+    .await;
+    let src = isvc
+        .create(
+            "legacy",
+            CreateRequest {
+                template_id: "tpl".into(),
+                name: Some("alpha".into()),
+                task: None,
+                env: env_with_model(),
+                ttl_seconds: None,
+                network_policy: NetworkPolicy::Open,
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let old = instances
+        .get(&src.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .cube_sandbox_id
+        .unwrap();
+    cube.fail_snapshots();
+
+    let row = isvc
+        .change_network_policy("legacy", &src.id, &ssvc, NetworkPolicy::Airgap)
+        .await
+        .unwrap();
+
+    assert_eq!(row.id, src.id);
+    assert_eq!(row.network_policy, NetworkPolicy::Airgap);
+    assert_ne!(row.cube_sandbox_id.as_deref(), Some(old.as_str()));
+    assert_eq!(cube.snapshotted.lock().unwrap().len(), 0);
+    assert_eq!(cube.destroyed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn change_network_preserves_owner_and_identity() {
     // Owner_id, name, task all carried through.  A change-network
     // that re-tenanted the dyson would be a serious bug.
