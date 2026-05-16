@@ -402,7 +402,7 @@ pub fn webhook_presets() -> Vec<WebhookVerifierPreset> {
             "{{body}}",
             Some("x-shopify-webhook-id"),
         ),
-        agentmail_preset(),
+        svix_preset(),
     ]
 }
 
@@ -410,16 +410,14 @@ pub fn webhook_preset(id: &str) -> Option<WebhookVerifierPreset> {
     webhook_presets().into_iter().find(|p| p.id == id)
 }
 
-pub fn agentmail_preset() -> WebhookVerifierPreset {
-    // AgentMail documents Svix verification headers at
-    // https://docs.agentmail.to/webhook-verification. Svix documents
-    // the signed content as "<id>.<timestamp>.<raw body>" and the
-    // space-delimited "v1,<base64>" signature format at
-    // https://www.svix.com/guides/receiving/receive-webhooks-with-svix-cli/.
+pub fn svix_preset() -> WebhookVerifierPreset {
+    // Svix documents the signed content as "<id>.<timestamp>.<raw body>"
+    // and the space-delimited "v1,<base64>" signature format at
+    // https://docs.svix.com/receiving/verifying-payloads/how-manual.
     hmac_preset(
-        "agentmail",
-        "AgentMail",
-        "https://docs.agentmail.to/webhook-verification",
+        "svix",
+        "Svix",
+        "https://docs.svix.com/receiving/verifying-payloads/how-manual",
         "svix-signature",
         SignatureEncoding::Base64,
         Some("v1,"),
@@ -1993,11 +1991,11 @@ mod tests {
             ("shopify", "secret.txt") => {
                 include_bytes!("../tests/fixtures/webhooks/shopify/secret.txt")
             }
-            ("agentmail", "request.txt") => {
-                include_bytes!("../tests/fixtures/webhooks/agentmail/request.txt")
+            ("svix", "request.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/svix/request.txt")
             }
-            ("agentmail", "secret.txt") => {
-                include_bytes!("../tests/fixtures/webhooks/agentmail/secret.txt")
+            ("svix", "secret.txt") => {
+                include_bytes!("../tests/fixtures/webhooks/svix/secret.txt")
             }
             _ => panic!("unknown webhook fixture {vendor}/{file}"),
         }
@@ -2426,17 +2424,17 @@ mod tests {
     }
 
     #[test]
-    fn agentmail_preset_verifies_recorded_fixture() {
-        let cfg = agentmail_preset().verifier;
+    fn svix_preset_verifies_recorded_fixture() {
+        let cfg = svix_preset().verifier;
         let out = verify_fixture(
             &cfg,
-            "agentmail",
+            "svix",
             vec![
-                ("svix-id", "msg_agentmail_1"),
+                ("svix-id", "msg_svix_1"),
                 ("svix-timestamp", "1700000000"),
                 (
                     "svix-signature",
-                    "v1,oug8mHA2dpffa4PvUVQusImcR2iyw0xgEzhxwzfti4w=",
+                    "v1,rIQVOgymL66XhZlMhPJ2Ib+z0VNjxIz05sLiJMjKXhU=",
                 ),
             ],
             1_700_000_000,

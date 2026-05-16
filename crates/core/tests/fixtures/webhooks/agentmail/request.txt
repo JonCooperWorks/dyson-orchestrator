@@ -1,1 +1,0 @@
-{"event_type":"message.received","message_id":"msg_agentmail_1"}

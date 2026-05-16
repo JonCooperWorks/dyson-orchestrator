@@ -1,6 +1,6 @@
-// Inbound verifier presets. AgentMail uses Svix headers per:
-// https://docs.agentmail.to/webhook-verification and
-// https://www.svix.com/guides/receiving/receive-webhooks-with-svix-cli/
+// Inbound verifier presets. Svix uses the signed-content and signature
+// header format documented at:
+// https://docs.svix.com/receiving/verifying-payloads/how-manual
 export const WEBHOOK_PRESETS = [
   {
     id: 'standard-webhooks',
@@ -88,9 +88,9 @@ export const WEBHOOK_PRESETS = [
     idempotency_header: 'x-shopify-webhook-id',
   },
   {
-    id: 'agentmail',
-    label: 'AgentMail',
-    docs_url: 'https://docs.agentmail.to/webhook-verification',
+    id: 'svix',
+    label: 'Svix',
+    docs_url: 'https://docs.svix.com/receiving/verifying-payloads/how-manual',
     auth_scheme: 'hmac_sha256',
     verifier_mode: 'hmac_v2',
     signature_header: 'svix-signature',
