@@ -51,6 +51,8 @@ struct ForwardRequest {
 #[serde(tag = "kind")]
 enum TransportSpec {
     DockerStdio {
+        #[serde(default = "default_docker_runtime")]
+        runtime: String,
         args: Vec<String>,
         #[serde(default)]
         env: HashMap<String, String>,
@@ -62,6 +64,10 @@ enum TransportSpec {
         #[serde(default)]
         auth_bearer_env: Option<String>,
     },
+}
+
+fn default_docker_runtime() -> String {
+    "runsc".to_owned()
 }
 
 #[derive(Deserialize)]
@@ -489,15 +495,18 @@ fn spawn_session(
     secret_root: &Path,
 ) -> Result<Arc<dyn McpSession + Send + Sync>, String> {
     match &req.transport {
-        TransportSpec::DockerStdio { args, env } => Ok(Arc::new(DockerStdioSession::spawn(
-            docker,
-            args,
-            env,
-            &req.instance_id,
-            &req.server_name,
-            fingerprint,
-            secret_root,
-        )?)),
+        TransportSpec::DockerStdio { runtime, args, env } => {
+            Ok(Arc::new(DockerStdioSession::spawn(
+                docker,
+                runtime,
+                args,
+                env,
+                &req.instance_id,
+                &req.server_name,
+                fingerprint,
+                secret_root,
+            )?))
+        }
         TransportSpec::HttpStreamable {
             url,
             headers,
@@ -530,6 +539,7 @@ struct RuntimeRestartResult {
 impl DockerStdioSession {
     fn spawn(
         docker: Arc<dyn DockerController>,
+        docker_runtime: &str,
         user_args: &[String],
         env: &HashMap<String, String>,
         instance_id: &str,
@@ -544,6 +554,7 @@ impl DockerStdioSession {
             server_name,
             secret_root,
             docker.command(),
+            docker_runtime,
         )?;
         let mut child = Command::new(docker.command())
             .args(&launch.args)
@@ -833,8 +844,10 @@ impl McpSession for HttpStreamableSession {
 
 fn validate_transport(transport: &TransportSpec) -> Result<(), String> {
     match transport {
-        TransportSpec::DockerStdio { args, .. } => {
-            dyson_swarm_core::mcp_servers::validate_docker_stdio_args(args)
+        TransportSpec::DockerStdio { runtime, args, .. } => {
+            validate_docker_runtime(runtime)?;
+            let args = dyson_swarm_core::mcp_servers::strip_docker_runtime_args(args);
+            dyson_swarm_core::mcp_servers::validate_docker_stdio_args(&args)
         }
         TransportSpec::HttpStreamable {
             url,
@@ -847,6 +860,14 @@ fn validate_transport(transport: &TransportSpec) -> Result<(), String> {
             }
             Ok(())
         }
+    }
+}
+
+fn validate_docker_runtime(runtime: &str) -> Result<(), String> {
+    if runtime == "runsc" {
+        Ok(())
+    } else {
+        Err(format!("unsupported Docker MCP runtime `{runtime}`"))
     }
 }
 
@@ -878,10 +899,11 @@ fn url_is_loopback(url: &reqwest::Url) -> bool {
 
 fn session_fingerprint(transport: &TransportSpec) -> String {
     match transport {
-        TransportSpec::DockerStdio { args, env } => {
+        TransportSpec::DockerStdio { runtime, args, env } => {
             let env: BTreeMap<&String, &String> = env.iter().collect();
             serde_json::json!({
                 "kind": "DockerStdio",
+                "runtime": runtime,
                 "args": args,
                 "env": env,
             })
@@ -1027,6 +1049,7 @@ fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -
         server_name,
         Path::new("/tmp/dyson-mcp-runtime-test-secrets"),
         "docker",
+        "runsc",
     )
     .expect("docker args should build")
     .args
@@ -1056,14 +1079,17 @@ fn docker_run_launch(
     server_name: &str,
     secret_root: &Path,
     docker_command: &str,
+    docker_runtime: &str,
 ) -> Result<DockerLaunch, String> {
+    validate_docker_runtime(docker_runtime)?;
     let mut secrets = BTreeMap::new();
     for (name, value) in env {
         if is_env_name(name) {
             secrets.insert(name.clone(), value.clone());
         }
     }
-    let mut user_args = sanitized_docker_user_args(user_args, &mut secrets);
+    let user_args = dyson_swarm_core::mcp_servers::strip_docker_runtime_args(user_args);
+    let mut user_args = sanitized_docker_user_args(&user_args, &mut secrets);
     let secret_dir = if secrets.is_empty() {
         None
     } else {
@@ -1088,6 +1114,8 @@ fn docker_run_launch(
         "run".to_owned(),
         "--rm".to_owned(),
         "-i".to_owned(),
+        "--runtime".to_owned(),
+        docker_runtime.to_owned(),
         "--cap-drop=ALL".to_owned(),
         "--security-opt".to_owned(),
         "no-new-privileges".to_owned(),
@@ -1851,6 +1879,7 @@ for line in sys.stdin:
             instance_id: "itest".into(),
             server_name: "echo".into(),
             transport: TransportSpec::DockerStdio {
+                runtime: "runsc".into(),
                 args: args.clone(),
                 env: HashMap::new(),
             },
@@ -1869,6 +1898,7 @@ for line in sys.stdin:
             instance_id: "itest".into(),
             server_name: "echo".into(),
             transport: TransportSpec::DockerStdio {
+                runtime: "runsc".into(),
                 args,
                 env: HashMap::new(),
             },
@@ -1982,6 +2012,7 @@ for line in sys.stdin:
         assert_eq!(
             transport,
             TransportSpec::DockerStdio {
+                runtime: "runsc".into(),
                 args: vec!["run".into(), "example/mcp".into()],
                 env: HashMap::from([("B".into(), "2".into())]),
             }
@@ -2008,6 +2039,7 @@ for line in sys.stdin:
         assert_eq!(
             transport,
             TransportSpec::DockerStdio {
+                runtime: "runsc".into(),
                 args: vec!["run".into(), "example/mcp".into()],
                 env: HashMap::from([("A".into(), "1".into())]),
             }
@@ -2046,10 +2078,12 @@ for line in sys.stdin:
     #[test]
     fn fingerprint_is_stable_across_env_and_header_ordering() {
         let left = TransportSpec::DockerStdio {
+            runtime: "runsc".into(),
             args: vec!["run".into(), "example/mcp".into()],
             env: HashMap::from([("B".into(), "2".into()), ("A".into(), "1".into())]),
         };
         let right = TransportSpec::DockerStdio {
+            runtime: "runsc".into(),
             args: vec!["run".into(), "example/mcp".into()],
             env: HashMap::from([("A".into(), "1".into()), ("B".into(), "2".into())]),
         };
@@ -2069,6 +2103,17 @@ for line in sys.stdin:
             session_fingerprint(&http_left),
             session_fingerprint(&http_right)
         );
+    }
+
+    #[test]
+    fn docker_transport_rejects_unknown_runtime() {
+        let transport = TransportSpec::DockerStdio {
+            runtime: "runc".into(),
+            args: vec!["run".into(), "example/mcp".into()],
+            env: HashMap::new(),
+        };
+        let err = validate_transport(&transport).unwrap_err();
+        assert!(err.contains("unsupported Docker MCP runtime"));
     }
 
     #[test]
@@ -2097,13 +2142,43 @@ for line in sys.stdin:
             "example/mcp".to_string(),
         ];
         let out = docker_run_args(&args, "i-1", "stdio");
-        assert!(out.windows(2).any(|w| w == ["--network", "bridge"]));
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == "--runtime" && w[1] == "runsc")
+        );
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == "--network" && w[1] == "bridge")
+        );
         assert_eq!(
             out.iter().filter(|arg| arg.as_str() == "--network").count(),
             1
         );
         assert!(!out.iter().any(|arg| arg == "--network=bridge"));
         assert!(!out.iter().any(|arg| arg == "--net"));
+        assert!(out.iter().any(|arg| arg == "example/mcp"));
+    }
+
+    #[test]
+    fn docker_run_args_strips_user_runtime_and_preserves_runsc() {
+        let args = vec![
+            "run".to_string(),
+            "--runtime".to_string(),
+            "runc".to_string(),
+            "--runtime=crun".to_string(),
+            "example/mcp".to_string(),
+        ];
+        let out = docker_run_args(&args, "i-1", "stdio");
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == "--runtime" && w[1] == "runsc")
+        );
+        assert_eq!(
+            out.iter().filter(|arg| arg.as_str() == "--runtime").count(),
+            1
+        );
+        assert!(!out.iter().any(|arg| arg == "runc"));
+        assert!(!out.iter().any(|arg| arg == "--runtime=crun"));
         assert!(out.iter().any(|arg| arg == "example/mcp"));
     }
 
@@ -2129,6 +2204,7 @@ for line in sys.stdin:
             "stdio",
             &secret_root,
             "docker",
+            "runsc",
         )
         .unwrap();
         let secret_dir = launch.secret_dir.as_ref().expect("secret dir");
@@ -2141,7 +2217,7 @@ for line in sys.stdin:
             launch
                 .args
                 .windows(2)
-                .any(|w| { w == ["--entrypoint", SECRET_ENTRYPOINT_SHELL] })
+                .any(|w| { w[0] == "--entrypoint" && w[1] == SECRET_ENTRYPOINT_SHELL })
         );
         for name in [
             "ENV_MAP_TOKEN",

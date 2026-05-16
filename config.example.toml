@@ -35,6 +35,7 @@ sandbox_domain = "cube.app"
 # proxied by swarm.
 [mcp_runtime]
 socket_path = "/run/dyson-mcp-runtime/runtime.sock"
+runtime = "runsc"
 # Trusted/private nodes can opt into raw Docker JSON. Public nodes
 # should leave this false and expose only catalog presets.
 allow_user_docker_json = false

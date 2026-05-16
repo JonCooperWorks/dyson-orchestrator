@@ -17,10 +17,12 @@ use dyson_swarm::{
     logging,
     probe::{self, HttpHealthProber},
     proxy::{self, ProxyService, policy_check::InstancePolicy},
+    sandbox_backend::CubeSandboxBackend,
     snapshot::SnapshotService,
     traits::{
         AdminAuditStore, AuditStore, BackupSink, CubeClient, HealthProber, InstanceStore,
-        McpAuditStore, PolicyStore, SessionStore, SnapshotStore, TokenStore, UserStore,
+        McpAuditStore, PolicyStore, SandboxBackend, SessionStore, SnapshotStore, TokenStore,
+        UserStore,
     },
     ttl,
 };
@@ -154,6 +156,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let sandbox_backend: Arc<dyn SandboxBackend> = Arc::new(CubeSandboxBackend::new(cube.clone()));
     let user_secrets_store = stores.user_secrets.clone();
     let system_secrets_store = stores.system_secrets.clone();
     match stores.runtime_migrator.migrate(token_cipher.as_ref()).await {
@@ -255,8 +258,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         );
     }
 
-    let mut instance_svc = InstanceService::new(
-        cube.clone(),
+    let mut instance_svc = InstanceService::with_backend(
+        sandbox_backend.clone(),
         instances_store.clone(),
         tokens_store.clone(),
         proxy_base,
@@ -349,10 +352,16 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     }
 
     let backup_sink: Arc<dyn BackupSink> = match cfg.backup.sink {
-        config::BackupSinkKind::Local => Arc::new(LocalDiskBackupSink::new(cube.clone())),
+        config::BackupSinkKind::Local => {
+            Arc::new(LocalDiskBackupSink::with_backend(sandbox_backend.clone()))
+        }
         config::BackupSinkKind::S3 => {
             let s3cfg = cfg.backup.s3.as_ref().expect("validated by Config::load");
-            match S3BackupSink::new(s3cfg, cfg.backup.local_cache_dir.clone(), cube.clone()) {
+            match S3BackupSink::with_backend(
+                s3cfg,
+                cfg.backup.local_cache_dir.clone(),
+                sandbox_backend.clone(),
+            ) {
                 Ok(s) => Arc::new(s),
                 Err(err) => {
                     tracing::error!(error = %err, "s3 backup sink init failed");
@@ -361,8 +370,8 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
             }
         }
     };
-    let snapshot_svc = Arc::new(SnapshotService::new(
-        cube,
+    let snapshot_svc = Arc::new(SnapshotService::with_backend(
+        sandbox_backend,
         instances_store.clone(),
         snapshots_store,
         backup_sink,
@@ -552,14 +561,15 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         .hostname
         .as_deref()
         .map(|h| format!("https://{}", h.trim_end_matches('/')));
-    let (mcp_runtime_socket, docker_catalog, allow_user_docker_json) =
+    let (mcp_runtime_socket, mcp_docker_runtime, docker_catalog, allow_user_docker_json) =
         match cfg.mcp_runtime.as_ref() {
             Some(runtime) => (
                 Some(runtime.socket_path.clone()),
+                runtime.runtime.as_str().to_owned(),
                 runtime.docker_catalog.clone(),
                 runtime.allow_user_docker_json,
             ),
-            None => (None, Vec::new(), false),
+            None => (None, "runsc".to_owned(), Vec::new(), false),
         };
     let mcp_catalog_store = stores.mcp_docker_catalog.clone();
     if let Err(err) = mcp_catalog_store.seed_config(&docker_catalog).await {
@@ -575,6 +585,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         Ok(s) => Arc::new(
             s.with_instance_svc(instance_svc.clone())
                 .with_runtime_socket(mcp_runtime_socket.clone())
+                .with_docker_runtime(mcp_docker_runtime)
                 .with_docker_catalog(docker_catalog, allow_user_docker_json)
                 .with_docker_catalog_store(mcp_catalog_store)
                 .with_mcp_audit(mcp_audit_store)

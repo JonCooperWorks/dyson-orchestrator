@@ -287,6 +287,8 @@ pub struct CubeConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpRuntimeConfig {
     pub socket_path: PathBuf,
+    #[serde(default)]
+    pub runtime: McpDockerRuntime,
     /// Allow users to paste arbitrary Docker stdio MCP JSON.  Keep
     /// enabled for trusted nodes; turn off on public nodes and use
     /// `docker_catalog` entries instead.
@@ -297,6 +299,21 @@ pub struct McpRuntimeConfig {
     /// and validates the final MCP JSON server-side.
     #[serde(default)]
     pub docker_catalog: Vec<McpDockerCatalogServer>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpDockerRuntime {
+    #[default]
+    Runsc,
+}
+
+impl McpDockerRuntime {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Runsc => "runsc",
+        }
+    }
 }
 
 fn default_allow_user_docker_json() -> bool {
@@ -819,6 +836,27 @@ local_cache_dir = "/tmp/cache"
         let path = write_tmp("s3_no_section.toml", &toml);
         let err = Config::load(&path, &BTreeMap::new(), false).expect_err("rejects");
         assert!(matches!(err, ConfigError::MissingS3Section));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mcp_runtime_accepts_only_runsc_runtime() {
+        let toml = format!(
+            "{}\n[mcp_runtime]\nsocket_path = \"/run/dyson-mcp-runtime/runtime.sock\"\nruntime = \"runsc\"\n",
+            example_toml()
+        );
+        let path = write_tmp("mcp_runtime_runsc.toml", &toml);
+        let cfg = Config::load(&path, &BTreeMap::new(), false).expect("loads");
+        assert_eq!(
+            cfg.mcp_runtime.unwrap().runtime.as_str(),
+            McpDockerRuntime::Runsc.as_str()
+        );
+        std::fs::remove_file(&path).ok();
+
+        let toml = toml.replace("runtime = \"runsc\"", "runtime = \"runc\"");
+        let path = write_tmp("mcp_runtime_bad.toml", &toml);
+        let err = Config::load(&path, &BTreeMap::new(), false).expect_err("rejects");
+        assert!(matches!(err, ConfigError::Parse(_)));
         std::fs::remove_file(&path).ok();
     }
 

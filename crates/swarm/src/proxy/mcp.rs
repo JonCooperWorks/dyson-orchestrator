@@ -86,6 +86,9 @@ pub struct McpService {
     /// When absent, remote HTTP/SSE MCP still works; container stdio
     /// entries return a clear 503.
     pub runtime_socket_path: Option<PathBuf>,
+    /// Docker runtime name requested for Docker-backed stdio MCP
+    /// containers. Config validation only permits `runsc`.
+    pub docker_runtime: String,
     /// Operator-curated Docker stdio presets.  Users see a slim
     /// placeholder surface and read-only JSON preview instead of a
     /// free-form Docker command surface.
@@ -123,6 +126,7 @@ impl McpService {
             public_origin,
             instance_svc: None,
             runtime_socket_path: None,
+            docker_runtime: "runsc".to_owned(),
             docker_catalog: Vec::new(),
             allow_user_docker_json: false,
             docker_catalog_store: None,
@@ -142,6 +146,11 @@ impl McpService {
 
     pub fn with_runtime_socket(mut self, socket_path: Option<PathBuf>) -> Self {
         self.runtime_socket_path = socket_path;
+        self
+    }
+
+    pub fn with_docker_runtime(mut self, runtime: impl Into<String>) -> Self {
+        self.docker_runtime = runtime.into();
         self
     }
 
@@ -1880,8 +1889,13 @@ async fn post_jsonrpc_for_entry(
         validate_remote_mcp_auth_urls(svc, &entry.auth).await?;
     }
     let request_json = serde_json::to_string(body).map_err(|e| format!("encode JSON-RPC: {e}"))?;
-    let request =
-        runtime_forward_request_for_entry(instance_id, server_name, entry, &request_json)?;
+    let request = runtime_forward_request_for_entry(
+        svc.docker_runtime.as_str(),
+        instance_id,
+        server_name,
+        entry,
+        &request_json,
+    )?;
     let resp = call_runtime(socket_path, &request).await?;
     if !(200..300).contains(&resp.status) {
         return Err(format!("runtime HTTP {}: {}", resp.status, resp.body));

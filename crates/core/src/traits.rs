@@ -573,6 +573,18 @@ pub trait CubeClient: Send + Sync {
 }
 
 #[async_trait]
+pub trait SandboxBackend: Send + Sync {
+    async fn create_sandbox(&self, args: CreateSandboxArgs) -> Result<SandboxInfo, CubeError>;
+    async fn destroy_sandbox(&self, sandbox_id: &str) -> Result<(), CubeError>;
+    async fn snapshot_sandbox(
+        &self,
+        sandbox_id: &str,
+        name: &str,
+    ) -> Result<SnapshotInfo, CubeError>;
+    async fn delete_snapshot(&self, snapshot_id: &str, host_ip: &str) -> Result<(), CubeError>;
+}
+
+#[async_trait]
 pub trait InstanceStore: Send + Sync {
     async fn create(&self, row: InstanceRow) -> Result<(), StoreError>;
     /// Atomically insert `row` only when this owner has fewer than

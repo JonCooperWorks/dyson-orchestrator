@@ -17,16 +17,21 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::BackupError;
-use crate::traits::{BackupSink, CubeClient, SnapshotRow};
+use crate::sandbox_backend::CubeSandboxBackend;
+use crate::traits::{BackupSink, CubeClient, SandboxBackend, SnapshotRow};
 
 #[derive(Clone)]
 pub struct LocalDiskBackupSink {
-    cube: Arc<dyn CubeClient>,
+    sandbox: Arc<dyn SandboxBackend>,
 }
 
 impl LocalDiskBackupSink {
     pub fn new(cube: Arc<dyn CubeClient>) -> Self {
-        Self { cube }
+        Self::with_backend(Arc::new(CubeSandboxBackend::new(cube)))
+    }
+
+    pub fn with_backend(sandbox: Arc<dyn SandboxBackend>) -> Self {
+        Self { sandbox }
     }
 }
 
@@ -45,7 +50,7 @@ impl BackupSink for LocalDiskBackupSink {
     }
 
     async fn delete(&self, snap: &SnapshotRow) -> Result<(), BackupError> {
-        self.cube
+        self.sandbox
             .delete_snapshot(&snap.id, &snap.host_ip)
             .await
             .map_err(|e| BackupError::Sink(e.to_string()))?;

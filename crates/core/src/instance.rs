@@ -24,10 +24,11 @@ use crate::upstream_policy::{OutboundUrlPolicy, validate_outbound_url};
 
 use crate::network_policy::{self, DnsHostResolver, HostResolver, NetworkPolicy};
 use crate::now_secs;
+use crate::sandbox_backend::CubeSandboxBackend;
 use crate::secrets::UserSecretsService;
 use crate::traits::{
     CreateSandboxArgs, CubeClient, HealthProber, InstanceChannelStore, InstanceRow, InstanceStatus,
-    InstanceStore, ListFilter, ProbeResult, SandboxInfo, TokenStore,
+    InstanceStore, ListFilter, ProbeResult, SandboxBackend, SandboxInfo, TokenStore,
 };
 
 mod env;
@@ -177,7 +178,7 @@ async fn restore_state_file_with_retry(
 
 #[derive(Clone)]
 pub struct InstanceService {
-    cube: Arc<dyn CubeClient>,
+    sandbox: Arc<dyn SandboxBackend>,
     instances: Arc<dyn InstanceStore>,
     tokens: Arc<dyn TokenStore>,
     /// Public base URL of the swarm's `/llm/` proxy mount, e.g.
@@ -331,8 +332,22 @@ impl InstanceService {
         tokens: Arc<dyn TokenStore>,
         proxy_base: impl Into<String>,
     ) -> Self {
+        Self::with_backend(
+            Arc::new(CubeSandboxBackend::new(cube)),
+            instances,
+            tokens,
+            proxy_base,
+        )
+    }
+
+    pub fn with_backend(
+        sandbox: Arc<dyn SandboxBackend>,
+        instances: Arc<dyn InstanceStore>,
+        tokens: Arc<dyn TokenStore>,
+        proxy_base: impl Into<String>,
+    ) -> Self {
         Self {
-            cube,
+            sandbox,
             instances,
             tokens,
             proxy_base: proxy_base.into(),
@@ -603,7 +618,7 @@ impl InstanceService {
         }
         let env = compose_sandbox_env(&managed, &BTreeMap::new())?;
         let info = self
-            .cube
+            .sandbox
             .create_sandbox(CreateSandboxArgs {
                 template_id: plan.target_template_id.clone(),
                 env,
@@ -765,7 +780,7 @@ impl InstanceService {
         old_sandbox_id: &str,
         operation: &'static str,
     ) {
-        if let Err(err) = self.cube.destroy_sandbox(old_sandbox_id).await {
+        if let Err(err) = self.sandbox.destroy_sandbox(old_sandbox_id).await {
             tracing::warn!(
                 instance = %source.id,
                 old_sandbox = %old_sandbox_id,
@@ -1155,7 +1170,7 @@ impl InstanceService {
                             "runtime-config-sync: Configuring recovery failed; destroying sandbox"
                         );
                         let _ = self.tokens.revoke_for_instance(&row.id).await;
-                        if let Err(destroy_err) = self.cube.destroy_sandbox(sandbox_id).await {
+                        if let Err(destroy_err) = self.sandbox.destroy_sandbox(sandbox_id).await {
                             tracing::warn!(
                                 instance = %row.id,
                                 sandbox = %sandbox_id,
@@ -1641,7 +1656,7 @@ impl InstanceService {
                         let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
                     }
                 }
-                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+                let _ = self.sandbox.destroy_sandbox(&info.sandbox_id).await;
                 return Err(err);
             }
         }
@@ -1672,7 +1687,7 @@ impl InstanceService {
                     let _ = rc.unquiesce(&source.id, old_sandbox_id).await;
                 }
             }
-            if let Err(d) = self.cube.destroy_sandbox(&info.sandbox_id).await {
+            if let Err(d) = self.sandbox.destroy_sandbox(&info.sandbox_id).await {
                 tracing::warn!(
                     instance = %source.id,
                     new_sandbox = %info.sandbox_id,
@@ -1802,7 +1817,7 @@ impl InstanceService {
         let from_snapshot_path = Some(snapshot_path);
 
         let info = self
-            .cube
+            .sandbox
             .create_sandbox(CreateSandboxArgs {
                 template_id: target_template.clone(),
                 env,
@@ -1832,7 +1847,7 @@ impl InstanceService {
                 )
                 .await
         {
-            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+            let _ = self.sandbox.destroy_sandbox(&info.sandbox_id).await;
             return Err(err);
         }
 
@@ -1849,7 +1864,7 @@ impl InstanceService {
             )
             .await
         {
-            if let Err(d) = self.cube.destroy_sandbox(&info.sandbox_id).await {
+            if let Err(d) = self.sandbox.destroy_sandbox(&info.sandbox_id).await {
                 tracing::warn!(
                     instance = %source.id,
                     new_sandbox = %info.sandbox_id,
@@ -1877,7 +1892,7 @@ impl InstanceService {
             .await;
 
         if let Some(old) = old_sandbox_id.filter(|old| old != &info.sandbox_id)
-            && let Err(err) = self.cube.destroy_sandbox(&old).await
+            && let Err(err) = self.sandbox.destroy_sandbox(&old).await
         {
             tracing::warn!(
                 instance = %source.id,
@@ -1967,7 +1982,7 @@ impl InstanceService {
                 )
                 .await
             {
-                let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+                let _ = self.sandbox.destroy_sandbox(&info.sandbox_id).await;
                 return Err(err);
             }
         }
@@ -2067,7 +2082,7 @@ impl InstanceService {
             )
             .await
         {
-            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+            let _ = self.sandbox.destroy_sandbox(&info.sandbox_id).await;
             return Err(err);
         }
 
@@ -2084,7 +2099,7 @@ impl InstanceService {
             )
             .await
         {
-            let _ = self.cube.destroy_sandbox(&info.sandbox_id).await;
+            let _ = self.sandbox.destroy_sandbox(&info.sandbox_id).await;
             return Err(err.into());
         }
         self.instances
@@ -2623,7 +2638,7 @@ impl InstanceService {
         let env = compose_sandbox_env(&managed, &req.env)?;
 
         let info = match self
-            .cube
+            .sandbox
             .create_sandbox(CreateSandboxArgs {
                 template_id: req.template_id,
                 env,
@@ -2799,7 +2814,7 @@ impl InstanceService {
                     "reconfigure: failed during create — destroying half-configured sandbox"
                 );
                 let _ = self.tokens.revoke_for_instance(&id).await;
-                if let Err(destroy_err) = self.cube.destroy_sandbox(&info.sandbox_id).await {
+                if let Err(destroy_err) = self.sandbox.destroy_sandbox(&info.sandbox_id).await {
                     tracing::warn!(
                         error = %destroy_err,
                         instance = %id,
@@ -3874,7 +3889,7 @@ impl InstanceService {
             .await?
             .ok_or(SwarmError::NotFound)?;
         if let Some(sb) = &row.cube_sandbox_id {
-            match self.cube.destroy_sandbox(sb).await {
+            match self.sandbox.destroy_sandbox(sb).await {
                 Ok(()) => {}
                 Err(e) if force => {
                     tracing::warn!(
@@ -3996,7 +4011,7 @@ impl InstanceService {
         let env = compose_sandbox_env(&managed, &req.env)?;
 
         let info = match self
-            .cube
+            .sandbox
             .create_sandbox(CreateSandboxArgs {
                 template_id: req.template_id,
                 env,

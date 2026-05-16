@@ -104,6 +104,7 @@ async fn call_runtime_round_trips_fake_helper() {
         assert_eq!(req["instance_id"], "i-1");
         assert_eq!(req["server_name"], "echo");
         assert_eq!(req["transport"]["kind"], "DockerStdio");
+        assert_eq!(req["transport"]["runtime"], "runsc");
         assert!(req.get("command").is_none());
         assert!(req["transport"].get("command").is_none());
         let resp = serde_json::json!({
@@ -124,7 +125,8 @@ async fn call_runtime_round_trips_fake_helper() {
     let req = RuntimeRequest::forward_docker(
         "i-1",
         "echo",
-        &args,
+        "runsc",
+        args.clone(),
         &env,
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
     );
@@ -188,6 +190,7 @@ async fn restart_runtime_server_sends_runtime_restart_op() {
         assert_eq!(req["instance_id"], "i-1");
         assert_eq!(req["server_name"], "brave");
         assert_eq!(req["transport"]["kind"], "DockerStdio");
+        assert_eq!(req["transport"]["runtime"], "runsc");
         assert!(req["transport"].get("command").is_none());
         let resp = serde_json::json!({
             "status": 200,
@@ -218,10 +221,50 @@ async fn restart_runtime_server_sends_runtime_restart_op() {
         last_check_error: None,
         enabled_tools: None,
     };
-    restart_runtime_server(Some(&socket), "i-1", "brave", &entry)
+    restart_runtime_server(Some(&socket), "runsc", "i-1", "brave", &entry)
         .await
         .unwrap();
     server.await.unwrap();
+}
+
+#[test]
+fn runtime_request_strips_user_runtime_before_helper() {
+    let entry = McpServerEntry {
+        url: "docker://example/mcp".into(),
+        auth: McpAuthSpec::None,
+        headers: std::collections::HashMap::new(),
+        runtime: Some(McpRuntimeSpec::DockerStdio {
+            command: "docker".into(),
+            args: vec![
+                "run".into(),
+                "--runtime".into(),
+                "runc".into(),
+                "--runtime=crun".into(),
+                "example/mcp".into(),
+            ],
+            env: std::collections::HashMap::new(),
+        }),
+        docker_catalog: None,
+        raw_vscode_config: None,
+        oauth_tokens: None,
+        tools_catalog: None,
+        last_check_error: None,
+        enabled_tools: None,
+    };
+    let req = runtime_forward_request_for_entry(
+        "runsc",
+        "i-1",
+        "stdio",
+        &entry,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+    )
+    .unwrap();
+    let value = serde_json::to_value(req).unwrap();
+    assert_eq!(value["transport"]["runtime"], "runsc");
+    assert_eq!(
+        value["transport"]["args"],
+        serde_json::json!(["run", "example/mcp"])
+    );
 }
 
 #[test]

@@ -39,6 +39,8 @@ pub mod policy;
 #[cfg(feature = "full")]
 pub mod probe;
 #[cfg(feature = "full")]
+pub mod sandbox_backend;
+#[cfg(feature = "full")]
 pub mod secrets;
 #[cfg(feature = "full")]
 pub mod shares;

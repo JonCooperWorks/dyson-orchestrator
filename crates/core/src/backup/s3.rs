@@ -23,14 +23,15 @@ use s3::region::Region;
 
 use crate::config::S3Config;
 use crate::error::BackupError;
-use crate::traits::{BackupSink, CubeClient, SnapshotRow};
+use crate::sandbox_backend::CubeSandboxBackend;
+use crate::traits::{BackupSink, CubeClient, SandboxBackend, SnapshotRow};
 
 #[derive(Clone)]
 pub struct S3BackupSink {
     bucket: Box<Bucket>,
     prefix: String,
     cache_dir: PathBuf,
-    cube: Arc<dyn CubeClient>,
+    sandbox: Arc<dyn SandboxBackend>,
 }
 
 impl S3BackupSink {
@@ -38,6 +39,14 @@ impl S3BackupSink {
         cfg: &S3Config,
         cache_dir: PathBuf,
         cube: Arc<dyn CubeClient>,
+    ) -> Result<Self, BackupError> {
+        Self::with_backend(cfg, cache_dir, Arc::new(CubeSandboxBackend::new(cube)))
+    }
+
+    pub fn with_backend(
+        cfg: &S3Config,
+        cache_dir: PathBuf,
+        sandbox: Arc<dyn SandboxBackend>,
     ) -> Result<Self, BackupError> {
         let region = Region::Custom {
             region: cfg.region.clone(),
@@ -61,7 +70,7 @@ impl S3BackupSink {
             bucket,
             prefix: cfg.prefix.clone(),
             cache_dir,
-            cube,
+            sandbox,
         })
     }
 
@@ -219,7 +228,7 @@ impl BackupSink for S3BackupSink {
             }
         }
         let _ = tokio::fs::remove_dir_all(self.cache_path(&snap.id)).await;
-        self.cube
+        self.sandbox
             .delete_snapshot(&snap.id, &snap.host_ip)
             .await
             .map_err(|e| BackupError::Sink(e.to_string()))?;

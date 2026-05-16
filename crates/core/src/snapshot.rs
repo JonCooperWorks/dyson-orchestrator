@@ -13,13 +13,14 @@ use serde::Serialize;
 use crate::error::SwarmError;
 use crate::instance::{CreatedInstance, InstanceService, RestoreRequest};
 use crate::now_secs;
+use crate::sandbox_backend::CubeSandboxBackend;
 use crate::traits::{
-    BackupSink, CubeClient, InstanceStore, SnapshotKind, SnapshotRow, SnapshotStore,
+    BackupSink, CubeClient, InstanceStore, SandboxBackend, SnapshotKind, SnapshotRow, SnapshotStore,
 };
 
 #[derive(Clone)]
 pub struct SnapshotService {
-    cube: Arc<dyn CubeClient>,
+    sandbox: Arc<dyn SandboxBackend>,
     instances: Arc<dyn InstanceStore>,
     snapshots: Arc<dyn SnapshotStore>,
     backup: Arc<dyn BackupSink>,
@@ -65,8 +66,24 @@ impl SnapshotService {
         backup: Arc<dyn BackupSink>,
         instance_svc: Arc<InstanceService>,
     ) -> Self {
+        Self::with_backend(
+            Arc::new(CubeSandboxBackend::new(cube)),
+            instances,
+            snapshots,
+            backup,
+            instance_svc,
+        )
+    }
+
+    pub fn with_backend(
+        sandbox: Arc<dyn SandboxBackend>,
+        instances: Arc<dyn InstanceStore>,
+        snapshots: Arc<dyn SnapshotStore>,
+        backup: Arc<dyn BackupSink>,
+        instance_svc: Arc<InstanceService>,
+    ) -> Self {
         Self {
-            cube,
+            sandbox,
             instances,
             snapshots,
             backup,
@@ -404,7 +421,7 @@ impl SnapshotService {
             .as_deref()
             .ok_or(SwarmError::NotFound)?;
         let snap_name = format!("ckpt-{}", uuid::Uuid::new_v4().simple());
-        let info = self.cube.snapshot_sandbox(sandbox, &snap_name).await?;
+        let info = self.sandbox.snapshot_sandbox(sandbox, &snap_name).await?;
 
         // A3: compute a SHA-256 over the bundle directory (deterministic
         // walk + path-binding framing) for tamper detection at restore.

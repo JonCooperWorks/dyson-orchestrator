@@ -760,6 +760,9 @@ pub fn validate_docker_stdio_args(args: &[String]) -> Result<(), String> {
         if arg == "--privileged" {
             return Err("privileged containers are not allowed".into());
         }
+        if arg == "--runtime" || arg.starts_with("--runtime=") {
+            return Err("Docker flag `--runtime` is not allowed".into());
+        }
         if arg.starts_with("-v")
             || arg.starts_with("-p")
             || arg.starts_with("-P")
@@ -791,6 +794,46 @@ pub fn validate_docker_stdio_args(args: &[String]) -> Result<(), String> {
         return Err("docker run config must include an image".into());
     }
     Ok(())
+}
+
+/// Drop user-supplied Docker runtime flags before handing arguments to
+/// the MCP runtime helper. New user/admin inputs are still rejected by
+/// `validate_docker_stdio_args`; this strips persisted legacy rows and
+/// direct helper requests as a defense-in-depth override.
+pub fn strip_docker_runtime_args(args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(args.len());
+    out.push(args[0].clone());
+    let mut i = 1usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" || !arg.starts_with('-') {
+            out.extend(args[i..].iter().cloned());
+            break;
+        }
+        if arg == "--runtime" {
+            i += if args.get(i + 1).is_some() { 2 } else { 1 };
+            continue;
+        }
+        if arg.starts_with("--runtime=") {
+            i += 1;
+            continue;
+        }
+        out.push(args[i].clone());
+        if option_takes_value(arg) && !arg.contains('=') {
+            if let Some(value) = args.get(i + 1) {
+                out.push(value.clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 fn docker_flag_value<'a>(args: &'a [String], index: usize, flag: &str) -> Option<&'a str> {
@@ -839,6 +882,7 @@ fn option_takes_value(arg: &str) -> bool {
             | "--platform"
             | "--pull"
             | "--restart"
+            | "--runtime"
             | "--shm-size"
             | "--stop-signal"
             | "--user"
@@ -1823,13 +1867,22 @@ mod tests {
             vec!["run", "--network=host", "img"],
             vec!["run", "--pid", "host", "img"],
             vec!["run", "-p", "8080:8080", "img"],
+            vec!["run", "--publish", "8080:8080", "img"],
             vec!["run", "-v", "/:/host", "img"],
+            vec![
+                "run",
+                "-v",
+                "/var/run/docker.sock:/var/run/docker.sock",
+                "img",
+            ],
             vec!["run", "-d", "img"],
             vec!["run", "--detach=true", "img"],
             vec!["run", "--rm=false", "img"],
             vec!["run", "--env-file", "/tmp/secrets", "img"],
             vec!["run", "--mount", "type=bind,source=/,target=/host", "img"],
             vec!["run", "--memory=8g", "img"],
+            vec!["run", "--runtime", "runc", "img"],
+            vec!["run", "--runtime=crun", "img"],
         ] {
             let args: Vec<String> = args.into_iter().map(String::from).collect();
             assert!(
@@ -1848,6 +1901,53 @@ mod tests {
         .map(String::from)
         .collect();
         assert!(validate_docker_stdio_args(&safe).is_ok());
+    }
+
+    #[test]
+    fn docker_runtime_flags_are_stripped_for_runtime_requests() {
+        let args: Vec<String> = [
+            "run",
+            "--rm",
+            "--runtime",
+            "runc",
+            "--runtime=crun",
+            "ghcr.io/example/mcp",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            strip_docker_runtime_args(&args),
+            vec![
+                "run".to_owned(),
+                "--rm".to_owned(),
+                "ghcr.io/example/mcp".to_owned()
+            ]
+        );
+
+        let args: Vec<String> = [
+            "run",
+            "--runtime=runc",
+            "--entrypoint",
+            "python",
+            "ghcr.io/example/mcp",
+            "--runtime",
+            "literal-command-arg",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            strip_docker_runtime_args(&args),
+            vec![
+                "run".to_owned(),
+                "--entrypoint".to_owned(),
+                "python".to_owned(),
+                "ghcr.io/example/mcp".to_owned(),
+                "--runtime".to_owned(),
+                "literal-command-arg".to_owned(),
+            ]
+        );
     }
 
     #[test]

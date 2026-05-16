@@ -45,7 +45,8 @@ pub(super) enum RuntimeRequest<'a> {
 #[serde(tag = "kind")]
 pub(super) enum RuntimeTransportSpec<'a> {
     DockerStdio {
-        args: &'a [String],
+        runtime: &'a str,
+        args: Vec<String>,
         env: &'a std::collections::HashMap<String, String>,
     },
     HttpStreamable {
@@ -61,14 +62,15 @@ impl<'a> RuntimeRequest<'a> {
     pub(super) fn forward_docker(
         instance_id: &'a str,
         server_name: &'a str,
-        args: &'a [String],
+        runtime: &'a str,
+        args: Vec<String>,
         env: &'a std::collections::HashMap<String, String>,
         request_json: &'a str,
     ) -> Self {
         Self::Forward {
             instance_id,
             server_name,
-            transport: RuntimeTransportSpec::DockerStdio { args, env },
+            transport: RuntimeTransportSpec::DockerStdio { runtime, args, env },
             request_json,
         }
     }
@@ -143,11 +145,16 @@ pub(super) async fn forward_runtime_stdio(
             return error_resp(StatusCode::FORBIDDEN, "mcp upstream not allowed");
         }
     }
-    let request =
-        match runtime_forward_request_for_entry(instance_id, server_name, entry, request_json) {
-            Ok(request) => request,
-            Err(msg) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &msg),
-        };
+    let request = match runtime_forward_request_for_entry(
+        svc.docker_runtime.as_str(),
+        instance_id,
+        server_name,
+        entry,
+        request_json,
+    ) {
+        Ok(request) => request,
+        Err(msg) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    };
     let runtime_resp = match call_runtime(socket_path, &request).await {
         Ok(r) => r,
         Err(err) => {
@@ -204,15 +211,21 @@ pub(super) async fn forward_runtime_stdio(
 }
 
 pub(super) fn runtime_forward_request_for_entry<'a>(
+    docker_runtime: &'a str,
     instance_id: &'a str,
     server_name: &'a str,
     entry: &'a McpServerEntry,
     request_json: &'a str,
 ) -> Result<RuntimeRequest<'a>, String> {
-    Ok(match runtime_transport_for_entry(entry)? {
-        RuntimeTransportSpec::DockerStdio { args, env } => {
-            RuntimeRequest::forward_docker(instance_id, server_name, args, env, request_json)
-        }
+    Ok(match runtime_transport_for_entry(docker_runtime, entry)? {
+        RuntimeTransportSpec::DockerStdio { runtime, args, env } => RuntimeRequest::forward_docker(
+            instance_id,
+            server_name,
+            runtime,
+            args,
+            env,
+            request_json,
+        ),
         RuntimeTransportSpec::HttpStreamable {
             url,
             headers,
@@ -229,6 +242,7 @@ pub(super) fn runtime_forward_request_for_entry<'a>(
 }
 
 fn runtime_restart_request_for_entry<'a>(
+    docker_runtime: &'a str,
     instance_id: &'a str,
     server_name: &'a str,
     entry: &'a McpServerEntry,
@@ -236,11 +250,12 @@ fn runtime_restart_request_for_entry<'a>(
     Ok(RuntimeRequest::restart_server(
         instance_id,
         server_name,
-        runtime_transport_for_entry(entry)?,
+        runtime_transport_for_entry(docker_runtime, entry)?,
     ))
 }
 
 fn runtime_transport_for_entry<'a>(
+    docker_runtime: &'a str,
     entry: &'a McpServerEntry,
 ) -> Result<RuntimeTransportSpec<'a>, String> {
     match entry.runtime.as_ref() {
@@ -248,7 +263,11 @@ fn runtime_transport_for_entry<'a>(
             if command != "docker" {
                 return Err("invalid docker MCP runtime command".into());
             }
-            Ok(RuntimeTransportSpec::DockerStdio { args, env })
+            Ok(RuntimeTransportSpec::DockerStdio {
+                runtime: docker_runtime,
+                args: mcp_servers::strip_docker_runtime_args(args),
+                env,
+            })
         }
         Some(McpRuntimeSpec::HttpStreamable {
             url,
@@ -394,6 +413,7 @@ pub async fn stop_runtime_instance(
 
 pub async fn restart_runtime_server(
     socket_path: Option<&FsPath>,
+    docker_runtime: &str,
     instance_id: &str,
     server_name: &str,
     entry: &McpServerEntry,
@@ -401,7 +421,7 @@ pub async fn restart_runtime_server(
     let Some(socket_path) = socket_path else {
         return Ok(());
     };
-    let req = runtime_restart_request_for_entry(instance_id, server_name, entry)?;
+    let req = runtime_restart_request_for_entry(docker_runtime, instance_id, server_name, entry)?;
     let resp = call_runtime(socket_path, &req).await?;
     if (200..300).contains(&resp.status) {
         Ok(())
@@ -506,8 +526,14 @@ pub async fn restart_active_runtime_servers(
                 }
             }
 
-            match restart_runtime_server(svc.runtime_socket_path.as_deref(), &row.id, &name, &entry)
-                .await
+            match restart_runtime_server(
+                svc.runtime_socket_path.as_deref(),
+                svc.docker_runtime.as_str(),
+                &row.id,
+                &name,
+                &entry,
+            )
+            .await
             {
                 Ok(()) => {
                     report.restarted += 1;
