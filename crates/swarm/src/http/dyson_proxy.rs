@@ -299,21 +299,7 @@ async fn forward(state: DispatchState, instance_id: String, req: Request) -> Res
     // 5. Outbound headers: strip hop-by-hop + cookie + host + the
     //    inbound Authorization (swarm's OIDC bearer, useless to
     //    Dyson), then stamp the per-instance bearer.
-    let mut out_headers = HeaderMap::new();
-    for (k, v) in &parts.headers {
-        if is_hop_by_hop(k)
-            || k == header::COOKIE
-            || k == header::HOST
-            || k == header::AUTHORIZATION
-        {
-            continue;
-        }
-        out_headers.insert(k.clone(), v.clone());
-    }
-    let bearer = format!("Bearer {}", row.bearer_token);
-    if let Ok(v) = HeaderValue::from_str(&bearer) {
-        out_headers.insert(header::AUTHORIZATION, v);
-    }
+    let out_headers = build_forward_headers(&parts.headers, &row.bearer_token);
 
     // 6. Send.
     let mut req_builder = state.app.dyson_http.request(method, &upstream_url);
@@ -840,6 +826,25 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     )
 }
 
+fn build_forward_headers(inbound: &HeaderMap, bearer_token: &str) -> HeaderMap {
+    let mut out_headers = HeaderMap::new();
+    for (k, v) in inbound {
+        if is_hop_by_hop(k)
+            || k == header::COOKIE
+            || k == header::HOST
+            || k == header::AUTHORIZATION
+        {
+            continue;
+        }
+        out_headers.insert(k.clone(), v.clone());
+    }
+    let bearer = format!("Bearer {bearer_token}");
+    if let Ok(v) = HeaderValue::from_str(&bearer) {
+        out_headers.insert(header::AUTHORIZATION, v);
+    }
+    out_headers
+}
+
 /// Build the shared internal HTTP client used by the dyson proxy.
 ///
 /// CubeSandbox's cubeproxy serves `*.cube.app` with TLS issued by a
@@ -965,6 +970,10 @@ mod tests {
             extract_instance_subdomain("abc123.swarm.example.com", "swarm.example.com").as_deref(),
             Some("abc123"),
         );
+        assert_eq!(
+            extract_instance_subdomain("alice.example.com", "example.com").as_deref(),
+            Some("alice"),
+        );
     }
 
     #[test]
@@ -1010,6 +1019,9 @@ mod tests {
             extract_instance_subdomain("swarm.example.com.evil.com", "swarm.example.com",)
                 .is_none()
         );
+        assert!(extract_instance_subdomain("aliceexample.com", "example.com").is_none());
+        assert!(extract_instance_subdomain("alice.example.comm", "example.com").is_none());
+        assert!(extract_instance_subdomain("alice.example.com.evil.com", "example.com").is_none());
     }
 
     #[test]
@@ -1018,6 +1030,55 @@ mod tests {
         // would otherwise return Some("") and we'd happily try to look
         // up an empty instance id.
         assert!(extract_instance_subdomain(".swarm.example.com", "swarm.example.com").is_none());
+    }
+
+    #[test]
+    fn share_label_is_only_safe_because_share_dispatcher_runs_first() {
+        // `share.<apex>` is syntactically a valid one-label subdomain.
+        // The outer router must reserve it for public artefact shares
+        // before this Dyson instance dispatcher runs.
+        assert_eq!(
+            extract_instance_subdomain("share.swarm.example.com", "swarm.example.com").as_deref(),
+            Some("share"),
+        );
+    }
+
+    #[test]
+    fn forward_headers_strip_user_boundary_headers_and_stamp_instance_bearer() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert(
+            header::COOKIE,
+            HeaderValue::from_static("dyson_swarm_session=s"),
+        );
+        inbound.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer user-token"),
+        );
+        inbound.insert(
+            header::HOST,
+            HeaderValue::from_static("alice.swarm.example.com"),
+        );
+        inbound.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        inbound.insert("x-dyson-csrf", HeaderValue::from_static("1"));
+        inbound.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+
+        let out = build_forward_headers(&inbound, "instance-secret");
+
+        assert!(out.get(header::COOKIE).is_none());
+        assert!(out.get(header::HOST).is_none());
+        assert!(out.get(header::CONNECTION).is_none());
+        assert_eq!(
+            out.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer instance-secret"),
+        );
+        assert_eq!(
+            out.get("x-dyson-csrf").and_then(|v| v.to_str().ok()),
+            Some("1"),
+        );
+        assert_eq!(
+            out.get(header::ACCEPT).and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+        );
     }
 
     #[test]

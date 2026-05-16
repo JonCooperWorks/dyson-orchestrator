@@ -412,7 +412,7 @@ mod tests {
             instance_svc.clone(),
             artefact_cache.clone(),
             crate::shares::ShareMetrics::new(),
-            None,
+            Some("swarm.test".into()),
         ));
         let state_files = Arc::new(crate::state_files::StateFileService::new(
             crate::db::sqlite::state_file_store(pool.clone()),
@@ -1080,6 +1080,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_dispatcher_403s_post_with_foreign_origin() {
+        let (mut state, users) = build_state().await;
+        state.hostname = Some("swarm.test".into());
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .post(format!("{base}/anything"))
+            .header("host", "abc.swarm.test")
+            .header("origin", "https://evil.test")
+            .body("payload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn host_dispatcher_get_skips_csrf_gate() {
+        let (mut state, users) = build_state().await;
+        state.hostname = Some("swarm.test".into());
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/api/whatever"))
+            .header("host", "abc.swarm.test")
+            .header("accept", "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            401,
+            "GET without Origin should reach auth, not the CSRF rejection",
+        );
+    }
+
+    #[tokio::test]
+    async fn share_host_runs_before_instance_dispatcher() {
+        let (mut state, users) = build_state().await;
+        state.hostname = Some("swarm.test".into());
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            deny_user_auth(users),
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/not-a-share-path"))
+            .header("host", "share.swarm.test")
+            .header("accept", "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            404,
+            "share.<apex> must be handled by the public share dispatcher, not instance auth",
+        );
+        assert_eq!(r.text().await.unwrap(), "not found");
+    }
+
+    #[tokio::test]
     async fn host_dispatcher_redirects_browser_get_to_login() {
         // Logged-out browser opens https://abc.swarm.test/some/path.
         // dyson_proxy can't satisfy the request, but a bare 401 on a
@@ -1231,6 +1310,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn host_dispatcher_enforces_owner_on_instance_subdomain() {
+        let (mut state, users, instances) = build_state_with_instances().await;
+        state.hostname = Some("swarm.test".into());
+        let (alice_auth, alice_id) =
+            token_bound_user_auth(users.clone(), "alice", "alice-token").await;
+        let (bob_auth, _bob_id) = token_bound_user_auth(users, "bob", "bob-token").await;
+        seed_owned_instance(&instances, &alice_id, "inst-a").await;
+
+        let client = reqwest::Client::new();
+        let bob_base = spawn(
+            state.clone(),
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            bob_auth,
+        )
+        .await;
+        let bob = client
+            .get(format!("{bob_base}/api/conversations"))
+            .header("host", "inst-a.swarm.test")
+            .header("accept", "application/json")
+            .bearer_auth("bob-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bob.status(), StatusCode::NOT_FOUND);
+
+        let alice_base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            alice_auth,
+        )
+        .await;
+        let alice = client
+            .get(format!("{alice_base}/api/conversations"))
+            .header("host", "inst-a.swarm.test")
+            .header("accept", "application/json")
+            .bearer_auth("alice-token")
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            alice.status(),
+            StatusCode::NOT_FOUND,
+            "owner should pass the scoped lookup and reach upstream forwarding",
+        );
+        assert_ne!(alice.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

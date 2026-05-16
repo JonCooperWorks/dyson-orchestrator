@@ -235,4 +235,38 @@ mod tests {
             StatusCode::NOT_FOUND
         );
     }
+
+    #[test]
+    fn traversal_and_tricky_paths_stay_404() {
+        let accept = HeaderValue::from_static("text/html,application/xhtml+xml");
+        for path in [
+            "/%2e%2e/secret",
+            "/..%2fsecret",
+            "/assets\\secret",
+            "/assets/%00secret",
+        ] {
+            assert_eq!(
+                serve_path(path, Some(&accept)).status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not serve an asset or SPA shell",
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_and_asset_like_missing_paths_do_not_spa_fallback() {
+        let accept = HeaderValue::from_static("text/html,application/xhtml+xml");
+        for path in [
+            "/v1/missing",
+            "/llm/openrouter",
+            "/mcp/nope",
+            "/assets/nope.js",
+        ] {
+            assert_eq!(
+                serve_path(path, Some(&accept)).status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not fall back to the SPA shell",
+            );
+        }
+    }
 }
