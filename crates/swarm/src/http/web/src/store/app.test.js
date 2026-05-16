@@ -82,6 +82,7 @@ describe('parseHashView', () => {
       model: 'instance-model',
       network: 'instance-network',
       tools: 'instance-tools',
+      channels: 'instance-channels',
       mcp: 'instance-mcp',
       snapshots: 'instance-snapshots',
       runtime: 'instance-runtime',

@@ -40,7 +40,7 @@ export function App() {
   );
 }
 
-function renderView(view) {
+export function renderView(view) {
   switch (view.name) {
     case 'instances':
     case 'instance':
@@ -48,6 +48,7 @@ function renderView(view) {
     case 'instance-model':
     case 'instance-network':
     case 'instance-tools':
+    case 'instance-channels':
     case 'instance-mcp':
     case 'instance-snapshots':
     case 'instance-runtime':
