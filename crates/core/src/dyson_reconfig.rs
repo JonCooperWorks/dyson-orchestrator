@@ -125,6 +125,10 @@ struct ConfigureResponse {
     state_sync_updated: Option<bool>,
     #[serde(default)]
     state_sync_applied: Option<bool>,
+    #[serde(default)]
+    telegram_updated: Option<bool>,
+    #[serde(default)]
+    telegram_applied: Option<bool>,
 }
 
 impl ConfigureResponse {
@@ -171,6 +175,11 @@ impl ConfigureResponse {
                     body.state_sync_token.as_deref(),
                 ),
                 self.state_sync_applied.or(self.state_sync_updated),
+            ),
+            (
+                "telegram",
+                body.telegram_proxy.is_some(),
+                self.telegram_applied.or(self.telegram_updated),
             ),
         ] {
             require_applied(label, requested, observed)?;
@@ -801,6 +810,8 @@ mod tests {
             ingest_applied: Some(true),
             state_sync_updated: None,
             state_sync_applied: Some(true),
+            telegram_updated: None,
+            telegram_applied: Some(true),
         };
         ok.validate_against(&body).unwrap();
 
@@ -838,6 +849,12 @@ mod tests {
             ingest_token: Some("it_123".into()),
             state_sync_url: Some("https://swarm.test/v1/internal/state/file".into()),
             state_sync_token: Some("st_123".into()),
+            telegram_proxy: Some(crate::instance::TelegramProxyReconfigure {
+                base_url: "https://swarm.test/v1/proxy/telegram/i-1".into(),
+                file_base_url: "https://swarm.test/v1/proxy/telegram/i-1/file".into(),
+                bearer: "pt_test".into(),
+                enabled: true,
+            }),
         };
         let value = serde_json::to_value(body).unwrap();
         let obj = value.as_object().unwrap();
@@ -860,6 +877,7 @@ mod tests {
             "ingest_token",
             "state_sync_url",
             "state_sync_token",
+            "telegram_proxy",
         ] {
             assert!(obj.contains_key(key), "missing configure field {key}");
         }

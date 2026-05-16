@@ -305,6 +305,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     // stolen sqlite row leaks nothing without their age key — same
     // posture as the OpenRouter BYOK path.
     instance_svc = instance_svc.with_mcp_secrets(user_secrets_svc.clone());
+    instance_svc = instance_svc.with_channels(stores.channels.clone());
     instance_svc = instance_svc.with_state_files(state_files.clone());
     let instance_svc = Arc::new(instance_svc);
     if let Err(err) = instance_svc
@@ -625,7 +626,23 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let mcp_router = dyson_swarm::proxy::mcp::router(mcp_svc.clone());
     let mcp_user_router = dyson_swarm::proxy::mcp::user_router(mcp_svc.clone());
     let mcp_admin_router = dyson_swarm::proxy::mcp::admin_router(mcp_svc);
-    let llm_router = llm_router.merge(mcp_router);
+    let telegram_api_base = std::env::var("SWARM_TELEGRAM_API_BASE")
+        .unwrap_or_else(|_| "https://api.telegram.org".to_owned());
+    let telegram_proxy_svc = match dyson_swarm::proxy::telegram::TelegramProxyService::new(
+        tokens_store.clone(),
+        instances_store.clone(),
+        stores.channels.clone(),
+        user_secrets_svc.clone(),
+        telegram_api_base.clone(),
+    ) {
+        Ok(svc) => Arc::new(svc),
+        Err(err) => {
+            tracing::error!(error = %err, "telegram proxy init failed");
+            return ExitCode::from(2);
+        }
+    };
+    let telegram_router = dyson_swarm::proxy::telegram::router(telegram_proxy_svc);
+    let llm_router = llm_router.merge(mcp_router).merge(telegram_router);
 
     // Authenticator chain: bearer first (cheap, in-DB lookup), then OIDC if
     // configured. Bearer claims everything that doesn't look like a JWT;
@@ -681,6 +698,25 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         instance_svc.clone(),
         webhook_dispatcher,
         cipher_dir.clone(),
+    ));
+    let public_origin = cfg
+        .hostname
+        .as_deref()
+        .map(|h| format!("https://{}", h.trim_end_matches('/')));
+    let telegram_api: Arc<dyn dyson_swarm::channels::TelegramApi> =
+        match dyson_swarm::channels::ReqwestTelegramApi::new(telegram_api_base) {
+            Ok(api) => Arc::new(api),
+            Err(err) => {
+                tracing::error!(error = %err, "telegram api client init failed");
+                return ExitCode::from(2);
+            }
+        };
+    let channels_svc = Arc::new(dyson_swarm::channels::ChannelsService::new(
+        stores.channels.clone(),
+        instances_store.clone(),
+        user_secrets_svc.clone(),
+        telegram_api,
+        public_origin,
     ));
 
     // Swarm-side artefact store. Metadata and sealed bytes live in the
@@ -741,6 +777,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         byo: Arc::new(cfg.byo.clone()),
         external_http,
         webhooks: webhooks_svc,
+        channels: channels_svc,
         shares: shares_svc,
         artefact_cache,
         state_files,

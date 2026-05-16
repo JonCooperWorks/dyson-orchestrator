@@ -369,6 +369,8 @@ function sectionViewName(slug) {
       return 'instance-network';
     case 'tools':
       return 'instance-tools';
+    case 'channels':
+      return 'instance-channels';
     case 'mcp':
       return 'instance-mcp';
     case 'snapshots':

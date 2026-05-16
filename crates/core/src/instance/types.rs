@@ -134,6 +134,19 @@ pub struct ReconfigureBody {
     /// Mirrors `SWARM_STATE_SYNC_TOKEN`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_sync_token: Option<String>,
+    /// Telegram proxy settings for swarm-owned channel mode.  The
+    /// bot token never enters dyson; dyson only receives the swarm
+    /// proxy URLs plus its existing per-instance bearer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telegram_proxy: Option<TelegramProxyReconfigure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TelegramProxyReconfigure {
+    pub base_url: String,
+    pub file_base_url: String,
+    pub bearer: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

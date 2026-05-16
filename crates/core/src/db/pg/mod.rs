@@ -7,6 +7,7 @@ use crate::error::StoreError;
 pub mod agent_skill_publications;
 pub mod artefacts;
 pub mod audit;
+pub mod channels;
 pub mod instances;
 pub mod mcp_catalog;
 pub mod policies;

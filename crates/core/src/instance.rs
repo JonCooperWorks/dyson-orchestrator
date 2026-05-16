@@ -16,6 +16,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use uuid::Uuid;
 
+use crate::channels::TELEGRAM_KIND;
 use crate::egress_policy_sync::{EgressPolicySync, NoopEgressPolicySync};
 use crate::error::{CubeError, SwarmError};
 use crate::mcp_servers::{self, McpAuthSpec, McpServerSpec};
@@ -25,8 +26,8 @@ use crate::network_policy::{self, DnsHostResolver, HostResolver, NetworkPolicy};
 use crate::now_secs;
 use crate::secrets::UserSecretsService;
 use crate::traits::{
-    CreateSandboxArgs, CubeClient, HealthProber, InstanceRow, InstanceStatus, InstanceStore,
-    ListFilter, ProbeResult, SandboxInfo, TokenStore,
+    CreateSandboxArgs, CubeClient, HealthProber, InstanceChannelStore, InstanceRow, InstanceStatus,
+    InstanceStore, ListFilter, ProbeResult, SandboxInfo, TokenStore,
 };
 
 mod env;
@@ -50,7 +51,7 @@ use mcp_reconcile::{auth_shape_matches, keep_existing_secrets};
 pub use types::{
     CreateRequest, CreatedInstance, DeletedMcpServer, ImageGenDefaults, InstallSkillBody,
     InstallSkillResponse, ReconfigureBody, RestoreRequest, RestoreStateFileBody, RotateReport,
-    UninstallSkillResponse,
+    TelegramProxyReconfigure, UninstallSkillResponse,
 };
 use types::{InPlaceSwapPlan, RuntimeTokens};
 
@@ -217,6 +218,10 @@ pub struct InstanceService {
     /// agent only ever sees the swarm proxy URL — never the real
     /// upstream + token.
     mcp_secrets: Option<Arc<UserSecretsService>>,
+    /// Per-instance channel rows used to render Telegram proxy config
+    /// into dyson's runtime configure body. Bot tokens themselves
+    /// remain sealed in `UserSecretsService`.
+    channels: Option<Arc<dyn InstanceChannelStore>>,
     /// Swarm-side sealed workspace/chat state.  Rebuild paths replay
     /// this into the fresh sandbox before granting that sandbox write
     /// authority, so redeploys do not surface empty state or accept
@@ -341,6 +346,7 @@ impl InstanceService {
             resolver: Arc::new(DnsHostResolver),
             mcp_upstream_policy: OutboundUrlPolicy::default(),
             mcp_secrets: None,
+            channels: None,
             state_files: None,
             egress_sync: Arc::new(NoopEgressPolicySync::new()),
             network_config: crate::config::NetworkConfig::default(),
@@ -395,6 +401,13 @@ impl InstanceService {
         self
     }
 
+    /// Builder-style: plug in channel storage so create/sync paths can
+    /// push Telegram proxy settings into the running dyson.
+    pub fn with_channels(mut self, channels: Arc<dyn InstanceChannelStore>) -> Self {
+        self.channels = Some(channels);
+        self
+    }
+
     /// Builder-style: plug in the sealed workspace/chat mirror used by
     /// rebuild paths.  Create/clone keep their existing behaviour; only
     /// paths that replace an existing sandbox use this as the durable
@@ -422,6 +435,11 @@ impl InstanceService {
     /// dyson's `OpenRouterImageProvider` when it builds the request.
     fn image_proxy_base(&self) -> String {
         format!("{}/openrouter", self.proxy_base.trim_end_matches('/'))
+    }
+
+    fn public_proxy_origin(&self) -> String {
+        let base = self.proxy_base.trim_end_matches('/');
+        base.strip_suffix("/llm").unwrap_or(base).to_owned()
     }
 
     async fn validate_mcp_server_spec(&self, spec: &McpServerSpec) -> Result<(), SwarmError> {
@@ -805,6 +823,7 @@ impl InstanceService {
             reset_skills: source.tools.is_empty(),
             tools: (!source.tools.is_empty()).then(|| source.tools.clone()),
             mcp_servers,
+            telegram_proxy: None,
         }
     }
 
@@ -819,14 +838,49 @@ impl InstanceService {
         let mcp_servers = self
             .mcp_servers_block_for_instance(owner_id, &source.id, proxy_token, true)
             .await;
-        self.configure_body_from_parts(
+        let mut body = self.configure_body_from_parts(
             source,
             proxy_token,
             ingest_token,
             state_sync_token,
             self.image_gen_defaults.as_ref(),
             mcp_servers,
-        )
+        );
+        body.telegram_proxy = self
+            .telegram_proxy_block_for_instance(&source.id, proxy_token)
+            .await;
+        body
+    }
+
+    async fn telegram_proxy_block_for_instance(
+        &self,
+        instance_id: &str,
+        proxy_token: &str,
+    ) -> Option<TelegramProxyReconfigure> {
+        let channels = self.channels.as_ref()?;
+        let row = match channels.get(instance_id, TELEGRAM_KIND).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(
+                    instance = %instance_id,
+                    error = %err,
+                    "telegram channel sync: lookup failed; skipping configure block"
+                );
+                return None;
+            }
+        };
+        let origin = self.public_proxy_origin();
+        if origin.trim().is_empty() {
+            return None;
+        }
+        let origin = origin.trim_end_matches('/');
+        Some(TelegramProxyReconfigure {
+            base_url: format!("{origin}/v1/proxy/telegram/{instance_id}"),
+            file_base_url: format!("{origin}/v1/proxy/telegram/{instance_id}/file"),
+            bearer: proxy_token.to_owned(),
+            enabled: row.enabled,
+        })
     }
 
     async fn mcp_servers_block_for_instance(
@@ -2721,6 +2775,7 @@ impl InstanceService {
                     }
                     Some(map)
                 },
+                telegram_proxy: None,
             };
             // Await the configure-push before returning Live.  Previously
             // this was tokio::spawn'd (fire-and-forget): the SPA could
@@ -3068,6 +3123,42 @@ impl InstanceService {
         let body = ReconfigureBody {
             instance_id: Some(id.to_owned()),
             mcp_servers: Some(block),
+            ..Default::default()
+        };
+        push_with_retry(&**r, id, sandbox_id, &body)
+            .await
+            .map_err(SwarmError::PolicyDenied)
+    }
+
+    /// Push Telegram channel proxy settings to the running dyson.
+    /// The body carries only swarm proxy URLs and the existing
+    /// per-instance bearer; bot tokens remain in swarm's secret store.
+    pub async fn sync_channels_to_dyson(&self, owner_id: &str, id: &str) -> Result<(), SwarmError> {
+        let row = self
+            .instances
+            .get_for_owner(owner_id, id)
+            .await?
+            .ok_or(SwarmError::NotFound)?;
+        let sandbox_id = row
+            .cube_sandbox_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                SwarmError::PolicyDenied("instance has no live sandbox to reconfigure".into())
+            })?;
+        let r = self
+            .reconfigurer
+            .as_ref()
+            .ok_or_else(|| SwarmError::PolicyDenied("dyson reconfigurer not configured".into()))?;
+        let proxy_token = self.tokens.lookup_by_instance(id).await?.ok_or_else(|| {
+            SwarmError::PolicyDenied("instance has no active proxy_token (pre-Stage-8 row)".into())
+        })?;
+
+        let body = ReconfigureBody {
+            instance_id: Some(id.to_owned()),
+            telegram_proxy: self
+                .telegram_proxy_block_for_instance(id, &proxy_token)
+                .await,
             ..Default::default()
         };
         push_with_retry(&**r, id, sandbox_id, &body)

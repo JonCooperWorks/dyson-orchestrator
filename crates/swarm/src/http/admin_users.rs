@@ -569,7 +569,7 @@ mod tests {
             crate::db::sqlite::snapshot_store(pool.clone());
         let snapshot_svc = Arc::new(crate::snapshot::SnapshotService::new(
             cube,
-            instances_store,
+            instances_store.clone(),
             snapshots_store,
             backup,
             instance_svc.clone(),
@@ -611,7 +611,7 @@ mod tests {
             provisioning.clone(),
         ));
         let state = AppState {
-            user_secrets,
+            user_secrets: user_secrets.clone(),
             system_secrets,
             ciphers: cipher_dir,
             instances: instance_svc,
@@ -637,6 +637,13 @@ mod tests {
                 dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
             ))),
             webhooks: webhooks_svc,
+            channels: Arc::new(crate::channels::ChannelsService::new(
+                crate::db::sqlite::instance_channel_store(pool.clone()),
+                instances_store.clone(),
+                user_secrets.clone(),
+                Arc::new(crate::channels::NoopTelegramApi),
+                Some("https://swarm.test".into()),
+            )),
             shares: shares_svc,
             artefact_cache,
             state_files,

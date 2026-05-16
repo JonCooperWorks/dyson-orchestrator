@@ -7,6 +7,8 @@ pub mod artefacts;
 #[cfg(feature = "full")]
 pub mod backup;
 #[cfg(feature = "full")]
+pub mod channels;
+#[cfg(feature = "full")]
 pub mod config;
 #[cfg(feature = "full")]
 pub mod cube_client;

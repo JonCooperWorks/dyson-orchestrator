@@ -16,6 +16,7 @@ stores encrypted state, brokers LLM and MCP traffic, and serves the web UI.
 | [Architecture Overview](architecture-overview.md) | Workspace layout, startup wiring, major services, request/data flow |
 | [Configuration](configuration.md) | `config.toml`, provider config, OIDC, OpenRouter provisioning, backups, cube profiles |
 | [Auth and Keys](auth-and-keys.md) | OIDC, user API keys, proxy tokens, admin-role gate, host-side break-glass mint |
+| [Controllers and Channels](controllers.md) | Telegram Channels tab, token-isolated webhook/proxy flow, operational checks |
 | [Artefacts](artefacts.md) | Cache layout, ingest path, cold reads, sweep, owner scoping, SPA artefact surfaces |
 | [Shares](shares.md) | Signed public URL tokens, `jti` owner routes, cache-first reads, rendering, access audit |
 | [Audit](audit.md) | LLM request audit, MCP transport audit, sealed tool-call forensics, Activity tab and API |

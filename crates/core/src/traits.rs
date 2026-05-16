@@ -445,6 +445,70 @@ pub struct AgentSkillPublicationRow {
     pub revoked_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceChannelRow {
+    pub id: i64,
+    pub instance_id: String,
+    pub kind: String,
+    pub handle: String,
+    pub secret_name: String,
+    pub webhook_secret_name: String,
+    pub enabled: bool,
+    pub last_inbound_at: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelDeliveryRow {
+    pub id: i64,
+    pub instance_id: String,
+    pub kind: String,
+    pub received_at: i64,
+    pub status: i32,
+    pub preview: String,
+}
+
+#[async_trait]
+pub trait InstanceChannelStore: Send + Sync {
+    async fn insert(&self, row: InstanceChannelRow) -> Result<InstanceChannelRow, StoreError>;
+    async fn get(
+        &self,
+        instance_id: &str,
+        kind: &str,
+    ) -> Result<Option<InstanceChannelRow>, StoreError>;
+    async fn list_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<InstanceChannelRow>, StoreError>;
+    async fn delete(&self, instance_id: &str, kind: &str) -> Result<(), StoreError>;
+    async fn set_enabled(
+        &self,
+        instance_id: &str,
+        kind: &str,
+        enabled: bool,
+    ) -> Result<Option<InstanceChannelRow>, StoreError>;
+    async fn update_last_inbound_at(
+        &self,
+        instance_id: &str,
+        kind: &str,
+        at: i64,
+    ) -> Result<(), StoreError>;
+    async fn record_delivery(
+        &self,
+        instance_id: &str,
+        kind: &str,
+        received_at: i64,
+        status: i32,
+        preview: &str,
+    ) -> Result<ChannelDeliveryRow, StoreError>;
+    async fn recent_deliveries(
+        &self,
+        instance_id: &str,
+        kind: &str,
+        limit: i64,
+    ) -> Result<Vec<ChannelDeliveryRow>, StoreError>;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AgentSkillPublicationSpec<'a> {
     pub instance_id: &'a str,

@@ -83,6 +83,7 @@ export function instanceSectionFromView(view) {
     case 'instance-model': return 'model';
     case 'instance-network': return 'network';
     case 'instance-tools': return 'tools';
+    case 'instance-channels': return 'channels';
     case 'instance-mcp': return 'mcp';
     case 'instance-snapshots': return 'snapshots';
     case 'instance-runtime': return 'runtime';
@@ -112,6 +113,7 @@ export function sectionHref(id, section) {
     case 'model': return `#/i/${enc}/model`;
     case 'network': return `#/i/${enc}/network`;
     case 'tools': return `#/i/${enc}/tools`;
+    case 'channels': return `#/i/${enc}/channels`;
     case 'mcp': return `#/i/${enc}/mcp`;
     case 'snapshots': return `#/i/${enc}/snapshots`;
     case 'runtime': return `#/i/${enc}/runtime`;
@@ -2427,6 +2429,7 @@ const DETAIL_SECTIONS = [
   { key: 'model', label: 'model' },
   { key: 'network', label: 'network' },
   { key: 'tools', label: 'tools' },
+  { key: 'channels', label: 'channels' },
   { key: 'mcp', label: 'mcp' },
   { key: 'snapshots', label: 'snapshots' },
   { key: 'runtime', label: 'runtime' },
@@ -2757,6 +2760,8 @@ function DetailSectionBody({ view, instance, activeSection }) {
       return <NetworkPolicyPanel instance={instance} disabled={instance.status === 'destroyed'}/>;
     case 'tools':
       return <ToolsSection instance={instance}/>;
+    case 'channels':
+      return <ChannelsSection instance={instance}/>;
     case 'mcp':
       return (
         <McpServersPanel
@@ -2804,6 +2809,239 @@ function InstanceAuxiliaryRoute({ view, instanceId }) {
     default:
       return null;
   }
+}
+
+const TELEGRAM_TOKEN_RE = /^\d+:[\w-]{35}$/;
+
+function ChannelsSection({ instance }) {
+  const { client } = useApi();
+  const [rows, setRows] = React.useState(null);
+  const [wizard, setWizard] = React.useState(false);
+  const [step, setStep] = React.useState(1);
+  const [token, setToken] = React.useState('');
+  const [reveal, setReveal] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [notice, setNotice] = React.useState('');
+  const [recentOpen, setRecentOpen] = React.useState(false);
+  const [recentRows, setRecentRows] = React.useState(null);
+  const tokenInputRef = React.useRef(null);
+
+  const refresh = React.useCallback(async () => {
+    setError('');
+    try {
+      const list = await client.listChannels(instance.id);
+      setRows(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setError(e?.detail || e?.message || 'channels load failed');
+      setRows([]);
+    }
+  }, [client, instance.id]);
+
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const telegram = (rows || []).find(r => r.kind === 'telegram') || null;
+
+  const connect = async () => {
+    const trimmed = token.trim();
+    setError('');
+    setNotice('');
+    if (!TELEGRAM_TOKEN_RE.test(trimmed)) {
+      setError('Telegram token must match 123456:35-character-secret');
+      tokenInputRef.current?.focus();
+      return;
+    }
+    setBusy(true);
+    try {
+      const connected = await client.connectTelegramChannel(instance.id, trimmed);
+      setToken('');
+      setWizard(false);
+      setStep(1);
+      setNotice(`Connected ${connected.handle}`);
+      await refresh();
+    } catch (e) {
+      setError(e?.detail || e?.message || 'connect failed');
+      tokenInputRef.current?.focus();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const paste = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setToken(text || '');
+      tokenInputRef.current?.focus();
+    } catch {
+      tokenInputRef.current?.focus();
+    }
+  };
+
+  const pause = async () => {
+    if (!telegram) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const updated = await client.patchTelegramChannel(instance.id, !telegram.enabled);
+      setRows(current => (current || []).map(r => r.kind === 'telegram' ? updated : r));
+      setNotice(updated.enabled ? 'Telegram resumed' : 'Telegram paused');
+    } catch (e) {
+      setError(e?.detail || e?.message || 'update failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!confirm('This removes the Telegram webhook and deletes the bot token. The bot itself stays in your BotFather account; reconnecting later re-uses it.')) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await client.disconnectTelegramChannel(instance.id);
+      setRows([]);
+      setRecentRows(null);
+      setRecentOpen(false);
+      setNotice('Telegram disconnected');
+    } catch (e) {
+      setError(e?.detail || e?.message || 'disconnect failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadRecent = async () => {
+    const next = !recentOpen;
+    setRecentOpen(next);
+    if (!next || recentRows) return;
+    try {
+      const list = await client.listTelegramRecent(instance.id);
+      setRecentRows(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setError(e?.detail || e?.message || 'recent messages failed');
+    }
+  };
+
+  if (rows === null) {
+    return (
+      <section className="panel channels-panel">
+        <div className="panel-header"><div className="panel-title">Channels</div></div>
+        <p className="muted small">loading…</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel channels-panel">
+      <div className="panel-header"><div className="panel-title">Channels</div></div>
+      {error ? <div className="error">{error}</div> : null}
+      {notice ? <div className="success small">{notice}</div> : null}
+      {!telegram && !wizard ? (
+        <div className="channel-empty">
+          <p className="muted">Connect this agent to chat surfaces so people can message it.</p>
+          <button type="button" className="channel-connect-card" onClick={() => setWizard(true)}>
+            <span className="channel-icon" aria-hidden="true">✈️</span>
+            <span>
+              <strong>Telegram</strong>
+              <small>Free, fast, BotFather setup</small>
+            </span>
+            <span className="btn btn-sm">Connect</span>
+          </button>
+          <p className="muted small">Discord / Slack / SMS — coming.</p>
+        </div>
+      ) : null}
+      {!telegram && wizard ? (
+        <div className="channel-wizard">
+          <div className="channel-steps" aria-label="Telegram connect progress">
+            <span className={step === 1 ? 'active' : ''}>Create a bot</span>
+            <span className={step === 2 ? 'active' : ''}>Paste token</span>
+          </div>
+          {step === 1 ? (
+            <div className="channel-step">
+              <div className="botfather-art" aria-hidden="true">
+                <div className="chat-bubble bot">BotFather</div>
+                <div className="chat-bubble user">/newbot</div>
+                <div className="chat-bubble bot">API token</div>
+              </div>
+              <ol className="channel-instructions">
+                <li>Open Telegram and find <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a>.</li>
+                <li>Send /newbot and follow the prompts.</li>
+                <li>Copy the API token BotFather sends you.</li>
+              </ol>
+              <div className="channel-actions">
+                <button type="button" className="btn btn-primary" onClick={() => setStep(2)}>Next</button>
+                <button type="button" className="btn btn-ghost" onClick={() => setWizard(false)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <div className="channel-step">
+              <label className="field">
+                <span>Bot API token</span>
+                <div className="telegram-token-row">
+                  <input
+                    ref={tokenInputRef}
+                    className="telegram-token-input"
+                    type={reveal ? 'text' : 'password'}
+                    autoComplete="off"
+                    value={token}
+                    onChange={e => setToken(e.target.value)}
+                    disabled={busy}
+                    autoFocus
+                  />
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setReveal(v => !v)} disabled={busy}>
+                    {reveal ? 'Hide' : 'Reveal'}
+                  </button>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={paste} disabled={busy}>Paste</button>
+                </div>
+              </label>
+              <div className="channel-actions">
+                <button type="button" className="btn btn-primary" onClick={connect} disabled={busy}>
+                  {busy ? 'Connecting…' : 'Connect'}
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={() => setStep(1)} disabled={busy}>Back</button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+      {telegram ? (
+        <div className={`channel-connected-card${telegram.enabled ? '' : ' paused'}`}>
+          <div className="channel-card-head">
+            <div>
+              <div className="channel-title"><span aria-hidden="true">✈️</span> Telegram</div>
+              <div className="channel-handle">{telegram.handle}</div>
+            </div>
+            <span className={`health-dot ${telegram.enabled ? (telegram.health || 'green') : 'paused'}`} title={telegram.enabled ? 'healthy' : 'paused'}/>
+          </div>
+          <div className="muted small">{formatChannelLastInbound(telegram.last_inbound_at)}</div>
+          <div className="channel-actions wrap">
+            <a className="btn btn-sm" href={`https://t.me/${telegram.handle.replace(/^@/, '')}`} target="_blank" rel="noopener noreferrer">Open in Telegram</a>
+            <button type="button" className="btn btn-sm" onClick={pause} disabled={busy}>{telegram.enabled ? 'Pause' : 'Resume'}</button>
+            <button type="button" className="btn btn-sm" onClick={loadRecent}>Recent messages</button>
+            <button type="button" className="btn btn-sm btn-danger" onClick={disconnect} disabled={busy}>Disconnect</button>
+          </div>
+          {recentOpen ? (
+            <div className="channel-recent">
+              {(recentRows || []).length === 0 ? <p className="muted small">No recent deliveries.</p> : null}
+              {(recentRows || []).slice(0, 20).map((row, idx) => (
+                <div className="channel-recent-row" key={`${row.timestamp}-${idx}`}>
+                  <span>{fmtTime(row.timestamp)}</span>
+                  <span>{row.status}</span>
+                  <span>{row.preview || '(no text)'}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function formatChannelLastInbound(ts) {
+  if (!ts) return 'Webhook configured; no inbound messages yet';
+  const delta = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (delta < 60) return 'Last message just now';
+  if (delta < 3600) return `Last message ${Math.floor(delta / 60)}m ago`;
+  if (delta < 86400) return `Last message ${Math.floor(delta / 3600)}h ago`;
+  return `Last message ${Math.floor(delta / 86400)}d ago`;
 }
 
 function SkillsSection({ instance }) {

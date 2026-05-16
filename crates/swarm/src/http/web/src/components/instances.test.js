@@ -54,6 +54,8 @@ describe('instance section rail routing', () => {
       .toBe('#/i/next-id/network');
     expect(instanceRailHref('next-id', { name: 'instance-mcp', id: 'current' }))
       .toBe('#/i/next-id/mcp');
+    expect(instanceRailHref('next-id', { name: 'instance-channels', id: 'current' }))
+      .toBe('#/i/next-id/channels');
   });
 
   test('treats deep task and artifact pages as their parent section', () => {
@@ -69,6 +71,7 @@ describe('instance section rail routing', () => {
     expect(instanceSectionFromView({ name: 'instance-model', id: 'a' })).toBe('model');
     expect(instanceSectionFromView({ name: 'instance-network', id: 'a' })).toBe('network');
     expect(instanceSectionFromView({ name: 'instance-tools', id: 'a' })).toBe('tools');
+    expect(instanceSectionFromView({ name: 'instance-channels', id: 'a' })).toBe('channels');
     expect(instanceSectionFromView({ name: 'instance-mcp', id: 'a' })).toBe('mcp');
     expect(instanceSectionFromView({ name: 'instance-snapshots', id: 'a' })).toBe('snapshots');
     expect(instanceSectionFromView({ name: 'instance-runtime', id: 'a' })).toBe('runtime');

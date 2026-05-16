@@ -448,7 +448,7 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
     );
     let skill_marketplace = Arc::new(SkillMarketplaceService::new(skill_marketplace_store));
     let app_state = http::AppState {
-        user_secrets: user_secrets_svc,
+        user_secrets: user_secrets_svc.clone(),
         system_secrets: system_secrets_svc,
         ciphers: cipher_dir.clone(),
         instances: instance_svc.clone(),
@@ -474,6 +474,13 @@ async fn build_stack(subject_for_no_bearer: &str) -> Stack {
             dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
         ))),
         webhooks: webhooks_svc,
+        channels: Arc::new(dyson_swarm::channels::ChannelsService::new(
+            dyson_swarm::db::sqlite::instance_channel_store(pool.clone()),
+            instances_store.clone(),
+            user_secrets_svc.clone(),
+            Arc::new(dyson_swarm::channels::NoopTelegramApi),
+            Some("https://swarm.test".into()),
+        )),
         shares: shares_svc,
         artefact_cache,
         state_files: state_files.clone(),
@@ -748,7 +755,7 @@ async fn get_webhook_presets_returns_stable_vendor_ids() {
             "stripe",
             "slack",
             "shopify",
-            "agentmail",
+            "svix",
         ]
     );
 }

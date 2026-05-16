@@ -13,9 +13,9 @@ use crate::envelope::{CipherDirectory, EnvelopeCipher};
 use crate::error::StoreError;
 use crate::traits::{
     AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
-    InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore, PolicyStore,
-    SessionStore, ShareStore, SkillMarketplaceSourceStore, SnapshotStore, StateFileStore,
-    SystemSecretStore, TokenStore, UserSecretStore, UserStore, WebhookStore,
+    InstanceChannelStore, InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore,
+    PolicyStore, SessionStore, ShareStore, SkillMarketplaceSourceStore, SnapshotStore,
+    StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore, WebhookStore,
 };
 
 #[cfg(feature = "postgres")]
@@ -44,6 +44,7 @@ pub struct OpenDatabase {
 #[derive(Clone)]
 pub struct BackendStores {
     pub artefacts: Arc<dyn ArtefactCacheStore>,
+    pub channels: Arc<dyn InstanceChannelStore>,
     pub instances: Arc<dyn InstanceStore>,
     pub tokens: Arc<dyn TokenStore>,
     pub user_secrets: Arc<dyn UserSecretStore>,
@@ -74,6 +75,7 @@ impl BackendStores {
     ) -> Self {
         Self {
             artefacts: sqlite::artefact_cache_store(pool.clone()),
+            channels: sqlite::instance_channel_store(pool.clone()),
             instances: sqlite::instance_store(pool.clone(), system_cipher.clone()),
             tokens: sqlite::token_store(pool.clone(), system_cipher),
             user_secrets: sqlite::user_secret_store(pool.clone()),
@@ -105,6 +107,7 @@ impl BackendStores {
     ) -> Self {
         Self {
             artefacts: Arc::new(pg::artefacts::PgArtefactStore::new(pool.clone())),
+            channels: Arc::new(pg::channels::PgInstanceChannelStore::new(pool.clone())),
             instances: Arc::new(pg::instances::PgInstanceStore::new(
                 pool.clone(),
                 system_cipher.clone(),

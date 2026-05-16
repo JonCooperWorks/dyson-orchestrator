@@ -122,6 +122,40 @@ export class SwarmClient {
     return this._json(`/v1/instances/${encodeURIComponent(id)}/probe`, { method: 'POST' });
   }
 
+  listChannels(id) {
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/channels`, {
+      headers: { Accept: 'application/json' },
+    });
+  }
+
+  connectTelegramChannel(id, token) {
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/channels/telegram`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+  }
+
+  patchTelegramChannel(id, enabled) {
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/channels/telegram`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  disconnectTelegramChannel(id) {
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/channels/telegram`, {
+      method: 'DELETE',
+    });
+  }
+
+  listTelegramRecent(id) {
+    return this._json(`/v1/instances/${encodeURIComponent(id)}/channels/telegram/recent`, {
+      headers: { Accept: 'application/json' },
+    });
+  }
+
   // ─── Snapshots / backups / restore ──────────────────────────────
 
   snapshotInstance(id, name) {

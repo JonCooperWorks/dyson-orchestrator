@@ -203,7 +203,7 @@ mod tests {
             cipher_dir.clone(),
         ));
         let state = AppState {
-            user_secrets,
+            user_secrets: user_secrets.clone(),
             system_secrets,
             ciphers: cipher_dir,
             instances: instance_svc,
@@ -229,6 +229,13 @@ mod tests {
                 dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
             ))),
             webhooks: webhooks_svc,
+            channels: Arc::new(crate::channels::ChannelsService::new(
+                crate::db::sqlite::instance_channel_store(pool.clone()),
+                instances_store.clone(),
+                user_secrets.clone(),
+                Arc::new(crate::channels::NoopTelegramApi),
+                Some("https://swarm.test".into()),
+            )),
             shares: shares_svc,
             artefact_cache,
             state_files,

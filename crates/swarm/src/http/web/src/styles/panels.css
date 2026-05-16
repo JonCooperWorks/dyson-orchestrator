@@ -3631,6 +3631,101 @@
   font-size: 0.85rem;
 }
 
+.channels-panel { max-width: 760px; }
+.channel-empty,
+.channel-wizard,
+.channel-connected-card {
+  display: grid;
+  gap: 14px;
+}
+.channel-connect-card,
+.channel-connected-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel, #151922);
+}
+.channel-connect-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+.channel-connect-card small,
+.channel-handle { display: block; color: var(--fg-muted); margin-top: 3px; }
+.channel-icon { font-size: 1.35rem; }
+.channel-steps { display: flex; gap: 8px; flex-wrap: wrap; }
+.channel-steps span {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+.channel-steps span.active {
+  color: var(--fg);
+  border-color: var(--accent, #6ea8fe);
+}
+.channel-step { display: grid; gap: 14px; }
+.channel-instructions { margin: 0; padding-left: 22px; display: grid; gap: 8px; }
+.botfather-art {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft, #11141a);
+}
+.chat-bubble {
+  max-width: 72%;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: #263241;
+}
+.chat-bubble.user { justify-self: end; background: #1f5143; }
+.telegram-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
+.telegram-token-input { font-size: 16px; min-width: 0; }
+.channel-actions { display: flex; gap: 8px; align-items: center; }
+.channel-actions.wrap { flex-wrap: wrap; }
+.channel-connected-card { padding: 16px; }
+.channel-connected-card.paused { opacity: 0.68; }
+.channel-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.channel-title { font-weight: 650; }
+.health-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  background: #36c275;
+}
+.health-dot.amber { background: #e1aa37; }
+.health-dot.red { background: #e05252; }
+.health-dot.paused { background: #8a93a3; }
+.channel-recent {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.channel-recent-row {
+  display: grid;
+  grid-template-columns: 190px 70px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 0.86rem;
+  color: var(--fg-muted);
+}
+.channel-recent-row span:last-child {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 640px) {
   .audit-filters { flex-direction: column; align-items: stretch; }
   .audit-task-filter { width: 100%; }
@@ -3648,6 +3743,11 @@
   .activity-filter-chip-main { max-width: none; flex: 1 1 auto; justify-content: space-between; }
   .activity-row { grid-template-columns: 1fr; }
   .activity-status { position: absolute; right: 18px; }
+  .channel-connect-card,
+  .telegram-token-row,
+  .channel-recent-row { grid-template-columns: 1fr; }
+  .channel-actions .btn,
+  .channel-connect-card .btn { width: 100%; }
 }
 
 @media (max-width: 760px) {
@@ -3660,7 +3760,8 @@
   .admin-catalog-form .field input[type="email"],
   .admin-catalog-form .field select,
   .admin-catalog-form .field textarea,
-  .task-verification-input {
+  .task-verification-input,
+  .telegram-token-input {
     font-size: 16px !important;
   }
 }

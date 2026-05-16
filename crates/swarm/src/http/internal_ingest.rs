@@ -376,7 +376,7 @@ mod tests {
         let chat_token = tokens_store.mint(INSTANCE, "openai").await.unwrap();
 
         let state = AppState {
-            user_secrets: user_secrets_svc,
+            user_secrets: user_secrets_svc.clone(),
             system_secrets: system_secrets_svc,
             ciphers: cipher_dir,
             instances: instance_svc,
@@ -402,6 +402,13 @@ mod tests {
                 dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
             ))),
             webhooks: webhooks_svc,
+            channels: Arc::new(crate::channels::ChannelsService::new(
+                crate::db::sqlite::instance_channel_store(pool.clone()),
+                instances_store.clone(),
+                user_secrets_svc.clone(),
+                Arc::new(crate::channels::NoopTelegramApi),
+                Some("https://swarm.test".into()),
+            )),
             shares: shares_svc,
             artefact_cache,
             state_files,

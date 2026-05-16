@@ -14,6 +14,7 @@ pub mod http;
 pub mod mcp;
 pub mod policy_check;
 pub mod recording_body;
+pub mod telegram;
 pub mod upstream_policy;
 pub mod validate;
 

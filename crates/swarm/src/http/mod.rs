@@ -17,6 +17,7 @@ pub mod assets;
 pub mod auth_config;
 pub mod auth_session;
 pub mod byok;
+pub mod channels;
 pub mod dyson_proxy;
 pub mod egress_admin;
 pub mod healthz;
@@ -114,6 +115,9 @@ pub struct AppState {
     /// management routes under `/v1/instances/:id/webhooks` and the
     /// public delivery endpoint `/webhooks/:id/:name`.
     pub webhooks: Arc<crate::webhooks::WebhookService>,
+    /// Instance chat-surface channels. V1 is Telegram only; secrets stay
+    /// in swarm and dyson talks to the bearer-protected Telegram proxy.
+    pub channels: Arc<crate::channels::ChannelsService>,
     /// Anonymous artefact-share service — backs `/v1/instances/:id/...`
     /// admin CRUD and the public read path on `share.<apex>`.  Holds
     /// the share store, the per-user-secrets handle, and the metrics
@@ -212,6 +216,7 @@ pub fn router(
         .merge(byok::router(state.clone()))
         .merge(models::router(state.clone()))
         .merge(webhooks::router(state.clone()))
+        .merge(channels::router(state.clone()))
         .merge(shares::router(state.clone()))
         .merge(instance_artefacts::router(state.clone()))
         .merge(skill_marketplace::router(state.clone()))
@@ -243,6 +248,7 @@ pub fn router(
         .merge(internal_state::router(state.clone()))
         .merge(skill_marketplace::internal_router(state.clone()))
         .merge(webhooks::public_router(state.clone()))
+        .merge(channels::public_router(state.clone()))
         .merge(admin)
         .merge(tenant)
         .merge(extra)
@@ -410,7 +416,7 @@ mod tests {
             cipher_dir.clone(),
         ));
         let state = AppState {
-            user_secrets,
+            user_secrets: user_secrets.clone(),
             system_secrets,
             ciphers: cipher_dir,
             instances: instance_svc,
@@ -436,6 +442,13 @@ mod tests {
                 dyson_swarm_core::upstream_policy::OutboundUrlPolicy::default(),
             ))),
             webhooks: webhooks_svc,
+            channels: Arc::new(crate::channels::ChannelsService::new(
+                crate::db::sqlite::instance_channel_store(pool.clone()),
+                instances_store.clone(),
+                user_secrets.clone(),
+                Arc::new(crate::channels::NoopTelegramApi),
+                Some("https://swarm.test".into()),
+            )),
             shares: shares_svc,
             artefact_cache,
             state_files,
