@@ -113,6 +113,10 @@
   gap: 18px;
 }
 
+.admin-section-page {
+  align-items: flex-start;
+}
+
 .admin-section-page > .admin-header {
   width: min(100%, 1180px);
 }
@@ -208,22 +212,25 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  min-height: calc(var(--control-height) + 4px);
   overflow-x: auto;
-  overflow-y: hidden;
-  padding: 2px 0 8px;
+  overflow-y: visible;
+  padding: 0 0 4px;
 }
 
 .admin-section-tabs a {
-  display: block;
+  display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
-  padding: 6px 10px;
+  min-height: var(--control-height);
+  padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--fg-muted);
   background: var(--bg-1);
   text-decoration: none;
   font-size: 13px;
-  line-height: 1.25;
+  line-height: 1;
   white-space: nowrap;
 }
 

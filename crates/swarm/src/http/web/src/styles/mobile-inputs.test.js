@@ -33,11 +33,23 @@ describe('activity controls', () => {
 
 describe('admin KMS audit layout', () => {
   test('caps normal admin section panels so forms do not stretch across wide screens', () => {
+    const sectionPageRule = ruleBody(panelsCss, '.admin-section-page');
     const sectionPanelRule = ruleBody(panelsCss, '.admin-section-page > .panel');
     const kmsSectionRule = ruleBody(panelsCss, '.admin-section-page-kms-audit > .admin-kms-audit-panel');
 
+    expect(sectionPageRule).toContain('align-items: flex-start');
     expect(sectionPanelRule).toContain('width: min(100%, 1180px)');
     expect(kmsSectionRule).toContain('width: min(100%, 1320px)');
+  });
+
+  test('does not vertically clip admin section tabs', () => {
+    const tabsRule = ruleBody(panelsCss, '.admin-section-tabs');
+    const linkRule = ruleBody(panelsCss, '.admin-section-tabs a');
+
+    expect(tabsRule).toContain('overflow-y: visible');
+    expect(tabsRule).toContain('min-height: calc(var(--control-height) + 4px)');
+    expect(linkRule).toContain('display: inline-flex');
+    expect(linkRule).toContain('min-height: var(--control-height)');
   });
 
   test('renders audit events as a labelled list instead of a crowded spreadsheet', () => {
