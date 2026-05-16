@@ -14,10 +14,14 @@ The main audit surfaces are:
   instance, server, tool, status, duration, and completion state.
 - `llm_tool_call`: one row per model-emitted tool call, with the sealed
   tool input and the sealed result attached after the following turn.
+- `secret_access_audit`: one row per audited local KMS secret access operation,
+  including scope, owner/instance attribution, key metadata, result, and
+  redacted error details.
 
 Do not fold these tables together. They answer related but different
 questions: "which model call happened?", "which MCP transport call happened?",
-and "which tool did the model ask the agent to run, with what input/result?"
+"which tool did the model ask the agent to run, with what input/result?", and
+"which secret material did the local KMS open, seal, rewrap, rotate, or delete?"
 
 ## LLM Tool-Call Audit
 
@@ -55,6 +59,68 @@ using the same envelope pattern as user secrets. Metadata stays plaintext:
 This is IDOR, SQL injection, and database-exfiltration protection. It is not
 operator protection: a host operator with access to the per-owner age identity
 can decrypt payloads through the normal server-side paths.
+
+## KMS Secret Access Audit
+
+`secret_access_audit` is the local KMS audit trail. It records successful and
+failed secret access operations without storing plaintext secret values.
+
+Audited operations are `encrypt`, `decrypt`, `rewrap`, `rotate`, and `delete`.
+Rows include:
+
+- `actor_kind` and `actor_id`: the caller identity such as `runtime`,
+  `system`, `operator_cli`, or `test`. Runtime actor ids identify the runtime
+  path and are not ownership authority.
+- `reason`: the code path, such as `LlmProviderProxy`, `McpProxyForward`,
+  `RuntimeConfigurePush`, `StateReplay`, `ArtefactRead`, `Migration`, or
+  `OperatorCli`.
+- `scope`: the KMS scope, such as `runtime_token`, `system_secret`,
+  `system_configure`, `user_secret`, `user_api_key`, `user_profile`,
+  `state_file`, `artefact`, `webhook_delivery`, or `llm_tool_call`.
+- `owner_id`, `instance_id`, and `secret_name`: attribution copied from the
+  KMS context. `secret_name` is the logical name already known to the caller,
+  for example `proxy_token:<provider>`; it is not a secret value.
+- `key_id` and `key_version`: envelope key metadata when available.
+- `result`, `error_class`, and `error_message`: success/failure status with a
+  short redacted error message.
+
+Owner attribution must come from durable ownership state, not from the runtime
+actor. Runtime proxy tokens are instance-scoped, so new `runtime_token` rows
+carry the owning `instances.owner_id` whenever the token belongs to an
+instance. Older no-owner runtime-token envelopes remain readable: swarm first
+tries the owner-aware KMS context, falls back to the legacy no-owner context
+only on a context mismatch, and lazily rewraps successful legacy opens under the
+owner-aware context.
+
+Migration `0050_secret_access_audit_owner_backfill` fills missing
+`secret_access_audit.owner_id` values from `instances.owner_id` when an audit
+row has a non-empty `instance_id` that still matches an `instances.id`. It is
+idempotent. It does not invent an owner for system-only rows with no instance,
+or for rows whose instance no longer exists.
+
+Admin-only listing is exposed at:
+
+```text
+GET /v1/admin/kms/audit
+```
+
+Supported filters are `scope`, `owner_id`, `instance_id`, `secret_name`,
+`operation`, `result`, `reason`, `since`, `until`, `limit`, and `offset`.
+
+Host-side verification should aggregate metadata only:
+
+```sh
+sudo sqlite3 /var/lib/dyson-swarm/state.db \
+  "SELECT scope, COUNT(*) AS total, SUM(CASE WHEN owner_id IS NULL OR owner_id = '' THEN 1 ELSE 0 END) AS missing_owner FROM secret_access_audit GROUP BY scope ORDER BY total DESC;"
+```
+
+After the owner backfill, this query should return no rows for still-linked
+instance-scoped audit entries:
+
+```sh
+sudo sqlite3 /var/lib/dyson-swarm/state.db \
+  "SELECT scope, COUNT(*) FROM secret_access_audit AS saa WHERE (owner_id IS NULL OR owner_id = '') AND instance_id IS NOT NULL AND instance_id != '' AND EXISTS (SELECT 1 FROM instances AS i WHERE i.id = saa.instance_id) GROUP BY scope ORDER BY scope;"
+```
 
 ## MCP Cross-Linking
 

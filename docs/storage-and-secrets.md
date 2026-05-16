@@ -140,12 +140,29 @@ not hash secret names.
 
 ## Secret Access Audit
 
-The `secret_access_audit` table records KMS maintenance events and is shaped for
-future runtime audit expansion. Events include timestamp, actor kind/id, reason,
-operation, scope, owner/instance ids, existing plaintext secret names where
-already present, key id/version, result, and a redacted error class/message.
+The `secret_access_audit` table records audited local KMS operations for runtime
+and maintenance paths. Events include timestamp, actor kind/id, reason,
+operation, scope, owner/instance ids, existing plaintext logical secret names
+where already present, key id/version, result, and a redacted error
+class/message.
 
 Plaintext secret values are never written to this table.
+
+Owner attribution comes from the KMS context. User-scoped secrets use the user
+owner in that context. Runtime proxy tokens are instance-scoped, so new
+`runtime_token` audit rows use the matching `instances.owner_id` when the token
+belongs to an instance. Migration `0050_secret_access_audit_owner_backfill`
+backfills older audit rows from `instances.owner_id` when `instance_id` still
+matches a current instance, and leaves system-only rows without an instance
+unchanged.
+
+Existing ciphertext compatibility is preserved. Older runtime-token envelopes
+sealed with no owner in the KMS context can still be opened; successful legacy
+opens are lazily rewrapped with owner-aware context so later audit rows have
+complete owner attribution.
+
+See [Audit](audit.md#kms-secret-access-audit) for the admin API and operator
+verification queries.
 
 ## Sealed Mode
 

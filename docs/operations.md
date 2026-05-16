@@ -106,6 +106,24 @@ sudo systemctl start dyson-swarm
 systemctl status dyson-swarm
 ```
 
+To verify KMS secret-access audit owner attribution without reading or printing
+secret values:
+
+```sh
+sudo sqlite3 /var/lib/dyson-swarm/state.db \
+  "SELECT scope, COUNT(*) AS total, SUM(CASE WHEN owner_id IS NULL OR owner_id = '' THEN 1 ELSE 0 END) AS missing_owner FROM secret_access_audit GROUP BY scope ORDER BY total DESC;"
+```
+
+Instance-scoped rows that still match an instance should not be missing owner
+after startup migrations have run:
+
+```sh
+sudo sqlite3 /var/lib/dyson-swarm/state.db \
+  "SELECT scope, COUNT(*) FROM secret_access_audit AS saa WHERE (owner_id IS NULL OR owner_id = '') AND instance_id IS NOT NULL AND instance_id != '' AND EXISTS (SELECT 1 FROM instances AS i WHERE i.id = saa.instance_id) GROUP BY scope ORDER BY scope;"
+```
+
+System-only scopes with no `instance_id` may legitimately have no `owner_id`.
+
 Then run the normal smoke checks below, including an LLM turn, an MCP tool call,
 a state read from a known mirrored file, and a `/api/admin/configure` push by
 creating or reconfiguring an instance.
