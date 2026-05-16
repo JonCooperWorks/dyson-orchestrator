@@ -115,6 +115,11 @@ sqlite = "efd6e64479a779fc9a0c8086ad928e4593636533e37fa3fcdb2ad93671b6c85f"
 postgres = "8d7967d08036a3f9022571222605b8d947ae46b5eb2da24966ffe0f3b1bfc872"
 reason = "dialect syntax differs; logical schema matches sqlite"
 
+[equivalence.secret_access_audit]
+sqlite = "525a8e1070d508a03b7cb18b9e461ce49043dd4297ffa02c7a10987810c9a88d"
+postgres = "4b75ff306049b067107df1cb17faaeeac3cb3bd64c8979008f0a272c7d948ab5"
+reason = "postgres uses BIGINT for epoch timestamps and key versions; logical schema matches sqlite"
+
 [equivalence.skill_marketplace_remove_file]
 sqlite = "0201a13972a6ba86fd892a3514d523023d3508421596fd226ddd4fe652266bc9"
 postgres = "969b0b61be1b9d9c28e9ecbc8a34f7cfdb47fec0cd40f1a549262d81c6be98e8"
