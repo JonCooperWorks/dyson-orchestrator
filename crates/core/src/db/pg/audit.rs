@@ -682,6 +682,28 @@ mod tests {
         }
     }
 
+    async fn apply_secret_access_owner_backfill(pool: &PgPool) -> u64 {
+        let migration_sql = include_str!(
+            "../../../migrations/postgres/0050_secret_access_audit_owner_backfill.sql"
+        )
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+        let mut affected = 0;
+        for statement in migration_sql.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                affected += sqlx::query(statement)
+                    .execute(pool)
+                    .await
+                    .unwrap()
+                    .rows_affected();
+            }
+        }
+        affected
+    }
+
     #[tokio::test]
     async fn pg_tool_call_insert_attach_and_filter_round_trip() {
         let Some((_pool, store, owner, instance)) = fixture("round").await else {
@@ -772,5 +794,89 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, call_id);
         assert_eq!(rows[0].mcp_audit_id, Some(mcp_id));
+    }
+
+    #[tokio::test]
+    async fn pg_secret_access_audit_owner_backfill_is_idempotent_and_instance_scoped() {
+        let Some((pool, _store, owner, instance)) = fixture("kms-backfill").await else {
+            return;
+        };
+        let base = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap();
+        let store = PgSecretAccessAuditStore::new(pool.clone());
+        let instance_missing_owner = SecretAccessAuditEntry {
+            timestamp: base + 10,
+            actor_kind: "runtime".into(),
+            actor_id: Some(instance.clone()),
+            reason: SecretAccessReason::LlmProviderProxy,
+            operation: SecretAccessOperation::Decrypt,
+            scope: KmsScope::RuntimeToken,
+            owner_id: None,
+            instance_id: Some(instance.clone()),
+            secret_name: Some("proxy_token:*".into()),
+            key_id: Some("system/runtime_tokens".into()),
+            key_version: Some(1),
+            result: SecretAccessResult::Success,
+            error_class: None,
+            error_message: None,
+        };
+        let system_only = SecretAccessAuditEntry {
+            timestamp: base + 20,
+            actor_kind: "system".into(),
+            actor_id: Some("bootstrap".into()),
+            reason: SecretAccessReason::SystemSecretBootstrap,
+            operation: SecretAccessOperation::Decrypt,
+            scope: KmsScope::SystemSecret,
+            owner_id: None,
+            instance_id: None,
+            secret_name: Some("provider".into()),
+            key_id: Some("system/provider".into()),
+            key_version: Some(1),
+            result: SecretAccessResult::Success,
+            error_class: None,
+            error_message: None,
+        };
+        let instance_empty_owner = SecretAccessAuditEntry {
+            timestamp: base + 30,
+            owner_id: Some(String::new()),
+            ..instance_missing_owner.clone()
+        };
+        let missing_instance = SecretAccessAuditEntry {
+            timestamp: base + 40,
+            instance_id: Some(unique("missing-inst")),
+            ..instance_missing_owner.clone()
+        };
+        store.insert(&instance_missing_owner).await.unwrap();
+        store.insert(&system_only).await.unwrap();
+        store.insert(&instance_empty_owner).await.unwrap();
+        store.insert(&missing_instance).await.unwrap();
+
+        assert_eq!(apply_secret_access_owner_backfill(&pool).await, 2);
+        assert_eq!(apply_secret_access_owner_backfill(&pool).await, 0);
+
+        let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT timestamp, owner_id FROM secret_access_audit \
+             WHERE timestamp >= $1 AND timestamp <= $2 \
+             ORDER BY timestamp",
+        )
+        .bind(base + 10)
+        .bind(base + 40)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (base + 10, Some(owner.clone())),
+                (base + 20, None),
+                (base + 30, Some(owner)),
+                (base + 40, None),
+            ]
+        );
     }
 }

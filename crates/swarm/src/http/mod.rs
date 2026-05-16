@@ -903,6 +903,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_kms_audit_returns_runtime_token_owner_id() {
+        let (state, users) = build_state().await;
+        state
+            .secret_access_audit
+            .insert(&crate::traits::SecretAccessAuditEntry {
+                timestamp: 42,
+                actor_kind: "runtime".into(),
+                actor_id: Some("inst-a".into()),
+                reason: crate::envelope::SecretAccessReason::LlmProviderProxy,
+                operation: crate::envelope::SecretAccessOperation::Decrypt,
+                scope: crate::envelope::KmsScope::RuntimeToken,
+                owner_id: Some("owner-a".into()),
+                instance_id: Some("inst-a".into()),
+                secret_name: Some("proxy_token:*".into()),
+                key_id: Some("system/runtime_tokens".into()),
+                key_version: Some(1),
+                result: crate::envelope::SecretAccessResult::Success,
+                error_class: None,
+                error_message: None,
+            })
+            .await
+            .unwrap();
+        let (user_auth, _id) = crate::auth::user::fixed_user_auth_with_roles(
+            users,
+            "alice",
+            Some(("https://test/roles", &["rol_admin"])),
+        )
+        .await;
+        let base = spawn(
+            state,
+            AuthState::enforced(crate::config::OidcRoles {
+                claim: "https://test/roles".into(),
+                admin: "rol_admin".into(),
+            }),
+            user_auth,
+        )
+        .await;
+        let r = reqwest::Client::new()
+            .get(format!("{base}/v1/admin/kms/audit?scope=runtime_token"))
+            .bearer_auth("ignored")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["items"][0]["owner_id"], "owner-a");
+    }
+
+    #[tokio::test]
     async fn admin_route_with_non_admin_role_is_404() {
         let (state, users) = build_state().await;
         let (user_auth, _id) = crate::auth::user::fixed_user_auth_with_roles(

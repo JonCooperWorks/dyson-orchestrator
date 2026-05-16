@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::db::pg::map_sqlx;
 use crate::db::{INGEST_PROVIDER, state_sync_provider, token_lookup_key};
 use crate::envelope::{
-    CipherDirectory, EnvelopeCipher, KmsContext, KmsScope, SecretAccessReason, open_context,
-    rewrap_context_as_string, seal_context_as_string,
+    CipherDirectory, EnvelopeCipher, EnvelopeError, KmsContext, KmsScope, SecretAccessOperation,
+    SecretAccessReason, open_context, rewrap_context_as_string, seal_context_as_string,
 };
 use crate::error::StoreError;
 use crate::kms_audit::{self, KmsAuditActor, NoopSecretAccessAuditStore};
@@ -47,30 +47,69 @@ impl PgTokenStore {
         }
     }
 
-    fn token_context(instance_id: &str, provider: &str) -> KmsContext {
+    fn token_context(instance_id: &str, owner_id: Option<&str>, provider: &str) -> KmsContext {
         KmsContext {
             scope: KmsScope::RuntimeToken,
-            owner_id: None,
+            owner_id: owner_id
+                .filter(|id| !id.is_empty())
+                .map(std::borrow::ToOwned::to_owned),
             instance_id: Some(instance_id.to_owned()),
             name: Some(format!("proxy_token:{provider}")),
         }
     }
 
-    fn seal_token(
+    async fn instance_owner_id(&self, instance_id: &str) -> Result<Option<String>, StoreError> {
+        let row = sqlx::query("SELECT owner_id FROM instances WHERE id = $1")
+            .bind(instance_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.get("owner_id")))
+    }
+
+    async fn seal_token(
         &self,
         instance_id: &str,
+        owner_id: Option<&str>,
         provider: &str,
         token: &str,
     ) -> Result<String, StoreError> {
         if let Some(ciphers) = self.ciphers.as_deref() {
-            let context = Self::token_context(instance_id, provider);
-            return seal_context_as_string(
-                ciphers,
-                &context,
-                token.as_bytes(),
-                token_reason(provider),
-            )
-            .map_err(|e| StoreError::Io(format!("seal proxy token: {e}")));
+            let context = Self::token_context(instance_id, owner_id, provider);
+            let reason = token_reason(provider);
+            let actor = KmsAuditActor::runtime(instance_id);
+            let sealed = seal_context_as_string(ciphers, &context, token.as_bytes(), reason);
+            match sealed {
+                Ok(sealed) => {
+                    kms_audit::best_effort_record(
+                        self.audit.as_ref(),
+                        kms_audit::success_entry(
+                            &actor,
+                            reason,
+                            SecretAccessOperation::Encrypt,
+                            &context,
+                            None,
+                        ),
+                    )
+                    .await;
+                    return Ok(sealed);
+                }
+                Err(err) => {
+                    kms_audit::best_effort_record(
+                        self.audit.as_ref(),
+                        kms_audit::failure_entry(
+                            &actor,
+                            reason,
+                            SecretAccessOperation::Encrypt,
+                            &context,
+                            "EnvelopeError",
+                            &err.to_string(),
+                        ),
+                    )
+                    .await;
+                    return Err(StoreError::Io(format!("seal proxy token: {err}")));
+                }
+            }
         }
         let sealed = self
             .cipher
@@ -87,45 +126,87 @@ impl PgTokenStore {
         stored: &str,
     ) -> Result<OpenedToken, StoreError> {
         if let Some(ciphers) = self.ciphers.as_deref() {
-            let context = Self::token_context(instance_id, provider);
+            let owner_id = self.instance_owner_id(instance_id).await?;
+            let context = Self::token_context(instance_id, owner_id.as_deref(), provider);
+            let legacy_context = Self::token_context(instance_id, None, provider);
             let reason = token_reason(provider);
             let actor = KmsAuditActor::runtime(instance_id);
-            let opened = match open_context(ciphers, &context, stored.as_bytes(), reason) {
-                Ok(opened) => {
-                    kms_audit::best_effort_record(
-                        self.audit.as_ref(),
-                        kms_audit::success_entry(
-                            &actor,
-                            reason,
-                            crate::envelope::SecretAccessOperation::Decrypt,
-                            &context,
-                            Some(&opened),
-                        ),
-                    )
-                    .await;
-                    opened
-                }
-                Err(err) => {
-                    kms_audit::best_effort_record(
-                        self.audit.as_ref(),
-                        kms_audit::failure_entry(
-                            &actor,
-                            reason,
-                            crate::envelope::SecretAccessOperation::Decrypt,
-                            &context,
-                            "EnvelopeError",
-                            &err.to_string(),
-                        ),
-                    )
-                    .await;
-                    return Err(StoreError::Malformed(format!("open proxy token: {err}")));
-                }
-            };
+            let (opened, needs_context_rewrap) =
+                match open_context(ciphers, &context, stored.as_bytes(), reason) {
+                    Ok(opened) => {
+                        kms_audit::best_effort_record(
+                            self.audit.as_ref(),
+                            kms_audit::success_entry(
+                                &actor,
+                                reason,
+                                SecretAccessOperation::Decrypt,
+                                &context,
+                                Some(&opened),
+                            ),
+                        )
+                        .await;
+                        (opened, false)
+                    }
+                    Err(err) => {
+                        if owner_id.is_some() && matches!(err, EnvelopeError::ContextMismatch) {
+                            match open_context(ciphers, &legacy_context, stored.as_bytes(), reason)
+                            {
+                                Ok(opened) => {
+                                    kms_audit::best_effort_record(
+                                        self.audit.as_ref(),
+                                        kms_audit::success_entry(
+                                            &actor,
+                                            reason,
+                                            SecretAccessOperation::Decrypt,
+                                            &context,
+                                            Some(&opened),
+                                        ),
+                                    )
+                                    .await;
+                                    (opened, true)
+                                }
+                                Err(fallback_err) => {
+                                    kms_audit::best_effort_record(
+                                        self.audit.as_ref(),
+                                        kms_audit::failure_entry(
+                                            &actor,
+                                            reason,
+                                            SecretAccessOperation::Decrypt,
+                                            &context,
+                                            "EnvelopeError",
+                                            &fallback_err.to_string(),
+                                        ),
+                                    )
+                                    .await;
+                                    return Err(StoreError::Malformed(format!(
+                                        "open proxy token: {fallback_err}"
+                                    )));
+                                }
+                            }
+                        } else {
+                            kms_audit::best_effort_record(
+                                self.audit.as_ref(),
+                                kms_audit::failure_entry(
+                                    &actor,
+                                    reason,
+                                    SecretAccessOperation::Decrypt,
+                                    &context,
+                                    "EnvelopeError",
+                                    &err.to_string(),
+                                ),
+                            )
+                            .await;
+                            return Err(StoreError::Malformed(format!("open proxy token: {err}")));
+                        }
+                    }
+                };
             let plaintext = String::from_utf8(opened.plaintext.clone())
                 .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))?;
             return Ok(OpenedToken {
                 plaintext,
                 opened: Some(opened),
+                needs_context_rewrap,
+                owner_id,
             });
         }
         let plain = self
@@ -137,6 +218,8 @@ impl PgTokenStore {
         Ok(OpenedToken {
             plaintext,
             opened: None,
+            needs_context_rewrap: false,
+            owner_id: None,
         })
     }
 
@@ -147,13 +230,16 @@ impl PgTokenStore {
         stored: &str,
         opened: &OpenedToken,
     ) -> Result<(), StoreError> {
-        let Some(opened_meta) = opened.opened.as_ref().filter(|o| o.needs_rewrap) else {
+        let Some(opened_meta) = opened.opened.as_ref() else {
             return Ok(());
         };
+        if !opened_meta.needs_rewrap && !opened.needs_context_rewrap {
+            return Ok(());
+        }
         let Some(ciphers) = self.ciphers.as_deref() else {
             return Ok(());
         };
-        let context = Self::token_context(instance_id, provider);
+        let context = Self::token_context(instance_id, opened.owner_id.as_deref(), provider);
         let reason = token_reason(provider);
         let actor = KmsAuditActor::runtime(instance_id);
         let next = match rewrap_context_as_string(
@@ -169,7 +255,7 @@ impl PgTokenStore {
                     kms_audit::failure_entry(
                         &actor,
                         reason,
-                        crate::envelope::SecretAccessOperation::Rewrap,
+                        SecretAccessOperation::Rewrap,
                         &context,
                         "EnvelopeError",
                         &err.to_string(),
@@ -197,7 +283,7 @@ impl PgTokenStore {
                 kms_audit::success_entry(
                     &actor,
                     reason,
-                    crate::envelope::SecretAccessOperation::Rewrap,
+                    SecretAccessOperation::Rewrap,
                     &context,
                     Some(opened_meta),
                 ),
@@ -211,6 +297,8 @@ impl PgTokenStore {
 struct OpenedToken {
     plaintext: String,
     opened: Option<crate::envelope::OpenEnvelopeResult>,
+    needs_context_rewrap: bool,
+    owner_id: Option<String>,
 }
 
 fn token_reason(provider: &str) -> SecretAccessReason {
@@ -235,7 +323,10 @@ impl PgTokenStore {
         provider: &str,
     ) -> Result<String, StoreError> {
         let token = format!("{prefix}{}", Uuid::new_v4().simple());
-        let stored_token = self.seal_token(instance_id, provider, &token)?;
+        let owner_id = self.instance_owner_id(instance_id).await?;
+        let stored_token = self
+            .seal_token(instance_id, owner_id.as_deref(), provider, &token)
+            .await?;
         let lookup = token_lookup_key(&token);
         sqlx::query(
             "INSERT INTO proxy_tokens \
@@ -424,5 +515,102 @@ impl TokenStore for PgTokenStore {
         self.rewrap_token_if_needed(instance_id, provider, &stored, &opened)
             .await?;
         Ok(Some(opened.plaintext))
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use super::*;
+    use crate::envelope::AgeCipherDirectory;
+    use crate::network_policy::NetworkPolicy;
+    use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
+
+    fn unique(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{prefix}-{nanos}")
+    }
+
+    async fn fixture(name: &str) -> Option<(PgPool, String, String)> {
+        let url = match std::env::var("PG_TEST_URL") {
+            Ok(url) if !url.trim().is_empty() => url,
+            _ => return None,
+        };
+        let pool = crate::db::pg::open(&url).await.unwrap();
+        let owner = unique(&format!("owner-{name}"));
+        let instance = unique(&format!("inst-{name}"));
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at, activated_at) \
+             VALUES ($1, $2, 'active', 0, 0)",
+        )
+        .bind(&owner)
+        .bind(format!("subject-{owner}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let instances = crate::db::pg::instances::PgInstanceStore::new(
+            pool.clone(),
+            crate::db::sqlite::test_system_cipher(),
+        );
+        instances
+            .create(InstanceRow {
+                id: instance.clone(),
+                owner_id: owner.clone(),
+                name: "agent".into(),
+                task: "task".into(),
+                cube_sandbox_id: Some("cube-1".into()),
+                state_generation: "gen-1".into(),
+                template_id: "tmpl".into(),
+                status: InstanceStatus::Live,
+                bearer_token: "bearer".into(),
+                pinned: false,
+                expires_at: None,
+                last_active_at: 0,
+                last_probe_at: None,
+                last_probe_status: None,
+                created_at: 0,
+                destroyed_at: None,
+                rotated_to: None,
+                network_policy: NetworkPolicy::NoLocalNet,
+                network_policy_cidrs: Vec::new(),
+                models: Vec::new(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+        Some((pool, owner, instance))
+    }
+
+    #[tokio::test]
+    async fn pg_kms_runtime_audit_decrypt_records_instance_owner() {
+        let Some((pool, owner, instance)) = fixture("kms-owner").await else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let ciphers: Arc<dyn CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let system_cipher = ciphers.system().unwrap();
+        let audit = Arc::new(crate::db::pg::audit::PgSecretAccessAuditStore::new(
+            pool.clone(),
+        ));
+        let store = PgTokenStore::new_with_kms(pool.clone(), system_cipher, ciphers, audit);
+
+        let token = store.mint(&instance, "openai").await.unwrap();
+        assert!(store.resolve(&token).await.unwrap().is_some());
+
+        let rows: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT owner_id FROM secret_access_audit \
+             WHERE scope = 'runtime_token' AND operation = 'decrypt' AND result = 'success' AND instance_id = $1",
+        )
+        .bind(&instance)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.as_deref() == Some(owner.as_str()))
+        );
     }
 }

@@ -1121,4 +1121,97 @@ mod tests {
         assert_eq!(page.items, vec![second]);
         assert_eq!(page.next_offset, Some(1));
     }
+
+    async fn apply_secret_access_owner_backfill(pool: &SqlitePool) -> u64 {
+        let migration_sql =
+            include_str!("../../../migrations/sqlite/0050_secret_access_audit_owner_backfill.sql")
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        let mut affected = 0;
+        for statement in migration_sql.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                affected += sqlx::query(statement)
+                    .execute(pool)
+                    .await
+                    .unwrap()
+                    .rows_affected();
+            }
+        }
+        affected
+    }
+
+    #[tokio::test]
+    async fn secret_access_audit_owner_backfill_is_idempotent_and_instance_scoped() {
+        let pool = open_in_memory().await.unwrap();
+        seed_owner_instance(&pool, "owner-a", "inst-a").await;
+        let store = SqliteSecretAccessAuditStore::new(pool.clone());
+        let instance_missing_owner = SecretAccessAuditEntry {
+            timestamp: 10,
+            actor_kind: "runtime".into(),
+            actor_id: Some("inst-a".into()),
+            reason: SecretAccessReason::LlmProviderProxy,
+            operation: SecretAccessOperation::Decrypt,
+            scope: KmsScope::RuntimeToken,
+            owner_id: None,
+            instance_id: Some("inst-a".into()),
+            secret_name: Some("proxy_token:*".into()),
+            key_id: Some("system/runtime_tokens".into()),
+            key_version: Some(1),
+            result: SecretAccessResult::Success,
+            error_class: None,
+            error_message: None,
+        };
+        let system_only = SecretAccessAuditEntry {
+            timestamp: 20,
+            actor_kind: "system".into(),
+            actor_id: Some("bootstrap".into()),
+            reason: SecretAccessReason::SystemSecretBootstrap,
+            operation: SecretAccessOperation::Decrypt,
+            scope: KmsScope::SystemSecret,
+            owner_id: None,
+            instance_id: None,
+            secret_name: Some("provider".into()),
+            key_id: Some("system/provider".into()),
+            key_version: Some(1),
+            result: SecretAccessResult::Success,
+            error_class: None,
+            error_message: None,
+        };
+        let instance_empty_owner = SecretAccessAuditEntry {
+            timestamp: 30,
+            owner_id: Some(String::new()),
+            ..instance_missing_owner.clone()
+        };
+        let missing_instance = SecretAccessAuditEntry {
+            timestamp: 40,
+            instance_id: Some("missing-inst".into()),
+            ..instance_missing_owner.clone()
+        };
+        store.insert(&instance_missing_owner).await.unwrap();
+        store.insert(&system_only).await.unwrap();
+        store.insert(&instance_empty_owner).await.unwrap();
+        store.insert(&missing_instance).await.unwrap();
+
+        assert_eq!(apply_secret_access_owner_backfill(&pool).await, 2);
+        assert_eq!(apply_secret_access_owner_backfill(&pool).await, 0);
+
+        let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT timestamp, owner_id FROM secret_access_audit ORDER BY timestamp",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (10, Some("owner-a".to_owned())),
+                (20, None),
+                (30, Some("owner-a".to_owned())),
+                (40, None),
+            ]
+        );
+    }
 }
