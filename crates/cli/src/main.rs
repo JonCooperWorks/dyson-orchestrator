@@ -230,7 +230,16 @@ async fn run_kms(cfg: &config::Config, action: KmsAction) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let db::DatabasePool::Sqlite(pool) = database.pool;
+    #[allow(unreachable_patterns)]
+    let pool = match database.pool {
+        db::DatabasePool::Sqlite(pool) => pool,
+        _ => {
+            eprintln!(
+                "kms commands are not yet supported for database_backend=postgres; use a sqlite-backed local KMS migration path"
+            );
+            return ExitCode::from(2);
+        }
+    };
 
     match action {
         KmsAction::Status => {

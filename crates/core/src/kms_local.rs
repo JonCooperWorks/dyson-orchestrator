@@ -703,6 +703,16 @@ async fn migrate_llm_tool_calls(
                     .execute(pool)
                     .await
                     .map_err(map_sqlx)?;
+                audit_event(
+                    pool,
+                    &context,
+                    SecretAccessOperation::Rewrap,
+                    SecretAccessResult::Success,
+                    Some(&migration.key_id),
+                    Some(migration.key_version),
+                    None,
+                )
+                .await?;
             }
         }
         if let Some(result) = result {
@@ -721,6 +731,16 @@ async fn migrate_llm_tool_calls(
                     .execute(pool)
                     .await
                     .map_err(map_sqlx)?;
+                audit_event(
+                    pool,
+                    &context,
+                    SecretAccessOperation::Rewrap,
+                    SecretAccessResult::Success,
+                    Some(&migration.key_id),
+                    Some(migration.key_version),
+                    None,
+                )
+                .await?;
             }
         }
     }
@@ -971,6 +991,7 @@ mod tests {
     use super::*;
     use crate::db::sqlite::open_in_memory;
     use crate::envelope::{AgeCipherDirectory, CipherDirectory};
+    use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
     use std::sync::Arc;
 
     fn user_id(seed: u8) -> String {
@@ -1055,6 +1076,91 @@ mod tests {
 
         let rerun = migrate_sqlite(&pool, dir.as_ref(), false).await.unwrap();
         assert_eq!(rerun.counts.iter().map(|c| c.migrated).sum::<usize>(), 0);
+    }
+
+    #[tokio::test]
+    async fn migrate_llm_tool_call_writes_audit_rows() {
+        let pool = open_in_memory().await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir: Arc<dyn CipherDirectory> = Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let user = user_id(0x63);
+        let instance_id = "inst-llm";
+        sqlx::query(
+            "INSERT INTO users (id, subject, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&user)
+        .bind("kms-llm-test")
+        .bind(now_secs())
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::db::sqlite::instances::SqlxInstanceStore::new_with_ciphers(
+            pool.clone(),
+            dir.system().unwrap(),
+            dir.clone(),
+        )
+        .create(InstanceRow {
+            id: instance_id.into(),
+            owner_id: user.clone(),
+            name: "llm".into(),
+            task: String::new(),
+            cube_sandbox_id: None,
+            state_generation: String::new(),
+            template_id: "t".into(),
+            status: InstanceStatus::Live,
+            bearer_token: "bearer".into(),
+            pinned: false,
+            expires_at: None,
+            last_active_at: 0,
+            last_probe_at: None,
+            last_probe_status: None,
+            created_at: now_secs(),
+            destroyed_at: None,
+            rotated_to: None,
+            network_policy: crate::network_policy::NetworkPolicy::Open,
+            network_policy_cidrs: Vec::new(),
+            models: Vec::new(),
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
+        let legacy_input = dir.for_user(&user).unwrap().seal(br#"{"x":1}"#).unwrap();
+        let legacy_result = dir
+            .for_user(&user)
+            .unwrap()
+            .seal(br#"{"ok":true}"#)
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO llm_tool_call \
+             (owner_id, instance_id, tool_use_id, tool_name, input_sealed, result_sealed, is_error, called_at, resulted_at) \
+             VALUES (?, ?, 'use-1', 'bash', ?, ?, 0, 1, 2)",
+        )
+        .bind(&user)
+        .bind(instance_id)
+        .bind(legacy_input)
+        .bind(legacy_result)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let report = migrate_sqlite(&pool, dir.as_ref(), false).await.unwrap();
+        assert_eq!(
+            report
+                .counts
+                .iter()
+                .filter(|c| c.table.starts_with("llm_tool_call."))
+                .map(|c| c.migrated)
+                .sum::<usize>(),
+            2
+        );
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM secret_access_audit \
+             WHERE scope = 'llm_tool_call' AND operation = 'rewrap' AND result = 'success'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 2);
     }
 
     #[tokio::test]

@@ -8,17 +8,19 @@ use crate::db::sqlite::map_sqlx;
 use crate::db::{INGEST_PROVIDER, state_sync_provider, token_lookup_key};
 use crate::envelope::{
     CipherDirectory, EnvelopeCipher, KmsContext, KmsScope, SecretAccessReason, open_context,
-    seal_context_as_string,
+    rewrap_context_as_string, seal_context_as_string,
 };
 use crate::error::StoreError;
+use crate::kms_audit::{self, KmsAuditActor, NoopSecretAccessAuditStore};
 use crate::now_secs;
-use crate::traits::{TokenRecord, TokenStore};
+use crate::traits::{SecretAccessAuditStore, TokenRecord, TokenStore};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqlxTokenStore {
     pool: SqlitePool,
     cipher: Arc<dyn EnvelopeCipher>,
     ciphers: Option<Arc<dyn CipherDirectory>>,
+    audit: Arc<dyn SecretAccessAuditStore>,
 }
 
 impl SqlxTokenStore {
@@ -27,6 +29,7 @@ impl SqlxTokenStore {
             pool,
             cipher,
             ciphers: None,
+            audit: Arc::new(NoopSecretAccessAuditStore),
         }
     }
 
@@ -39,6 +42,21 @@ impl SqlxTokenStore {
             pool,
             cipher,
             ciphers: Some(ciphers),
+            audit: Arc::new(NoopSecretAccessAuditStore),
+        }
+    }
+
+    pub fn new_with_kms(
+        pool: SqlitePool,
+        cipher: Arc<dyn EnvelopeCipher>,
+        ciphers: Arc<dyn CipherDirectory>,
+        audit: Arc<dyn SecretAccessAuditStore>,
+    ) -> Self {
+        Self {
+            pool,
+            cipher,
+            ciphers: Some(ciphers),
+            audit,
         }
     }
 
@@ -75,26 +93,137 @@ impl SqlxTokenStore {
             .map_err(|_| StoreError::Malformed("sealed proxy token was not utf-8".into()))
     }
 
-    fn open_token(
+    async fn open_token(
         &self,
         instance_id: &str,
         provider: &str,
         stored: &str,
-    ) -> Result<String, StoreError> {
+    ) -> Result<OpenedToken, StoreError> {
         if let Some(ciphers) = self.ciphers.as_deref() {
             let context = Self::token_context(instance_id, provider);
-            let opened = open_context(ciphers, &context, stored.as_bytes(), token_reason(provider))
-                .map_err(|e| StoreError::Malformed(format!("open proxy token: {e}")))?;
-            return String::from_utf8(opened.plaintext)
-                .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()));
+            let reason = token_reason(provider);
+            let actor = KmsAuditActor::runtime(instance_id);
+            let opened = match open_context(ciphers, &context, stored.as_bytes(), reason) {
+                Ok(opened) => {
+                    kms_audit::best_effort_record(
+                        self.audit.as_ref(),
+                        kms_audit::success_entry(
+                            &actor,
+                            reason,
+                            crate::envelope::SecretAccessOperation::Decrypt,
+                            &context,
+                            Some(&opened),
+                        ),
+                    )
+                    .await;
+                    opened
+                }
+                Err(err) => {
+                    kms_audit::best_effort_record(
+                        self.audit.as_ref(),
+                        kms_audit::failure_entry(
+                            &actor,
+                            reason,
+                            crate::envelope::SecretAccessOperation::Decrypt,
+                            &context,
+                            "EnvelopeError",
+                            &err.to_string(),
+                        ),
+                    )
+                    .await;
+                    return Err(StoreError::Malformed(format!("open proxy token: {err}")));
+                }
+            };
+            let plaintext = String::from_utf8(opened.plaintext.clone())
+                .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))?;
+            return Ok(OpenedToken {
+                plaintext,
+                opened: Some(opened),
+            });
         }
         let plain = self
             .cipher
             .open(stored.as_bytes())
             .map_err(|e| StoreError::Malformed(format!("open proxy token: {e}")))?;
-        String::from_utf8(plain)
-            .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))
+        let plaintext = String::from_utf8(plain)
+            .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))?;
+        Ok(OpenedToken {
+            plaintext,
+            opened: None,
+        })
     }
+
+    async fn rewrap_token_if_needed(
+        &self,
+        instance_id: &str,
+        provider: &str,
+        stored: &str,
+        opened: &OpenedToken,
+    ) -> Result<(), StoreError> {
+        let Some(opened_meta) = opened.opened.as_ref().filter(|o| o.needs_rewrap) else {
+            return Ok(());
+        };
+        let Some(ciphers) = self.ciphers.as_deref() else {
+            return Ok(());
+        };
+        let context = Self::token_context(instance_id, provider);
+        let reason = token_reason(provider);
+        let actor = KmsAuditActor::runtime(instance_id);
+        let next = match rewrap_context_as_string(
+            ciphers,
+            &context,
+            opened.plaintext.as_bytes(),
+            reason,
+        ) {
+            Ok(next) => next,
+            Err(err) => {
+                kms_audit::best_effort_record(
+                    self.audit.as_ref(),
+                    kms_audit::failure_entry(
+                        &actor,
+                        reason,
+                        crate::envelope::SecretAccessOperation::Rewrap,
+                        &context,
+                        "EnvelopeError",
+                        &err.to_string(),
+                    ),
+                )
+                .await;
+                return Err(StoreError::Io(format!("rewrap proxy token: {err}")));
+            }
+        };
+        let result = sqlx::query(
+            "UPDATE proxy_tokens \
+             SET token = ? \
+             WHERE instance_id = ? AND provider = ? AND token = ?",
+        )
+        .bind(&next)
+        .bind(instance_id)
+        .bind(provider)
+        .bind(stored)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        if result.rows_affected() > 0 {
+            kms_audit::best_effort_record(
+                self.audit.as_ref(),
+                kms_audit::success_entry(
+                    &actor,
+                    reason,
+                    crate::envelope::SecretAccessOperation::Rewrap,
+                    &context,
+                    Some(opened_meta),
+                ),
+            )
+            .await;
+        }
+        Ok(())
+    }
+}
+
+struct OpenedToken {
+    plaintext: String,
+    opened: Option<crate::envelope::OpenEnvelopeResult>,
 }
 
 fn token_reason(provider: &str) -> SecretAccessReason {
@@ -206,12 +335,14 @@ impl TokenStore for SqlxTokenStore {
         let stored: String = row.get("token");
         let instance_id: String = row.get("instance_id");
         let provider: String = row.get("provider");
-        let plain = self.open_token(&instance_id, &provider, &stored)?;
-        if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+        let opened = self.open_token(&instance_id, &provider, &stored).await?;
+        if !bool::from(opened.plaintext.as_bytes().ct_eq(token.as_bytes())) {
             return Ok(None);
         }
+        self.rewrap_token_if_needed(&instance_id, &provider, &stored, &opened)
+            .await?;
         Ok(Some(TokenRecord {
-            token: plain,
+            token: opened.plaintext,
             instance_id,
             provider,
             created_at: row.get("created_at"),
@@ -253,8 +384,8 @@ impl TokenStore for SqlxTokenStore {
         let stored: String = row.get("token");
         let instance_id: String = row.get("instance_id");
         let provider: String = row.get("provider");
-        let plain = self.open_token(&instance_id, &provider, &stored)?;
-        if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+        let opened = self.open_token(&instance_id, &provider, &stored).await?;
+        if !bool::from(opened.plaintext.as_bytes().ct_eq(token.as_bytes())) {
             return Ok(false);
         }
         let r = sqlx::query(
@@ -299,11 +430,14 @@ impl TokenStore for SqlxTokenStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        row.map(|r| {
-            let stored: String = r.get("token");
-            self.open_token(instance_id, provider, &stored)
-        })
-        .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let stored: String = row.get("token");
+        let opened = self.open_token(instance_id, provider, &stored).await?;
+        self.rewrap_token_if_needed(instance_id, provider, &stored, &opened)
+            .await?;
+        Ok(Some(opened.plaintext))
     }
 }
 
@@ -312,7 +446,7 @@ mod tests {
     use super::*;
     use crate::db::sqlite::instances::SqlxInstanceStore;
     use crate::db::sqlite::open_in_memory;
-    use crate::envelope::EnvelopeError;
+    use crate::envelope::{AgeCipherDirectory, EnvelopeError};
     use crate::traits::{InstanceRow, InstanceStatus, InstanceStore};
 
     #[derive(Debug)]
@@ -604,5 +738,86 @@ mod tests {
         let store = SqlxTokenStore::new(pool, Arc::new(TestCipher));
         assert!(store.resolve("pt_missing").await.unwrap().is_none());
         assert!(!store.revoke_token("pt_missing").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn kms_runtime_audit_records_success_and_failure_without_plaintext() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ciphers: Arc<dyn CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let system_cipher = ciphers.system().unwrap();
+        let audit = crate::db::sqlite::secret_access_audit_store(pool.clone());
+        let store =
+            SqlxTokenStore::new_with_kms(pool.clone(), system_cipher, ciphers.clone(), audit);
+
+        let tok = store.mint("i1", "openai").await.unwrap();
+        let resolved = store.resolve(&tok).await.unwrap().expect("present");
+        assert_eq!(resolved.token, tok);
+
+        sqlx::query("UPDATE proxy_tokens SET token = 'not-age' WHERE instance_id = 'i1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _ = store.resolve(&tok).await;
+
+        let rows = sqlx::query(
+            "SELECT result, error_message FROM secret_access_audit \
+             WHERE scope = 'runtime_token' ORDER BY timestamp ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(rows.len() >= 2);
+        assert!(
+            rows.iter()
+                .any(|r| r.get::<String, _>("result") == "success")
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.get::<String, _>("result") == "failure")
+        );
+        for row in rows {
+            let message: Option<String> = row.get("error_message");
+            assert!(
+                !message.unwrap_or_default().contains(&tok),
+                "audit error must not contain plaintext token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolves_legacy_proxy_token_and_lazy_rewraps_to_v2() {
+        let pool = open_in_memory().await.unwrap();
+        seed(&pool, "i1").await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ciphers: Arc<dyn CipherDirectory> =
+            Arc::new(AgeCipherDirectory::new(tmp.path()).unwrap());
+        let system_cipher = ciphers.system().unwrap();
+        let token = "pt_0123456789abcdef0123456789abcdef";
+        let legacy = String::from_utf8(system_cipher.seal(token.as_bytes()).unwrap()).unwrap();
+        sqlx::query(
+            "INSERT INTO proxy_tokens \
+             (token, token_lookup, instance_id, provider, created_at, revoked_at, expected_src_ip) \
+             VALUES (?, ?, 'i1', 'openai', 0, NULL, NULL)",
+        )
+        .bind(&legacy)
+        .bind(token_lookup_key(token))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let audit = crate::db::sqlite::secret_access_audit_store(pool.clone());
+        let store = SqlxTokenStore::new_with_kms(pool.clone(), system_cipher, ciphers, audit);
+        assert!(store.resolve(token).await.unwrap().is_some());
+
+        let stored: String =
+            sqlx::query_scalar("SELECT token FROM proxy_tokens WHERE instance_id = 'i1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(stored, legacy);
+        assert!(crate::envelope::is_v2_envelope(stored.as_bytes()));
     }
 }

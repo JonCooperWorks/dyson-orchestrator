@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::envelope::{
     CipherDirectory, KmsContext, KmsScope, SecretAccessReason, is_v2_envelope, open_context,
-    seal_context,
+    rewrap_context, seal_context,
 };
 use crate::error::StoreError;
 use crate::now_secs;
@@ -185,15 +185,38 @@ impl StateFileService {
         }
         let context =
             state_file_context(&row.owner_id, &row.instance_id, &row.namespace, &row.path);
-        let plain = open_context(
+        let opened = open_context(
             self.ciphers.as_ref(),
             &context,
             bytes,
             SecretAccessReason::StateReplay,
         )
-        .map_err(|e| StateFileError::Io(format!("open: {e}")))?
-        .plaintext;
-        Ok(Some(plain))
+        .map_err(|e| StateFileError::Io(format!("open: {e}")))?;
+        if opened.needs_rewrap {
+            match rewrap_context(
+                self.ciphers.as_ref(),
+                &context,
+                &opened.plaintext,
+                SecretAccessReason::StateReplay,
+            ) {
+                Ok(next) => {
+                    let store = self.store.clone();
+                    let previous = bytes.to_vec();
+                    let id = row.id;
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn(async move {
+                            if let Err(err) = store.rewrap_body(id, &previous, &next).await {
+                                tracing::warn!(error = %err, "state file lazy rewrap failed");
+                            }
+                        });
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "state file lazy rewrap seal failed");
+                }
+            }
+        }
+        Ok(Some(opened.plaintext))
     }
     pub fn read_body_for_replay(
         &self,

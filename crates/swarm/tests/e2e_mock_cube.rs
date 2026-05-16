@@ -311,6 +311,7 @@ async fn full_walkthrough() {
         users: users_store,
         sessions: dyson_swarm::db::sqlite::session_store(pool.clone()),
         admin_audit: dyson_swarm::db::sqlite::admin_audit_store(pool.clone()),
+        secret_access_audit: dyson_swarm::db::sqlite::secret_access_audit_store(pool.clone()),
         llm_tool_calls: dyson_swarm::db::sqlite::llm_tool_call_store(pool.clone()),
         egress_sync: Arc::new(dyson_swarm::egress_policy_sync::NoopEgressPolicySync::new()),
         sandbox_domain: "cube.test".into(),

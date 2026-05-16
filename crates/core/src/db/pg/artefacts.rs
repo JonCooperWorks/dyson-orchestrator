@@ -44,6 +44,15 @@ impl ArtefactCacheStore for PgArtefactStore {
         update_body(&self.pool, id, bytes, mime, body_ciphertext).await
     }
 
+    async fn rewrap_body(
+        &self,
+        id: i64,
+        previous_body_ciphertext: &[u8],
+        body_ciphertext: &[u8],
+    ) -> Result<bool, StoreError> {
+        rewrap_body(&self.pool, id, previous_body_ciphertext, body_ciphertext).await
+    }
+
     async fn find(
         &self,
         instance_id: &str,
@@ -170,6 +179,27 @@ pub async fn update_body(
     .await
     .map_err(map_sqlx)?;
     Ok(())
+}
+
+pub async fn rewrap_body(
+    pool: &PgPool,
+    id: i64,
+    previous_body_ciphertext: &[u8],
+    body_ciphertext: &[u8],
+) -> Result<bool, StoreError> {
+    let res = sqlx::query(
+        "UPDATE artefact_cache \
+         SET body_ciphertext = $1, cached_at = $2 \
+         WHERE id = $3 AND body_ciphertext = $4",
+    )
+    .bind(body_ciphertext)
+    .bind(now_secs())
+    .bind(id)
+    .bind(previous_body_ciphertext)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(res.rows_affected() > 0)
 }
 
 /// Fetch a single cached artefact by identity tuple.

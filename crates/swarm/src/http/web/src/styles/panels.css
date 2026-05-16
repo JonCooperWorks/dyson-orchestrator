@@ -247,6 +247,30 @@
   border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
 }
 
+.admin-kms-audit-panel {
+  overflow: hidden;
+}
+
+.admin-kms-audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+
+.admin-kms-audit-filters input,
+.admin-kms-audit-filters select {
+  min-width: 150px;
+}
+
+.admin-kms-audit-table {
+  min-width: 1180px;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
 @media (max-width: 620px) {
   .admin-pane {
     padding: 12px;

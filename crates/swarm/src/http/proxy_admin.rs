@@ -211,6 +211,7 @@ mod tests {
             users: users_store,
             sessions: crate::db::sqlite::session_store(pool.clone()),
             admin_audit: crate::db::sqlite::admin_audit_store(pool.clone()),
+            secret_access_audit: crate::db::sqlite::secret_access_audit_store(pool.clone()),
             llm_tool_calls: crate::db::sqlite::llm_tool_call_store(pool.clone()),
             egress_sync: Arc::new(crate::egress_policy_sync::NoopEgressPolicySync::new()),
             prober: Arc::new(StubProber),

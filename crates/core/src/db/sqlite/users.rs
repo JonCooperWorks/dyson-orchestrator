@@ -58,7 +58,7 @@ use uuid::Uuid;
 use crate::db::sqlite::map_sqlx;
 use crate::envelope::{
     AgeCipher, CipherDirectory, EnvelopeCipher, KmsContext, KmsScope, SecretAccessReason,
-    open_context, seal_context_as_string,
+    open_context, rewrap_context_as_string, seal_context_as_string,
 };
 use crate::error::StoreError;
 use crate::now_secs;
@@ -187,6 +187,42 @@ impl SqlxUserStore {
     pub fn new(pool: SqlitePool, ciphers: Arc<dyn CipherDirectory>) -> Self {
         Self { pool, ciphers }
     }
+
+    async fn rewrap_api_key_if_needed(
+        &self,
+        user_id: &str,
+        key_id: &str,
+        previous_ciphertext: &str,
+        opened: &ApiKeyOpen,
+    ) -> Result<(), StoreError> {
+        if !opened.needs_rewrap {
+            return Ok(());
+        }
+        let context = KmsContext::user_scoped(
+            KmsScope::UserApiKey,
+            user_id.to_owned(),
+            None,
+            Some(key_id.to_owned()),
+        );
+        let next = rewrap_context_as_string(
+            self.ciphers.as_ref(),
+            &context,
+            &opened.plaintext,
+            SecretAccessReason::OperatorCli,
+        )
+        .map_err(|e| StoreError::Io(format!("rewrap api key: {e}")))?;
+        sqlx::query(
+            "UPDATE user_api_keys SET ciphertext = ? \
+             WHERE id = ? AND ciphertext = ?",
+        )
+        .bind(next)
+        .bind(key_id)
+        .bind(previous_ciphertext)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
 }
 
 /// Generate a fresh random api-key token: `dy_<32 hex>`.  Uses the
@@ -240,13 +276,19 @@ fn ct_eq(a: &str, b: &str) -> bool {
 /// load the cipher, decrypt, or interpret as UTF-8 is treated as a
 /// non-match — a row whose key file is missing (orphaned by a
 /// `forget_user`) shouldn't error a token lookup.
-fn ciphertext_matches_token(
+struct ApiKeyOpen {
+    matches: bool,
+    needs_rewrap: bool,
+    plaintext: Vec<u8>,
+}
+
+fn open_api_key_for_match(
     ciphers: &dyn CipherDirectory,
     user_id: &str,
     key_id: &str,
     ciphertext: &str,
     token: &str,
-) -> bool {
+) -> Option<ApiKeyOpen> {
     let context = KmsContext::user_scoped(
         KmsScope::UserApiKey,
         user_id.to_owned(),
@@ -259,12 +301,16 @@ fn ciphertext_matches_token(
         ciphertext.as_bytes(),
         SecretAccessReason::OperatorCli,
     ) else {
-        return false;
+        return None;
     };
     let Ok(plaintext_str) = std::str::from_utf8(&opened.plaintext) else {
-        return false;
+        return None;
     };
-    ct_eq(plaintext_str, token)
+    Some(ApiKeyOpen {
+        matches: ct_eq(plaintext_str, token),
+        needs_rewrap: opened.needs_rewrap,
+        plaintext: opened.plaintext,
+    })
 }
 
 /// Constant-cost dummy decrypt for the no-prefix-match path (B6).
@@ -477,7 +523,14 @@ impl UserStore for SqlxUserStore {
             let user_id: String = r.get("user_id");
             let id: String = r.get("id");
             let ciphertext: String = r.get("ciphertext");
-            if ciphertext_matches_token(&*self.ciphers, &user_id, &id, &ciphertext, token) {
+            let Some(opened) =
+                open_api_key_for_match(&*self.ciphers, &user_id, &id, &ciphertext, token)
+            else {
+                continue;
+            };
+            if opened.matches {
+                self.rewrap_api_key_if_needed(&user_id, &id, &ciphertext, &opened)
+                    .await?;
                 return Ok(Some(UserApiKey {
                     token: token.to_owned(),
                     user_id,
@@ -521,7 +574,12 @@ impl UserStore for SqlxUserStore {
             let user_id: String = r.get("user_id");
             let ciphertext: String = r.get("ciphertext");
             let id: String = r.get("id");
-            if !ciphertext_matches_token(&*self.ciphers, &user_id, &id, &ciphertext, token) {
+            let Some(opened) =
+                open_api_key_for_match(&*self.ciphers, &user_id, &id, &ciphertext, token)
+            else {
+                continue;
+            };
+            if !opened.matches {
                 continue;
             }
             let upd = sqlx::query(
@@ -708,6 +766,40 @@ mod tests {
         // Revoking an already-revoked token returns NotFound.
         let err = store.revoke_api_key(&tok).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn api_key_resolve_lazy_rewraps_legacy_ciphertext() {
+        let pool = open_in_memory().await.unwrap();
+        let (_tmp, store) = build_store()(pool.clone());
+        let alice = fixed_id(0xa9);
+        store.create(sample(&alice, "alice")).await.unwrap();
+        let token = "dy_0123456789abcdef0123456789abcdef";
+        let key_id = "legacy-key-1";
+        let cipher = store.ciphers.for_user(&alice).unwrap();
+        let legacy = String::from_utf8(cipher.seal(token.as_bytes()).unwrap()).unwrap();
+        sqlx::query(
+            "INSERT INTO user_api_keys (id, user_id, prefix, ciphertext, label, created_at, revoked_at) \
+             VALUES (?, ?, ?, ?, NULL, 0, NULL)",
+        )
+        .bind(key_id)
+        .bind(&alice)
+        .bind(lookup_prefix(token).unwrap())
+        .bind(&legacy)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = store.resolve_api_key(token).await.unwrap().unwrap();
+        assert_eq!(resolved.user_id, alice);
+        let stored: String =
+            sqlx::query_scalar("SELECT ciphertext FROM user_api_keys WHERE id = ?")
+                .bind(key_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(stored, legacy);
+        assert!(crate::envelope::is_v2_envelope(stored.as_bytes()));
     }
 
     #[tokio::test]

@@ -46,6 +46,8 @@ describe('AdminView Docker MCP catalog', () => {
       .toHaveAttribute('href', '#/admin/users');
     expect(screen.getByRole('link', { name: /Proxy tokens/ }))
       .toHaveAttribute('href', '#/admin/proxy-tokens');
+    expect(screen.getByRole('link', { name: /KMS audit/ }))
+      .toHaveAttribute('href', '#/admin/kms-audit');
     await waitFor(() => expect(client.adminListMcpDockerCatalog).toHaveBeenCalled());
     expect(client.adminListSkillMarketplaces).toHaveBeenCalled();
     expect(client.listMarketplaceSkills).toHaveBeenCalled();
@@ -78,6 +80,45 @@ describe('AdminView Docker MCP catalog', () => {
 
     expect(await screen.findByRole('heading', { name: 'Proxy tokens' })).toBeInTheDocument();
     expect(screen.getByLabelText('proxy token')).toBeInTheDocument();
+  });
+
+  test('KMS audit section paginates without showing secret material', async () => {
+    const client = {
+      adminListUsers: vi.fn().mockResolvedValue([]),
+      adminListKmsAudit: vi.fn()
+        .mockResolvedValueOnce({
+          items: [{
+            timestamp: 1_700_000_000,
+            actor_kind: 'runtime',
+            actor_id: 'inst-1',
+            reason: 'LlmProviderProxy',
+            operation: 'decrypt',
+            scope: 'runtime_token',
+            owner_id: null,
+            instance_id: 'inst-1',
+            secret_name: 'proxy_token:*',
+            key_id: 'system/provider',
+            key_version: 1,
+            result: 'success',
+            error_class: null,
+            error_message: null,
+          }],
+          next_offset: 50,
+        })
+        .mockResolvedValueOnce({ items: [], next_offset: null }),
+    };
+
+    render(
+      <ApiProvider client={client} auth={{ mode: 'none' }}>
+        <AdminView view={{ name: 'admin-kms-audit' }}/>
+      </ApiProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'KMS audit' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText('runtime_token').length).toBeGreaterThan(0));
+    expect(screen.queryByText(/ciphertext/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'next' }));
+    await waitFor(() => expect(client.adminListKmsAudit).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50, limit: 50 })));
   });
 
   test('configured DB-backed skill marketplace sources still render and link to edit pages', async () => {

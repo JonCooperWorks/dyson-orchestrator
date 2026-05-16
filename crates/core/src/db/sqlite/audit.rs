@@ -20,10 +20,12 @@ use async_trait::async_trait;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::db::sqlite::map_sqlx;
+use crate::envelope::{KmsScope, SecretAccessOperation, SecretAccessReason, SecretAccessResult};
 use crate::error::StoreError;
 use crate::traits::{
     AdminAuditEntry, AdminAuditStore, AuditEntry, AuditStore, LlmToolCallEntry, LlmToolCallFilters,
     LlmToolCallRow, LlmToolCallStatusFilter, LlmToolCallStore, McpAuditEntry, McpAuditStore,
+    SecretAccessAuditEntry, SecretAccessAuditFilter, SecretAccessAuditPage, SecretAccessAuditStore,
 };
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,17 @@ pub struct SqliteAdminAuditStore {
 }
 
 impl SqliteAdminAuditStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteSecretAccessAuditStore {
+    pool: SqlitePool,
+}
+
+impl SqliteSecretAccessAuditStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
@@ -208,6 +221,101 @@ impl McpAuditStore for NoopMcpAuditStore {
 }
 
 #[async_trait]
+impl SecretAccessAuditStore for SqliteSecretAccessAuditStore {
+    async fn insert(&self, entry: &SecretAccessAuditEntry) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO secret_access_audit \
+             (timestamp, actor_kind, actor_id, reason, operation, scope, owner_id, instance_id, secret_name, \
+              key_id, key_version, result, error_class, error_message) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(entry.timestamp)
+        .bind(&entry.actor_kind)
+        .bind(&entry.actor_id)
+        .bind(entry.reason.as_str())
+        .bind(entry.operation.as_str())
+        .bind(entry.scope.as_str())
+        .bind(&entry.owner_id)
+        .bind(&entry.instance_id)
+        .bind(&entry.secret_name)
+        .bind(&entry.key_id)
+        .bind(entry.key_version.map(i64::from))
+        .bind(entry.result.as_str())
+        .bind(&entry.error_class)
+        .bind(&entry.error_message)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        filter: SecretAccessAuditFilter,
+    ) -> Result<SecretAccessAuditPage, StoreError> {
+        let limit = filter.limit.clamp(1, 500);
+        let fetch_limit = limit + 1;
+        let mut q: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
+            "SELECT timestamp, actor_kind, actor_id, reason, operation, scope, owner_id, instance_id, \
+                    secret_name, key_id, key_version, result, error_class, error_message \
+             FROM secret_access_audit WHERE 1 = 1",
+        );
+        if let Some(scope) = filter.scope {
+            q.push(" AND scope = ");
+            q.push_bind(scope.as_str());
+        }
+        if let Some(owner_id) = filter.owner_id.as_deref().filter(|s| !s.is_empty()) {
+            q.push(" AND owner_id = ");
+            q.push_bind(owner_id);
+        }
+        if let Some(instance_id) = filter.instance_id.as_deref().filter(|s| !s.is_empty()) {
+            q.push(" AND instance_id = ");
+            q.push_bind(instance_id);
+        }
+        if let Some(secret_name) = filter.secret_name.as_deref().filter(|s| !s.is_empty()) {
+            q.push(" AND secret_name = ");
+            q.push_bind(secret_name);
+        }
+        if let Some(operation) = filter.operation {
+            q.push(" AND operation = ");
+            q.push_bind(operation.as_str());
+        }
+        if let Some(result) = filter.result {
+            q.push(" AND result = ");
+            q.push_bind(result.as_str());
+        }
+        if let Some(reason) = filter.reason {
+            q.push(" AND reason = ");
+            q.push_bind(reason.as_str());
+        }
+        if let Some(since) = filter.since {
+            q.push(" AND timestamp >= ");
+            q.push_bind(since);
+        }
+        if let Some(until) = filter.until {
+            q.push(" AND timestamp <= ");
+            q.push_bind(until);
+        }
+        q.push(" ORDER BY timestamp DESC LIMIT ");
+        q.push_bind(i64::from(fetch_limit));
+        q.push(" OFFSET ");
+        q.push_bind(i64::from(filter.offset));
+
+        let rows = q.build().fetch_all(&self.pool).await.map_err(map_sqlx)?;
+        let has_next = rows.len() > limit as usize;
+        let items = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(row_to_secret_access)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SecretAccessAuditPage {
+            items,
+            next_offset: has_next.then_some(filter.offset + limit),
+        })
+    }
+}
+
+#[async_trait]
 impl LlmToolCallStore for SqliteLlmToolCallStore {
     async fn insert_call(&self, entry: &LlmToolCallEntry) -> Result<i64, StoreError> {
         let row = sqlx::query(
@@ -338,6 +446,46 @@ impl LlmToolCallStore for SqliteLlmToolCallStore {
         .map_err(map_sqlx)?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn rewrap_input(
+        &self,
+        id: i64,
+        previous_input_sealed: &[u8],
+        input_sealed: &[u8],
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE llm_tool_call \
+             SET input_sealed = ? \
+             WHERE id = ? AND input_sealed = ?",
+        )
+        .bind(input_sealed)
+        .bind(id)
+        .bind(previous_input_sealed)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn rewrap_result(
+        &self,
+        id: i64,
+        previous_result_sealed: &[u8],
+        result_sealed: &[u8],
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE llm_tool_call \
+             SET result_sealed = ? \
+             WHERE id = ? AND result_sealed = ?",
+        )
+        .bind(result_sealed)
+        .bind(id)
+        .bind(previous_result_sealed)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 fn tool_call_select_builder<'a>() -> QueryBuilder<'a, Sqlite> {
@@ -396,6 +544,37 @@ fn row_to_tool_call(row: &sqlx::sqlite::SqliteRow) -> Result<LlmToolCallRow, Sto
         mcp_audit_id: row.try_get("mcp_audit_id").map_err(map_sqlx)?,
         mcp_status: row.try_get("mcp_status").map_err(map_sqlx)?,
         mcp_duration_ms: row.try_get("mcp_duration_ms").map_err(map_sqlx)?,
+    })
+}
+
+fn row_to_secret_access(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<SecretAccessAuditEntry, StoreError> {
+    let reason: String = row.try_get("reason").map_err(map_sqlx)?;
+    let operation: String = row.try_get("operation").map_err(map_sqlx)?;
+    let scope: String = row.try_get("scope").map_err(map_sqlx)?;
+    let result: String = row.try_get("result").map_err(map_sqlx)?;
+    let key_version: Option<i64> = row.try_get("key_version").map_err(map_sqlx)?;
+    Ok(SecretAccessAuditEntry {
+        timestamp: row.try_get("timestamp").map_err(map_sqlx)?,
+        actor_kind: row.try_get("actor_kind").map_err(map_sqlx)?,
+        actor_id: row.try_get("actor_id").map_err(map_sqlx)?,
+        reason: SecretAccessReason::parse(&reason)
+            .ok_or_else(|| StoreError::Malformed(format!("unknown kms audit reason {reason:?}")))?,
+        operation: SecretAccessOperation::parse(&operation).ok_or_else(|| {
+            StoreError::Malformed(format!("unknown kms audit operation {operation:?}"))
+        })?,
+        scope: KmsScope::parse(&scope)
+            .ok_or_else(|| StoreError::Malformed(format!("unknown kms audit scope {scope:?}")))?,
+        owner_id: row.try_get("owner_id").map_err(map_sqlx)?,
+        instance_id: row.try_get("instance_id").map_err(map_sqlx)?,
+        secret_name: row.try_get("secret_name").map_err(map_sqlx)?,
+        key_id: row.try_get("key_id").map_err(map_sqlx)?,
+        key_version: key_version.and_then(|v| u32::try_from(v).ok()),
+        result: SecretAccessResult::parse(&result)
+            .ok_or_else(|| StoreError::Malformed(format!("unknown kms audit result {result:?}")))?,
+        error_class: row.try_get("error_class").map_err(map_sqlx)?,
+        error_message: row.try_get("error_message").map_err(map_sqlx)?,
     })
 }
 
@@ -898,5 +1077,48 @@ mod tests {
         assert_eq!(rows[0].mcp_audit_id, Some(mcp_id));
         assert_eq!(rows[0].mcp_status, Some(200));
         assert_eq!(rows[0].mcp_duration_ms, Some(42));
+    }
+
+    #[tokio::test]
+    async fn secret_access_audit_lists_newest_first_and_filters() {
+        let pool = open_in_memory().await.unwrap();
+        let store = SqliteSecretAccessAuditStore::new(pool);
+        let first = SecretAccessAuditEntry {
+            timestamp: 10,
+            actor_kind: "runtime".into(),
+            actor_id: Some("inst-a".into()),
+            reason: SecretAccessReason::LlmProviderProxy,
+            operation: SecretAccessOperation::Decrypt,
+            scope: KmsScope::RuntimeToken,
+            owner_id: None,
+            instance_id: Some("inst-a".into()),
+            secret_name: Some("proxy_token:*".into()),
+            key_id: Some("system/provider".into()),
+            key_version: Some(1),
+            result: SecretAccessResult::Success,
+            error_class: None,
+            error_message: None,
+        };
+        let second = SecretAccessAuditEntry {
+            timestamp: 20,
+            result: SecretAccessResult::Failure,
+            error_class: Some("EnvelopeError".into()),
+            error_message: Some("redacted".into()),
+            ..first.clone()
+        };
+        store.insert(&first).await.unwrap();
+        store.insert(&second).await.unwrap();
+
+        let page = store
+            .list(SecretAccessAuditFilter {
+                scope: Some(KmsScope::RuntimeToken),
+                limit: 1,
+                offset: 0,
+                ..SecretAccessAuditFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.items, vec![second]);
+        assert_eq!(page.next_offset, Some(1));
     }
 }

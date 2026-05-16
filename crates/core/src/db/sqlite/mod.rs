@@ -19,8 +19,9 @@ use crate::error::StoreError;
 use crate::traits::{
     AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
     InstanceChannelStore, InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore,
-    PolicyStore, SessionStore, ShareStore, SkillMarketplaceSourceStore, SnapshotStore,
-    StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore, WebhookStore,
+    PolicyStore, SecretAccessAuditStore, SessionStore, ShareStore, SkillMarketplaceSourceStore,
+    SnapshotStore, StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
+    WebhookStore,
 };
 
 pub mod agent_skill_publications;
@@ -116,8 +117,11 @@ pub fn token_store(
     cipher: Arc<dyn EnvelopeCipher>,
     ciphers: Arc<dyn CipherDirectory>,
 ) -> Arc<dyn TokenStore> {
-    Arc::new(tokens::SqlxTokenStore::new_with_ciphers(
-        pool, cipher, ciphers,
+    Arc::new(tokens::SqlxTokenStore::new_with_kms(
+        pool.clone(),
+        cipher,
+        ciphers,
+        secret_access_audit_store(pool),
     ))
 }
 
@@ -155,6 +159,10 @@ pub fn llm_tool_call_store(pool: SqlitePool) -> Arc<dyn LlmToolCallStore> {
 
 pub fn admin_audit_store(pool: SqlitePool) -> Arc<dyn AdminAuditStore> {
     Arc::new(audit::SqliteAdminAuditStore::new(pool))
+}
+
+pub fn secret_access_audit_store(pool: SqlitePool) -> Arc<dyn SecretAccessAuditStore> {
+    Arc::new(audit::SqliteSecretAccessAuditStore::new(pool))
 }
 
 pub fn session_store(pool: SqlitePool) -> Arc<dyn SessionStore> {

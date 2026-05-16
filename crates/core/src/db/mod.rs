@@ -14,8 +14,9 @@ use crate::error::StoreError;
 use crate::traits::{
     AdminAuditStore, AgentSkillPublicationStore, ArtefactCacheStore, AuditStore, DeliveryStore,
     InstanceChannelStore, InstanceStore, LlmToolCallStore, McpAuditStore, McpDockerCatalogStore,
-    PolicyStore, SessionStore, ShareStore, SkillMarketplaceSourceStore, SnapshotStore,
-    StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore, WebhookStore,
+    PolicyStore, SecretAccessAuditStore, SessionStore, ShareStore, SkillMarketplaceSourceStore,
+    SnapshotStore, StateFileStore, SystemSecretStore, TokenStore, UserSecretStore, UserStore,
+    WebhookStore,
 };
 
 #[cfg(feature = "postgres")]
@@ -56,6 +57,7 @@ pub struct BackendStores {
     pub mcp_audit: Arc<dyn McpAuditStore>,
     pub llm_tool_calls: Arc<dyn LlmToolCallStore>,
     pub admin_audit: Arc<dyn AdminAuditStore>,
+    pub secret_access_audit: Arc<dyn SecretAccessAuditStore>,
     pub sessions: Arc<dyn SessionStore>,
     pub state_files: Arc<dyn StateFileStore>,
     pub shares: Arc<dyn ShareStore>,
@@ -87,6 +89,7 @@ impl BackendStores {
             mcp_audit: sqlite::mcp_audit_store(pool.clone()),
             llm_tool_calls: sqlite::llm_tool_call_store(pool.clone()),
             admin_audit: sqlite::admin_audit_store(pool.clone()),
+            secret_access_audit: sqlite::secret_access_audit_store(pool.clone()),
             sessions: sqlite::session_store(pool.clone()),
             state_files: sqlite::state_file_store(pool.clone()),
             shares: sqlite::share_store(pool.clone()),
@@ -108,11 +111,17 @@ impl BackendStores {
         Self {
             artefacts: Arc::new(pg::artefacts::PgArtefactStore::new(pool.clone())),
             channels: Arc::new(pg::channels::PgInstanceChannelStore::new(pool.clone())),
-            instances: Arc::new(pg::instances::PgInstanceStore::new(
+            instances: Arc::new(pg::instances::PgInstanceStore::new_with_ciphers(
                 pool.clone(),
                 system_cipher.clone(),
+                ciphers.clone(),
             )),
-            tokens: Arc::new(pg::tokens::PgTokenStore::new(pool.clone(), system_cipher)),
+            tokens: Arc::new(pg::tokens::PgTokenStore::new_with_kms(
+                pool.clone(),
+                system_cipher,
+                ciphers.clone(),
+                Arc::new(pg::audit::PgSecretAccessAuditStore::new(pool.clone())),
+            )),
             user_secrets: Arc::new(pg::secrets::PgUserSecretStore::new(pool.clone())),
             system_secrets: Arc::new(pg::secrets::PgSystemSecretStore::new(pool.clone())),
             users: Arc::new(pg::users::PgUserStore::new(pool.clone(), ciphers)),
@@ -122,6 +131,7 @@ impl BackendStores {
             mcp_audit: Arc::new(pg::audit::PgMcpAuditStore::new(pool.clone())),
             llm_tool_calls: Arc::new(pg::audit::PgLlmToolCallStore::new(pool.clone())),
             admin_audit: Arc::new(pg::audit::PgAdminAuditStore::new(pool.clone())),
+            secret_access_audit: Arc::new(pg::audit::PgSecretAccessAuditStore::new(pool.clone())),
             sessions: Arc::new(pg::sessions::PgSessionStore::new(pool.clone())),
             state_files: Arc::new(pg::state_files::PgStateFileStore::new(pool.clone())),
             shares: Arc::new(pg::shares::PgShareStore::new(pool.clone())),

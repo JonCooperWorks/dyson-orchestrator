@@ -101,6 +101,22 @@ impl KmsScope {
             Self::LlmToolCall => "llm_tool_call",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "system_secret" => Some(Self::SystemSecret),
+            "system_configure" => Some(Self::SystemConfigure),
+            "user_secret" => Some(Self::UserSecret),
+            "user_api_key" => Some(Self::UserApiKey),
+            "user_profile" => Some(Self::UserProfile),
+            "runtime_token" => Some(Self::RuntimeToken),
+            "state_file" => Some(Self::StateFile),
+            "artefact" => Some(Self::Artefact),
+            "webhook_delivery" => Some(Self::WebhookDelivery),
+            "llm_tool_call" => Some(Self::LlmToolCall),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for KmsScope {
@@ -139,6 +155,22 @@ impl SecretAccessReason {
             Self::Test => "Test",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "LlmProviderProxy" => Some(Self::LlmProviderProxy),
+            "McpProxyForward" => Some(Self::McpProxyForward),
+            "McpOAuthRefresh" => Some(Self::McpOAuthRefresh),
+            "RuntimeConfigurePush" => Some(Self::RuntimeConfigurePush),
+            "SystemSecretBootstrap" => Some(Self::SystemSecretBootstrap),
+            "OperatorCli" => Some(Self::OperatorCli),
+            "StateReplay" => Some(Self::StateReplay),
+            "ArtefactRead" => Some(Self::ArtefactRead),
+            "Migration" => Some(Self::Migration),
+            "Test" => Some(Self::Test),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for SecretAccessReason {
@@ -167,6 +199,17 @@ impl SecretAccessOperation {
             Self::Delete => "delete",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "encrypt" => Some(Self::Encrypt),
+            "decrypt" => Some(Self::Decrypt),
+            "rewrap" => Some(Self::Rewrap),
+            "rotate" => Some(Self::Rotate),
+            "delete" => Some(Self::Delete),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +224,14 @@ impl SecretAccessResult {
         match self {
             Self::Success => "success",
             Self::Failure => "failure",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "success" => Some(Self::Success),
+            "failure" => Some(Self::Failure),
+            _ => None,
         }
     }
 }

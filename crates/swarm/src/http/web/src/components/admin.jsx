@@ -52,6 +52,12 @@ const ADMIN_SECTIONS = [
     label: 'Proxy tokens',
     summary: 'Emergency revocation',
   },
+  {
+    key: 'kms-audit',
+    href: '#/admin/kms-audit',
+    label: 'KMS audit',
+    summary: 'Secret access events',
+  },
 ];
 
 export function AdminView({ view = { name: 'admin' } }) {
@@ -125,6 +131,13 @@ export function AdminView({ view = { name: 'admin' } }) {
     return (
       <AdminSectionPage active="proxy-tokens">
         <ProxyTokensPanel client={client}/>
+      </AdminSectionPage>
+    );
+  }
+  if (view.name === 'admin-kms-audit') {
+    return (
+      <AdminSectionPage active="kms-audit">
+        <KmsAuditPanel client={client}/>
       </AdminSectionPage>
     );
   }
@@ -288,6 +301,8 @@ function overviewMetrics(key, overview) {
       ];
     case 'proxy-tokens':
       return [{ label: 'mode', value: 'revoke' }];
+    case 'kms-audit':
+      return [{ label: 'events', value: 'paged' }];
     default:
       return [];
   }
@@ -1739,6 +1754,153 @@ function MintedKeyBanner({ forUser, token, onDismiss }) {
 }
 
 // ─── Proxy tokens panel (revoke-by-paste) ──────────────────────
+
+function KmsAuditPanel({ client }) {
+  const [filters, setFilters] = React.useState({
+    scope: '',
+    reason: '',
+    operation: '',
+    result: '',
+    owner_id: '',
+    instance_id: '',
+    secret_name: '',
+  });
+  const [offset, setOffset] = React.useState(0);
+  const [page, setPage] = React.useState({ state: 'loading', items: [], next_offset: null });
+  const limit = 50;
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setPage(prev => ({ ...prev, state: 'loading' }));
+    client.adminListKmsAudit({ ...filters, limit, offset })
+      .then(body => {
+        if (cancelled) return;
+        setPage({
+          state: 'ready',
+          items: body?.items || [],
+          next_offset: body?.next_offset ?? null,
+        });
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setPage({ state: 'error', items: [], next_offset: null, message: error?.detail || error?.message || 'failed to load audit events' });
+      });
+    return () => { cancelled = true; };
+  }, [client, filters, offset]);
+
+  const updateFilter = (key, value) => {
+    setOffset(0);
+    setFilters(f => ({ ...f, [key]: value }));
+  };
+
+  return (
+    <section className="panel admin-kms-audit-panel">
+      <div className="panel-header">
+        <div className="panel-title">KMS audit events</div>
+        <div className="panel-actions">
+          <button className="btn btn-sm" type="button" onClick={() => setOffset(0)}>refresh</button>
+        </div>
+      </div>
+      <div className="admin-kms-audit-filters">
+        <select value={filters.scope} onChange={e => updateFilter('scope', e.target.value)} aria-label="scope">
+          <option value="">all scopes</option>
+          <option value="system_secret">system_secret</option>
+          <option value="system_configure">system_configure</option>
+          <option value="user_secret">user_secret</option>
+          <option value="user_api_key">user_api_key</option>
+          <option value="user_profile">user_profile</option>
+          <option value="runtime_token">runtime_token</option>
+          <option value="state_file">state_file</option>
+          <option value="artefact">artefact</option>
+          <option value="webhook_delivery">webhook_delivery</option>
+          <option value="llm_tool_call">llm_tool_call</option>
+        </select>
+        <select value={filters.operation} onChange={e => updateFilter('operation', e.target.value)} aria-label="operation">
+          <option value="">all operations</option>
+          <option value="encrypt">encrypt</option>
+          <option value="decrypt">decrypt</option>
+          <option value="rewrap">rewrap</option>
+          <option value="rotate">rotate</option>
+          <option value="delete">delete</option>
+        </select>
+        <select value={filters.result} onChange={e => updateFilter('result', e.target.value)} aria-label="result">
+          <option value="">all results</option>
+          <option value="success">success</option>
+          <option value="failure">failure</option>
+        </select>
+        <select value={filters.reason} onChange={e => updateFilter('reason', e.target.value)} aria-label="reason">
+          <option value="">all reasons</option>
+          {[
+            'LlmProviderProxy',
+            'McpProxyForward',
+            'McpOAuthRefresh',
+            'RuntimeConfigurePush',
+            'SystemSecretBootstrap',
+            'OperatorCli',
+            'StateReplay',
+            'ArtefactRead',
+            'Migration',
+            'Test',
+          ].map(reason => <option key={reason} value={reason}>{reason}</option>)}
+        </select>
+        <input value={filters.owner_id} onChange={e => updateFilter('owner_id', e.target.value)} placeholder="owner_id"/>
+        <input value={filters.instance_id} onChange={e => updateFilter('instance_id', e.target.value)} placeholder="instance_id"/>
+        <input value={filters.secret_name} onChange={e => updateFilter('secret_name', e.target.value)} placeholder="secret_name"/>
+      </div>
+      {page.state === 'loading' ? <p className="muted small">loading audit events...</p> : null}
+      {page.state === 'error' ? <div className="error">{page.message}</div> : null}
+      {page.state === 'ready' && page.items.length === 0 ? (
+        <p className="muted small">no audit events</p>
+      ) : null}
+      {page.items.length > 0 ? (
+        <div className="table-scroll">
+          <table className="rows admin-kms-audit-table">
+            <thead>
+              <tr>
+                <th>timestamp</th>
+                <th>actor</th>
+                <th>reason</th>
+                <th>operation</th>
+                <th>scope</th>
+                <th>owner</th>
+                <th>instance</th>
+                <th>secret</th>
+                <th>key</th>
+                <th>result</th>
+                <th>error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {page.items.map((row, idx) => (
+                <tr key={`${row.timestamp}-${idx}`}>
+                  <td>{fmtTime(row.timestamp)}</td>
+                  <td>{row.actor_kind}{row.actor_id ? ` / ${row.actor_id}` : ''}</td>
+                  <td>{row.reason}</td>
+                  <td>{row.operation}</td>
+                  <td>{row.scope}</td>
+                  <td>{row.owner_id || '—'}</td>
+                  <td>{row.instance_id || '—'}</td>
+                  <td>{row.secret_name || '—'}</td>
+                  <td>{row.key_id ? `${row.key_id} v${row.key_version ?? '?'}` : '—'}</td>
+                  <td>{row.result}</td>
+                  <td>{row.error_class ? `${row.error_class}: ${row.error_message || ''}` : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      <div className="modal-actions">
+        <button className="btn btn-sm" type="button" disabled={offset === 0 || page.state === 'loading'} onClick={() => setOffset(Math.max(0, offset - limit))}>
+          previous
+        </button>
+        <button className="btn btn-sm" type="button" disabled={page.next_offset == null || page.state === 'loading'} onClick={() => setOffset(page.next_offset)}>
+          next
+        </button>
+      </div>
+    </section>
+  );
+}
 
 function ProxyTokensPanel({ client }) {
   const [token, setToken] = React.useState('');

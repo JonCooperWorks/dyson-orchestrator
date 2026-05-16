@@ -646,6 +646,18 @@ export class SwarmClient {
       { method: 'POST' },
     );
   }
+  adminListKmsAudit(params = {}) {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value !== undefined && value !== null && value !== '') {
+        qs.set(key, String(value));
+      }
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this._json(`/v1/admin/kms/audit${suffix}`, {
+      headers: { Accept: 'application/json' },
+    });
+  }
   adminListMcpDockerCatalog() {
     return this._json('/v1/admin/mcp/docker-catalog', {
       headers: { Accept: 'application/json' },

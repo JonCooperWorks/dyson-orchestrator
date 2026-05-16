@@ -174,6 +174,22 @@ describe('SwarmClient', () => {
     expect(fetchImpl.mock.calls[2][1].method).toBe('DELETE');
   });
 
+  test('admin KMS audit list passes pagination and filters', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse({ items: [], next_offset: null })));
+    const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });
+    await client.adminListKmsAudit({
+      limit: 25,
+      offset: 50,
+      scope: 'runtime_token',
+      result: 'failure',
+      owner_id: '',
+    });
+
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('/v1/admin/kms/audit?limit=25&offset=50&scope=runtime_token&result=failure');
+    expect(init.headers.get('accept')).toBe('application/json');
+  });
+
   test('artifact cache methods use the artifact-spelled API routes', async () => {
     const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse([])));
     const client = new SwarmClient({ fetch: fetchImpl, getToken: () => null });

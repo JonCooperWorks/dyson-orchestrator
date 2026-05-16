@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::envelope::{
     CipherDirectory, KmsContext, KmsScope, SecretAccessReason, is_v2_envelope, open_context,
-    seal_context,
+    rewrap_context, seal_context,
 };
 use crate::error::StoreError;
 use crate::traits::{ArtefactCacheStore, ArtefactUpsertSpec, CachedArtefact};
@@ -114,7 +114,40 @@ impl ArtefactCacheService {
             bytes,
             SecretAccessReason::ArtefactRead,
         ) {
-            Ok(opened) => Ok(Some(opened.plaintext)),
+            Ok(opened) => {
+                if opened.needs_rewrap {
+                    match rewrap_context(
+                        self.ciphers.as_ref(),
+                        &context,
+                        &opened.plaintext,
+                        SecretAccessReason::ArtefactRead,
+                    ) {
+                        Ok(next) => {
+                            let store = self.store.clone();
+                            let previous = bytes.to_vec();
+                            let id = row.id;
+                            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                handle.spawn(async move {
+                                    if let Err(err) = store.rewrap_body(id, &previous, &next).await
+                                    {
+                                        tracing::warn!(
+                                            error = %err,
+                                            "artefact cache lazy rewrap failed"
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "artefact cache lazy rewrap seal failed"
+                            );
+                        }
+                    }
+                }
+                Ok(Some(opened.plaintext))
+            }
             Err(e) => {
                 tracing::warn!(
                     artefact = %row.artefact_id,
@@ -445,6 +478,31 @@ mod tests {
         assert_eq!(plain, b"# Findings\n\n* a\n");
         // bytes column reflects PLAINTEXT length, not ciphertext.
         assert_eq!(row.bytes, 16);
+    }
+
+    #[tokio::test]
+    async fn read_body_lazy_rewraps_legacy_body() {
+        let (svc, _keys) = svc().await;
+        let row = svc
+            .ingest(meta("i", ALICE, "c", "legacy"), None)
+            .await
+            .unwrap();
+        let legacy = svc
+            .ciphers
+            .for_user(ALICE)
+            .unwrap()
+            .seal(b"legacy artefact")
+            .unwrap();
+        svc.store
+            .update_body(row.id, 15, Some("text/plain"), &legacy)
+            .await
+            .unwrap();
+        let row = svc.find("i", "c", "legacy").await.unwrap().unwrap();
+        assert_eq!(svc.read_body(&row).unwrap().unwrap(), b"legacy artefact");
+        tokio::task::yield_now().await;
+        let row = svc.find("i", "c", "legacy").await.unwrap().unwrap();
+        let stored = row.body_ciphertext.unwrap();
+        assert!(crate::envelope::is_v2_envelope(&stored));
     }
 
     #[tokio::test]

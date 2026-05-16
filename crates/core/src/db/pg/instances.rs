@@ -3,7 +3,10 @@ use sqlx::{Executor, PgPool, Postgres, Row};
 use std::sync::Arc;
 
 use crate::db::pg::map_sqlx;
-use crate::envelope::EnvelopeCipher;
+use crate::envelope::{
+    CipherDirectory, EnvelopeCipher, KmsContext, KmsScope, SecretAccessReason, open_context,
+    seal_context_as_string,
+};
 use crate::error::StoreError;
 use crate::network_policy::NetworkPolicy;
 use crate::now_secs;
@@ -49,15 +52,57 @@ fn vec_to_csv(v: &[String]) -> String {
 pub struct PgInstanceStore {
     pool: PgPool,
     cipher: Arc<dyn EnvelopeCipher>,
+    ciphers: Option<Arc<dyn CipherDirectory>>,
 }
 
 impl PgInstanceStore {
     pub fn new(pool: PgPool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
-        Self { pool, cipher }
+        Self {
+            pool,
+            cipher,
+            ciphers: None,
+        }
+    }
+
+    pub fn new_with_ciphers(
+        pool: PgPool,
+        cipher: Arc<dyn EnvelopeCipher>,
+        ciphers: Arc<dyn CipherDirectory>,
+    ) -> Self {
+        Self {
+            pool,
+            cipher,
+            ciphers: Some(ciphers),
+        }
     }
 }
 
-fn seal_bearer(cipher: &dyn EnvelopeCipher, bearer: &str) -> Result<String, StoreError> {
+fn instance_bearer_context(id: &str, owner_id: &str) -> KmsContext {
+    KmsContext {
+        scope: KmsScope::RuntimeToken,
+        owner_id: Some(owner_id.to_owned()),
+        instance_id: Some(id.to_owned()),
+        name: Some("instance_bearer".to_owned()),
+    }
+}
+
+fn seal_bearer(
+    cipher: &dyn EnvelopeCipher,
+    ciphers: Option<&dyn CipherDirectory>,
+    id: &str,
+    owner_id: &str,
+    bearer: &str,
+) -> Result<String, StoreError> {
+    if let Some(ciphers) = ciphers {
+        let context = instance_bearer_context(id, owner_id);
+        return seal_context_as_string(
+            ciphers,
+            &context,
+            bearer.as_bytes(),
+            SecretAccessReason::RuntimeConfigurePush,
+        )
+        .map_err(|e| StoreError::Io(format!("seal instance bearer: {e}")));
+    }
     let sealed = cipher
         .seal(bearer.as_bytes())
         .map_err(|e| StoreError::Io(format!("seal instance bearer: {e}")))?;
@@ -65,7 +110,25 @@ fn seal_bearer(cipher: &dyn EnvelopeCipher, bearer: &str) -> Result<String, Stor
         .map_err(|_| StoreError::Malformed("sealed instance bearer was not utf-8".into()))
 }
 
-fn open_bearer(cipher: &dyn EnvelopeCipher, stored: &str) -> Result<String, StoreError> {
+fn open_bearer(
+    cipher: &dyn EnvelopeCipher,
+    ciphers: Option<&dyn CipherDirectory>,
+    id: &str,
+    owner_id: &str,
+    stored: &str,
+) -> Result<String, StoreError> {
+    if let Some(ciphers) = ciphers {
+        let context = instance_bearer_context(id, owner_id);
+        let opened = open_context(
+            ciphers,
+            &context,
+            stored.as_bytes(),
+            SecretAccessReason::RuntimeConfigurePush,
+        )
+        .map_err(|e| StoreError::Malformed(format!("open instance bearer: {e}")))?;
+        return String::from_utf8(opened.plaintext)
+            .map_err(|_| StoreError::Malformed("instance bearer plaintext was not utf-8".into()));
+    }
     let plain = cipher
         .open(stored.as_bytes())
         .map_err(|e| StoreError::Malformed(format!("open instance bearer: {e}")))?;
@@ -76,6 +139,7 @@ fn open_bearer(cipher: &dyn EnvelopeCipher, stored: &str) -> Result<String, Stor
 fn row_to_instance(
     row: &sqlx::postgres::PgRow,
     cipher: &dyn EnvelopeCipher,
+    ciphers: Option<&dyn CipherDirectory>,
 ) -> Result<InstanceRow, StoreError> {
     let status_text: String = row.try_get("status").map_err(map_sqlx)?;
     let status = InstanceStatus::parse(&status_text)
@@ -99,9 +163,11 @@ fn row_to_instance(
     let tools_json: String = row.try_get("tools").map_err(map_sqlx)?;
     let tools: Vec<String> = serde_json::from_str(&tools_json)
         .map_err(|e| StoreError::Malformed(format!("tools: {e}")))?;
+    let id: String = row.try_get("id").map_err(map_sqlx)?;
+    let owner_id: String = row.try_get("owner_id").map_err(map_sqlx)?;
     Ok(InstanceRow {
-        id: row.try_get("id").map_err(map_sqlx)?,
-        owner_id: row.try_get("owner_id").map_err(map_sqlx)?,
+        id: id.clone(),
+        owner_id: owner_id.clone(),
         name: row.try_get("name").map_err(map_sqlx)?,
         task: row.try_get("task").map_err(map_sqlx)?,
         cube_sandbox_id: row.try_get("cube_sandbox_id").map_err(map_sqlx)?,
@@ -110,6 +176,9 @@ fn row_to_instance(
         status,
         bearer_token: open_bearer(
             cipher,
+            ciphers,
+            &id,
+            &owner_id,
             &row.try_get::<String, _>("bearer_token").map_err(map_sqlx)?,
         )?,
         pinned: pinned_int != 0,
@@ -140,6 +209,7 @@ struct EncodedInstanceInsert {
 fn encode_instance_insert(
     row: &InstanceRow,
     cipher: &dyn EnvelopeCipher,
+    ciphers: Option<&dyn CipherDirectory>,
 ) -> Result<EncodedInstanceInsert, StoreError> {
     let probe_json = match &row.last_probe_status {
         Some(p) => Some(serde_json::to_string(p).map_err(|e| StoreError::Io(e.to_string()))?),
@@ -156,7 +226,7 @@ fn encode_instance_insert(
         cidrs_csv: vec_to_csv(&row.network_policy_cidrs),
         models_json,
         tools_json,
-        bearer_token: seal_bearer(cipher, &row.bearer_token)?,
+        bearer_token: seal_bearer(cipher, ciphers, &row.id, &row.owner_id, &row.bearer_token)?,
     })
 }
 
@@ -207,7 +277,7 @@ where
 #[async_trait]
 impl InstanceStore for PgInstanceStore {
     async fn create(&self, row: InstanceRow) -> Result<(), StoreError> {
-        let encoded = encode_instance_insert(&row, self.cipher.as_ref())?;
+        let encoded = encode_instance_insert(&row, self.cipher.as_ref(), self.ciphers.as_deref())?;
         insert_instance_row(&self.pool, &row, &encoded).await?;
         Ok(())
     }
@@ -217,7 +287,7 @@ impl InstanceStore for PgInstanceStore {
         row: InstanceRow,
         limit: u64,
     ) -> Result<bool, StoreError> {
-        let encoded = encode_instance_insert(&row, self.cipher.as_ref())?;
+        let encoded = encode_instance_insert(&row, self.cipher.as_ref(), self.ciphers.as_deref())?;
         let mut conn = self.pool.acquire().await.map_err(map_sqlx)?;
         sqlx::query("BEGIN")
             .execute(&mut *conn)
@@ -266,7 +336,11 @@ impl InstanceStore for PgInstanceStore {
             .await
             .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_ref())?)),
+            Some(r) => Ok(Some(row_to_instance(
+                &r,
+                self.cipher.as_ref(),
+                self.ciphers.as_deref(),
+            )?)),
             None => Ok(None),
         }
     }
@@ -286,7 +360,11 @@ impl InstanceStore for PgInstanceStore {
                 .await
                 .map_err(map_sqlx)?;
         match row {
-            Some(r) => Ok(Some(row_to_instance(&r, self.cipher.as_ref())?)),
+            Some(r) => Ok(Some(row_to_instance(
+                &r,
+                self.cipher.as_ref(),
+                self.ciphers.as_deref(),
+            )?)),
             None => Ok(None),
         }
     }
@@ -313,7 +391,7 @@ impl InstanceStore for PgInstanceStore {
         .await
         .map_err(map_sqlx)?;
         rows.iter()
-            .map(|row| row_to_instance(row, self.cipher.as_ref()))
+            .map(|row| row_to_instance(row, self.cipher.as_ref(), self.ciphers.as_deref()))
             .collect()
     }
 
@@ -555,7 +633,7 @@ impl InstanceStore for PgInstanceStore {
         .await
         .map_err(map_sqlx)?;
         rows.iter()
-            .map(|row| row_to_instance(row, self.cipher.as_ref()))
+            .map(|row| row_to_instance(row, self.cipher.as_ref(), self.ciphers.as_deref()))
             .collect()
     }
 }

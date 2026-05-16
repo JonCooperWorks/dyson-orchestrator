@@ -772,6 +772,7 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
         users: users_store,
         sessions: sessions_store,
         admin_audit: admin_audit_store,
+        secret_access_audit: stores.secret_access_audit.clone(),
         llm_tool_calls: llm_tool_calls_store,
         egress_sync,
         sandbox_domain: cfg.cube.sandbox_domain.clone(),

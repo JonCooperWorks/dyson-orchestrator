@@ -250,6 +250,7 @@ export function setMarketplaceCatalog(catalog) {
 //   #/admin/skill-marketplaces  → skill marketplace source list
 //   #/admin/users               → user management
 //   #/admin/proxy-tokens        → proxy-token revocation
+//   #/admin/kms-audit           → KMS secret access audit
 //
 // Anything else falls back to the list.  Order matters: every
 // subroute is a strict prefix of the detail pattern, so all of them
@@ -344,6 +345,9 @@ export function parseHashView() {
   }
   if (h.match(/^#\/admin\/proxy-tokens(?:[?#]|$)/)) {
     return { name: 'admin-proxy-tokens', id: null };
+  }
+  if (h.match(/^#\/admin\/kms-audit(?:[?#]|$)/)) {
+    return { name: 'admin-kms-audit', id: null };
   }
   if (h.match(/^#\/admin(?:[/?#]|$)/)) return { name: 'admin', id: null };
   if (h.startsWith('#/keys')) return { name: 'byok', id: null };

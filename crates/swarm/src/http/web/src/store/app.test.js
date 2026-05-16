@@ -109,6 +109,7 @@ describe('parseHashView', () => {
       'skill-marketplaces': 'admin-skill-marketplaces',
       users: 'admin-users',
       'proxy-tokens': 'admin-proxy-tokens',
+      'kms-audit': 'admin-kms-audit',
     };
     for (const [slug, name] of Object.entries(cases)) {
       window.location.hash = `#/admin/${slug}`;

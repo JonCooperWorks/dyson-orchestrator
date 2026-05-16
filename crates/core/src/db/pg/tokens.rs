@@ -6,23 +6,72 @@ use uuid::Uuid;
 
 use crate::db::pg::map_sqlx;
 use crate::db::{INGEST_PROVIDER, state_sync_provider, token_lookup_key};
-use crate::envelope::EnvelopeCipher;
+use crate::envelope::{
+    CipherDirectory, EnvelopeCipher, KmsContext, KmsScope, SecretAccessReason, open_context,
+    rewrap_context_as_string, seal_context_as_string,
+};
 use crate::error::StoreError;
+use crate::kms_audit::{self, KmsAuditActor, NoopSecretAccessAuditStore};
 use crate::now_secs;
-use crate::traits::{TokenRecord, TokenStore};
+use crate::traits::{SecretAccessAuditStore, TokenRecord, TokenStore};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PgTokenStore {
     pool: PgPool,
     cipher: Arc<dyn EnvelopeCipher>,
+    ciphers: Option<Arc<dyn CipherDirectory>>,
+    audit: Arc<dyn SecretAccessAuditStore>,
 }
 
 impl PgTokenStore {
     pub fn new(pool: PgPool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
-        Self { pool, cipher }
+        Self {
+            pool,
+            cipher,
+            ciphers: None,
+            audit: Arc::new(NoopSecretAccessAuditStore),
+        }
     }
 
-    fn seal_token(&self, token: &str) -> Result<String, StoreError> {
+    pub fn new_with_kms(
+        pool: PgPool,
+        cipher: Arc<dyn EnvelopeCipher>,
+        ciphers: Arc<dyn CipherDirectory>,
+        audit: Arc<dyn SecretAccessAuditStore>,
+    ) -> Self {
+        Self {
+            pool,
+            cipher,
+            ciphers: Some(ciphers),
+            audit,
+        }
+    }
+
+    fn token_context(instance_id: &str, provider: &str) -> KmsContext {
+        KmsContext {
+            scope: KmsScope::RuntimeToken,
+            owner_id: None,
+            instance_id: Some(instance_id.to_owned()),
+            name: Some(format!("proxy_token:{provider}")),
+        }
+    }
+
+    fn seal_token(
+        &self,
+        instance_id: &str,
+        provider: &str,
+        token: &str,
+    ) -> Result<String, StoreError> {
+        if let Some(ciphers) = self.ciphers.as_deref() {
+            let context = Self::token_context(instance_id, provider);
+            return seal_context_as_string(
+                ciphers,
+                &context,
+                token.as_bytes(),
+                token_reason(provider),
+            )
+            .map_err(|e| StoreError::Io(format!("seal proxy token: {e}")));
+        }
         let sealed = self
             .cipher
             .seal(token.as_bytes())
@@ -31,13 +80,146 @@ impl PgTokenStore {
             .map_err(|_| StoreError::Malformed("sealed proxy token was not utf-8".into()))
     }
 
-    fn open_token(&self, stored: &str) -> Result<String, StoreError> {
+    async fn open_token(
+        &self,
+        instance_id: &str,
+        provider: &str,
+        stored: &str,
+    ) -> Result<OpenedToken, StoreError> {
+        if let Some(ciphers) = self.ciphers.as_deref() {
+            let context = Self::token_context(instance_id, provider);
+            let reason = token_reason(provider);
+            let actor = KmsAuditActor::runtime(instance_id);
+            let opened = match open_context(ciphers, &context, stored.as_bytes(), reason) {
+                Ok(opened) => {
+                    kms_audit::best_effort_record(
+                        self.audit.as_ref(),
+                        kms_audit::success_entry(
+                            &actor,
+                            reason,
+                            crate::envelope::SecretAccessOperation::Decrypt,
+                            &context,
+                            Some(&opened),
+                        ),
+                    )
+                    .await;
+                    opened
+                }
+                Err(err) => {
+                    kms_audit::best_effort_record(
+                        self.audit.as_ref(),
+                        kms_audit::failure_entry(
+                            &actor,
+                            reason,
+                            crate::envelope::SecretAccessOperation::Decrypt,
+                            &context,
+                            "EnvelopeError",
+                            &err.to_string(),
+                        ),
+                    )
+                    .await;
+                    return Err(StoreError::Malformed(format!("open proxy token: {err}")));
+                }
+            };
+            let plaintext = String::from_utf8(opened.plaintext.clone())
+                .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))?;
+            return Ok(OpenedToken {
+                plaintext,
+                opened: Some(opened),
+            });
+        }
         let plain = self
             .cipher
             .open(stored.as_bytes())
             .map_err(|e| StoreError::Malformed(format!("open proxy token: {e}")))?;
-        String::from_utf8(plain)
-            .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))
+        let plaintext = String::from_utf8(plain)
+            .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))?;
+        Ok(OpenedToken {
+            plaintext,
+            opened: None,
+        })
+    }
+
+    async fn rewrap_token_if_needed(
+        &self,
+        instance_id: &str,
+        provider: &str,
+        stored: &str,
+        opened: &OpenedToken,
+    ) -> Result<(), StoreError> {
+        let Some(opened_meta) = opened.opened.as_ref().filter(|o| o.needs_rewrap) else {
+            return Ok(());
+        };
+        let Some(ciphers) = self.ciphers.as_deref() else {
+            return Ok(());
+        };
+        let context = Self::token_context(instance_id, provider);
+        let reason = token_reason(provider);
+        let actor = KmsAuditActor::runtime(instance_id);
+        let next = match rewrap_context_as_string(
+            ciphers,
+            &context,
+            opened.plaintext.as_bytes(),
+            reason,
+        ) {
+            Ok(next) => next,
+            Err(err) => {
+                kms_audit::best_effort_record(
+                    self.audit.as_ref(),
+                    kms_audit::failure_entry(
+                        &actor,
+                        reason,
+                        crate::envelope::SecretAccessOperation::Rewrap,
+                        &context,
+                        "EnvelopeError",
+                        &err.to_string(),
+                    ),
+                )
+                .await;
+                return Err(StoreError::Io(format!("rewrap proxy token: {err}")));
+            }
+        };
+        let result = sqlx::query(
+            "UPDATE proxy_tokens \
+             SET token = $1 \
+             WHERE instance_id = $2 AND provider = $3 AND token = $4",
+        )
+        .bind(&next)
+        .bind(instance_id)
+        .bind(provider)
+        .bind(stored)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        if result.rows_affected() > 0 {
+            kms_audit::best_effort_record(
+                self.audit.as_ref(),
+                kms_audit::success_entry(
+                    &actor,
+                    reason,
+                    crate::envelope::SecretAccessOperation::Rewrap,
+                    &context,
+                    Some(opened_meta),
+                ),
+            )
+            .await;
+        }
+        Ok(())
+    }
+}
+
+struct OpenedToken {
+    plaintext: String,
+    opened: Option<crate::envelope::OpenEnvelopeResult>,
+}
+
+fn token_reason(provider: &str) -> SecretAccessReason {
+    if provider == INGEST_PROVIDER {
+        SecretAccessReason::ArtefactRead
+    } else if provider.starts_with("state_sync:") {
+        SecretAccessReason::StateReplay
+    } else {
+        SecretAccessReason::LlmProviderProxy
     }
 }
 
@@ -53,7 +235,7 @@ impl PgTokenStore {
         provider: &str,
     ) -> Result<String, StoreError> {
         let token = format!("{prefix}{}", Uuid::new_v4().simple());
-        let stored_token = self.seal_token(&token)?;
+        let stored_token = self.seal_token(instance_id, provider, &token)?;
         let lookup = token_lookup_key(&token);
         sqlx::query(
             "INSERT INTO proxy_tokens \
@@ -138,14 +320,18 @@ impl TokenStore for PgTokenStore {
             return Ok(None);
         };
         let stored: String = row.get("token");
-        let plain = self.open_token(&stored)?;
-        if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+        let instance_id: String = row.get("instance_id");
+        let provider: String = row.get("provider");
+        let opened = self.open_token(&instance_id, &provider, &stored).await?;
+        if !bool::from(opened.plaintext.as_bytes().ct_eq(token.as_bytes())) {
             return Ok(None);
         }
+        self.rewrap_token_if_needed(&instance_id, &provider, &stored, &opened)
+            .await?;
         Ok(Some(TokenRecord {
-            token: plain,
-            instance_id: row.get("instance_id"),
-            provider: row.get("provider"),
+            token: opened.plaintext,
+            instance_id,
+            provider,
             created_at: row.get("created_at"),
             revoked_at: row.get("revoked_at"),
             expected_src_ip: row.get("expected_src_ip"),
@@ -172,7 +358,7 @@ impl TokenStore for PgTokenStore {
         // revoke is idempotent at the API boundary.
         let lookup = token_lookup_key(token);
         let row = sqlx::query(
-            "SELECT token FROM proxy_tokens WHERE token_lookup = $1 AND revoked_at IS NULL LIMIT 1",
+            "SELECT token, instance_id, provider FROM proxy_tokens WHERE token_lookup = $1 AND revoked_at IS NULL LIMIT 1",
         )
         .bind(&lookup)
         .fetch_optional(&self.pool)
@@ -182,8 +368,10 @@ impl TokenStore for PgTokenStore {
             return Ok(false);
         };
         let stored: String = row.get("token");
-        let plain = self.open_token(&stored)?;
-        if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
+        let instance_id: String = row.get("instance_id");
+        let provider: String = row.get("provider");
+        let opened = self.open_token(&instance_id, &provider, &stored).await?;
+        if !bool::from(opened.plaintext.as_bytes().ct_eq(token.as_bytes())) {
             return Ok(false);
         }
         let r = sqlx::query(
@@ -228,10 +416,13 @@ impl TokenStore for PgTokenStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        row.map(|r| {
-            let stored: String = r.get("token");
-            self.open_token(&stored)
-        })
-        .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let stored: String = row.get("token");
+        let opened = self.open_token(instance_id, provider, &stored).await?;
+        self.rewrap_token_if_needed(instance_id, provider, &stored, &opened)
+            .await?;
+        Ok(Some(opened.plaintext))
     }
 }

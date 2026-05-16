@@ -63,6 +63,15 @@ impl StateFileStore for PgStateFileStore {
     async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<StateFileRow>, StoreError> {
         list_for_instance(&self.pool, instance_id).await
     }
+
+    async fn rewrap_body(
+        &self,
+        id: i64,
+        previous_body_ciphertext: &[u8],
+        body_ciphertext: &[u8],
+    ) -> Result<bool, StoreError> {
+        rewrap_body(&self.pool, id, previous_body_ciphertext, body_ciphertext).await
+    }
 }
 
 pub async fn upsert(pool: &PgPool, spec: UpsertSpec<'_>) -> Result<StateFileRow, StoreError> {
@@ -170,6 +179,26 @@ pub async fn list_for_instance(
     .await
     .map_err(map_sqlx)?;
     Ok(rows.into_iter().map(row_to_state_file).collect())
+}
+
+pub async fn rewrap_body(
+    pool: &PgPool,
+    id: i64,
+    previous_body_ciphertext: &[u8],
+    body_ciphertext: &[u8],
+) -> Result<bool, StoreError> {
+    let res = sqlx::query(
+        "UPDATE instance_state_files \
+         SET body_ciphertext = $1 \
+         WHERE id = $2 AND body_ciphertext = $3",
+    )
+    .bind(body_ciphertext)
+    .bind(id)
+    .bind(previous_body_ciphertext)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(res.rows_affected() > 0)
 }
 
 fn row_to_state_file(row: sqlx::postgres::PgRow) -> StateFileRow {

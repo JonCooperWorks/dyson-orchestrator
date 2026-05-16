@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ProviderConfig;
+use crate::envelope::{KmsScope, SecretAccessOperation, SecretAccessReason, SecretAccessResult};
 use crate::error::{BackupError, CubeError, StoreError};
 use crate::mcp_servers::{McpDockerCatalogServer, McpDockerCatalogStatus};
 use crate::network_policy::{NetworkPolicy, ResolvedPolicy};
@@ -109,6 +110,54 @@ pub trait UserStore: Send + Sync {
     async fn mint_api_key(&self, user_id: &str, label: Option<&str>) -> Result<String, StoreError>;
     async fn resolve_api_key(&self, token: &str) -> Result<Option<UserApiKey>, StoreError>;
     async fn revoke_api_key(&self, token: &str) -> Result<(), StoreError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretAccessAuditEntry {
+    pub timestamp: i64,
+    pub actor_kind: String,
+    pub actor_id: Option<String>,
+    pub reason: SecretAccessReason,
+    pub operation: SecretAccessOperation,
+    pub scope: KmsScope,
+    pub owner_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub secret_name: Option<String>,
+    pub key_id: Option<String>,
+    pub key_version: Option<u32>,
+    pub result: SecretAccessResult,
+    pub error_class: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SecretAccessAuditFilter {
+    pub scope: Option<KmsScope>,
+    pub owner_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub secret_name: Option<String>,
+    pub operation: Option<SecretAccessOperation>,
+    pub result: Option<SecretAccessResult>,
+    pub reason: Option<SecretAccessReason>,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretAccessAuditPage {
+    pub items: Vec<SecretAccessAuditEntry>,
+    pub next_offset: Option<u32>,
+}
+
+#[async_trait]
+pub trait SecretAccessAuditStore: Send + Sync {
+    async fn insert(&self, entry: &SecretAccessAuditEntry) -> Result<(), StoreError>;
+    async fn list(
+        &self,
+        filter: SecretAccessAuditFilter,
+    ) -> Result<SecretAccessAuditPage, StoreError>;
 }
 
 #[async_trait]
@@ -1014,6 +1063,12 @@ pub trait DeliveryStore: Send + Sync {
         instance_id: &str,
         delivery_id: &str,
     ) -> Result<Option<DeliveryRow>, StoreError>;
+    async fn rewrap_body(
+        &self,
+        id: &str,
+        previous_body: &[u8],
+        body: &[u8],
+    ) -> Result<bool, StoreError>;
 }
 
 /// One cached artefact row. `body_ciphertext` is sealed under the
@@ -1057,6 +1112,12 @@ pub trait ArtefactCacheStore: Send + Sync {
         mime: Option<&str>,
         body_ciphertext: &[u8],
     ) -> Result<(), StoreError>;
+    async fn rewrap_body(
+        &self,
+        id: i64,
+        previous_body_ciphertext: &[u8],
+        body_ciphertext: &[u8],
+    ) -> Result<bool, StoreError>;
     async fn find(
         &self,
         instance_id: &str,
@@ -1143,6 +1204,12 @@ pub trait StateFileStore: Send + Sync {
         path: &str,
     ) -> Result<Option<StateFileRow>, StoreError>;
     async fn list_for_instance(&self, instance_id: &str) -> Result<Vec<StateFileRow>, StoreError>;
+    async fn rewrap_body(
+        &self,
+        id: i64,
+        previous_body_ciphertext: &[u8],
+        body_ciphertext: &[u8],
+    ) -> Result<bool, StoreError>;
 }
 
 #[derive(Debug, Clone)]
@@ -1264,6 +1331,18 @@ pub trait LlmToolCallStore: Send + Sync {
         server_name: &str,
         tool_name: &str,
         called_at: i64,
+    ) -> Result<bool, StoreError>;
+    async fn rewrap_input(
+        &self,
+        id: i64,
+        previous_input_sealed: &[u8],
+        input_sealed: &[u8],
+    ) -> Result<bool, StoreError>;
+    async fn rewrap_result(
+        &self,
+        id: i64,
+        previous_result_sealed: &[u8],
+        result_sealed: &[u8],
     ) -> Result<bool, StoreError>;
 }
 

@@ -436,6 +436,26 @@ impl DeliveryStore for PgDeliveryStore {
             })),
         }
     }
+
+    async fn rewrap_body(
+        &self,
+        id: &str,
+        previous_body: &[u8],
+        body: &[u8],
+    ) -> Result<bool, StoreError> {
+        let res = sqlx::query(
+            "UPDATE webhook_deliveries \
+             SET body = $1 \
+             WHERE id = $2 AND body = $3",
+        )
+        .bind(body)
+        .bind(id)
+        .bind(previous_body)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(res.rows_affected() > 0)
+    }
 }
 
 fn metadata_row(r: sqlx::postgres::PgRow) -> Result<DeliveryRow, StoreError> {

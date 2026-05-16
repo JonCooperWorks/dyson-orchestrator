@@ -25,6 +25,7 @@ pub mod instance_artefacts;
 pub mod instances;
 pub mod internal_ingest;
 pub mod internal_state;
+pub mod kms_audit;
 pub mod models;
 pub mod proxy_admin;
 pub mod share_public;
@@ -70,6 +71,7 @@ pub struct AppState {
     pub users: Arc<dyn crate::traits::UserStore>,
     pub sessions: Arc<dyn crate::traits::SessionStore>,
     pub admin_audit: Arc<dyn crate::traits::AdminAuditStore>,
+    pub secret_access_audit: Arc<dyn crate::traits::SecretAccessAuditStore>,
     pub llm_tool_calls: Arc<dyn crate::traits::LlmToolCallStore>,
     pub egress_sync: Arc<dyn crate::egress_policy_sync::EgressPolicySync>,
     pub sandbox_domain: String,
@@ -196,6 +198,7 @@ pub fn router(
         .merge(crate::http::admin_users::router(state.clone()))
         .merge(instances::admin_router(state.clone()))
         .merge(egress_admin::router(state.clone()))
+        .merge(kms_audit::router(state.clone()))
         .merge(skill_marketplace::admin_router(state.clone()))
         .merge(mcp_admin_router);
     let admin = if auth.dangerous_no_auth {
@@ -426,6 +429,7 @@ mod tests {
             users: users_store.clone(),
             sessions: sessions_store,
             admin_audit: crate::db::sqlite::admin_audit_store(pool.clone()),
+            secret_access_audit: crate::db::sqlite::secret_access_audit_store(pool.clone()),
             llm_tool_calls: crate::db::sqlite::llm_tool_call_store(pool.clone()),
             egress_sync: Arc::new(crate::egress_policy_sync::NoopEgressPolicySync::new()),
             sandbox_domain: "cube.test".into(),

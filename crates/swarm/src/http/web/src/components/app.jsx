@@ -77,6 +77,7 @@ export function renderView(view) {
     case 'admin-skill-marketplaces':
     case 'admin-users':
     case 'admin-proxy-tokens':
+    case 'admin-kms-audit':
     case 'admin-mcp-catalog-new':
     case 'admin-mcp-catalog-edit':
     case 'admin-skill-marketplace-new':
