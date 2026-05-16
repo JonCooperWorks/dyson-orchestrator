@@ -252,23 +252,42 @@
 }
 
 .admin-kms-audit-filters {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 8px;
   margin: 10px 0 14px;
 }
 
 .admin-kms-audit-filters input,
 .admin-kms-audit-filters select {
-  min-width: 150px;
+  width: 100%;
+  min-width: 0;
 }
 
 .admin-kms-audit-table {
-  min-width: 1180px;
+  width: max-content;
+  min-width: 1600px;
+  table-layout: auto;
+}
+
+.admin-kms-audit-table :is(th, td) {
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.admin-kms-audit-table td {
+  line-height: 1.35;
+}
+
+.admin-kms-audit-table .kms-audit-error-cell {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .table-scroll {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 @media (max-width: 620px) {

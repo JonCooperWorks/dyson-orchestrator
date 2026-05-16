@@ -31,6 +31,13 @@ describe('activity controls', () => {
   });
 });
 
+describe('admin KMS audit layout', () => {
+  test('keeps audit rows compact by scrolling horizontally instead of wrapping IDs', () => {
+    expect(panelsCss).toMatch(/\.admin-kms-audit-table\s*\{[\s\S]*width:\s*max-content;[\s\S]*min-width:\s*1600px/);
+    expect(panelsCss).toMatch(/\.admin-kms-audit-table\s+:is\(th,\s*td\)\s*\{[\s\S]*white-space:\s*nowrap;/);
+  });
+});
+
 function mobileBlock(css) {
   const match = css.match(/@media \(max-width: 760px\)\s*\{([\s\S]*?)\n\}/);
   return match?.[1] || '';

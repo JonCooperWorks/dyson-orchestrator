@@ -1873,17 +1873,17 @@ function KmsAuditPanel({ client }) {
             <tbody>
               {page.items.map((row, idx) => (
                 <tr key={`${row.timestamp}-${idx}`}>
-                  <td>{fmtTime(row.timestamp)}</td>
-                  <td>{row.actor_kind}{row.actor_id ? ` / ${row.actor_id}` : ''}</td>
-                  <td>{row.reason}</td>
-                  <td>{row.operation}</td>
-                  <td>{row.scope}</td>
-                  <td>{row.owner_id || '—'}</td>
-                  <td>{row.instance_id || '—'}</td>
-                  <td>{row.secret_name || '—'}</td>
-                  <td>{row.key_id ? `${row.key_id} v${row.key_version ?? '?'}` : '—'}</td>
-                  <td>{row.result}</td>
-                  <td>{row.error_class ? `${row.error_class}: ${row.error_message || ''}` : '—'}</td>
+                  <td data-label="timestamp">{fmtTime(row.timestamp)}</td>
+                  <td data-label="actor">{row.actor_kind}{row.actor_id ? ` / ${row.actor_id}` : ''}</td>
+                  <td data-label="reason">{row.reason}</td>
+                  <td data-label="operation">{row.operation}</td>
+                  <td data-label="scope">{row.scope}</td>
+                  <td data-label="owner">{row.owner_id || '—'}</td>
+                  <td data-label="instance">{row.instance_id || '—'}</td>
+                  <td data-label="secret">{row.secret_name || '—'}</td>
+                  <td data-label="key">{row.key_id ? `${row.key_id} v${row.key_version ?? '?'}` : '—'}</td>
+                  <td data-label="result">{row.result}</td>
+                  <td data-label="error" className="kms-audit-error-cell">{row.error_class ? `${row.error_class}: ${row.error_message || ''}` : '—'}</td>
                 </tr>
               ))}
             </tbody>
