@@ -184,9 +184,9 @@ handle and metadata, never the token.
 
 ## Operational Checks
 
-After deploy, existing live instances need to be destroyed and recreated to pick
-up the Dyson image that knows how to receive `/webhook/telegram` and use the
-proxy BotApi.
+After deploy, live instances whose Dyson image predates the Telegram proxy need
+to be rotated or recreated before they can receive `/webhook/telegram` and use
+the proxy BotApi. Current images can be reconfigured in place by Swarm.
 
 The key integrity check is a real-token log grep against the cube:
 

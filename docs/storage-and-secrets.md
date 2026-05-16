@@ -11,9 +11,9 @@ For the forensic tables and server-side decrypted Activity view, see
 
 ## Main Persistence Layers
 
-### SQLite
+### Database
 
-The SQLite database holds metadata and indexes:
+The selected database backend, SQLite or Postgres, holds metadata and indexes:
 
 - users
 - instances
@@ -23,7 +23,7 @@ The SQLite database holds metadata and indexes:
 - user policies
 - webhooks and webhook deliveries
 - share rows and share-access audit
-- artefact cache metadata
+- artefact cache metadata and sealed body bytes
 - mirrored state-file metadata
 - LLM audit rows
 - MCP audit rows
@@ -34,7 +34,6 @@ The SQLite database holds metadata and indexes:
 The backup/local cache directory holds:
 
 - snapshot bundles
-- cached artefact bodies
 - mirrored state-file bodies
 
 Bodies are encrypted before disk where the service expects secrecy.

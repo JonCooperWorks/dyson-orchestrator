@@ -12,35 +12,52 @@ rotation, and upgrade orchestration.
 ## Architecture
 
 ```mermaid
-flowchart LR
-    browser["Browser / operator SPA"] -->|"OIDC or user API key"| swarm["dyson-swarm HTTP server"]
-    cli["swarmctl"] -->|"host ops and recovery"| swarm
-    webhooks["External webhook providers"] -->|"signed callbacks"| swarm
-    shares["Public share readers"] -->|"signed share URLs"| swarm
+flowchart TB
+    browser["Browser / SPA"] -->|"OIDC PKCE, session cookie, API keys"| swarm["dyson-swarm Axum server"]
+    cli["swarmctl"] -->|"host ops, secrets, DB, KMS, mint"| swarm
+    webhook_src["Webhook providers"] -->|"signed callbacks"| webhooks["/webhooks and channel webhooks"]
+    share_users["Anonymous share readers"] -->|"signed share URLs"| share_host["share.<hostname>"]
+    dyson_users["Users opening <instance>.<hostname>"] --> dyson_proxy["host-based Dyson proxy"]
 
-    swarm --> db[("SQLite metadata")]
-    swarm --> secrets["age-encrypted secrets"]
-    swarm --> cache["Local cache"]
-    swarm --> cube["Cube sandboxes"]
+    subgraph host_control["Host Control Plane"]
+        swarm --> auth["Auth chain: opaque bearer, OIDC, admin-role gate"]
+        swarm --> db[("SQLite or Postgres stores")]
+        swarm --> keys["local age KMS keys"]
+        swarm --> cache["snapshots, artefacts, state mirror"]
+        swarm --> cube["CubeSandbox backend"]
+        swarm --> llm_proxy["/llm provider proxy"]
+        swarm --> mcp_proxy["/mcp proxy + OAuth"]
+        swarm --> mcp_runtime["dyson-mcp-runtime"]
+        swarm --> telegram_proxy["Telegram proxy"]
+        swarm --> reconfig["Dyson reconfiguration API"]
+    end
 
-    cube --> agent["dyson agent runtime"]
-    agent -->|"LLM proxy bearer"| llm["/llm proxy"]
-    agent -->|"MCP proxy bearer"| mcp["/mcp proxy"]
-    agent -->|"ingest and state tokens"| runtime["artefact ingest + state sync"]
+    cube --> agent["dyson agent in sandbox"]
+    dyson_proxy --> agent
+    reconfig -->|/api/admin/configure| agent
+    webhooks -->|"deliver task"| agent
 
-    llm --> providers["LLM providers"]
-    mcp --> upstream["Upstream MCP servers"]
+    agent -->|"pt_ runtime token"| llm_proxy
+    agent -->|"MCP bearer"| mcp_proxy
+    agent -->|"it_ artefact ingest"| cache
+    agent -->|"st_ state sync"| cache
+    agent -->|"Telegram proxy calls"| telegram_proxy
 
-    secrets -.->|"user scope"| mcp
-    secrets -.->|"user and system key sources"| llm
-    cache -.->|"snapshots, artefacts, state mirror"| swarm
+    llm_proxy --> providers["LLM providers, BYO upstreams, OpenRouter user keys"]
+    mcp_proxy --> upstream_mcp["HTTP/SSE MCP upstreams"]
+    mcp_proxy --> mcp_runtime
+    mcp_runtime --> docker_mcp["Docker/stdio MCP servers"]
+    telegram_proxy --> telegram_api["Telegram Bot API"]
+    share_host --> cache
+    share_host --> agent
+    db <--> keys
 ```
 
 ```mermaid
 sequenceDiagram
     participant User as Browser or API user
     participant Swarm as dyson-swarm
-    participant Store as SQLite and encrypted stores
+    participant Store as SQLite/Postgres, KMS keys, encrypted stores
     participant Cube as Cube sandbox
     participant Agent as dyson agent
     participant Upstream as LLM or MCP upstream
@@ -58,7 +75,7 @@ sequenceDiagram
 
 ## Workspace Layout
 
-`dyson-swarm` is a Rust workspace with four intentionally coarse crates:
+`dyson-swarm` is a Rust workspace with five intentionally coarse crates:
 
 | Crate | Binary/library | Responsibility |
 |---|---|---|
@@ -66,6 +83,7 @@ sequenceDiagram
 | `crates/swarm` | `swarm`, `dyson_swarm` | Main HTTP server, auth middleware, `/llm/*`, `/mcp/*`, host-based dispatch, and embedded SPA |
 | `crates/cli` | `swarmctl` | Host-operator commands that touch the DB or call the server API |
 | `crates/egress-proxy` | `dyson-egress-proxy` | Policy-aware HTTP/HTTPS sandbox egress proxy |
+| `crates/mcp-runtime` | `dyson-mcp-runtime` | Local Unix-socket helper for Docker/stdio and runtime-managed MCP transports |
 
 ## Documentation
 
@@ -76,14 +94,17 @@ Swarm now has a dedicated docs tree, mirroring the structure used in
 - [Architecture Overview](docs/architecture-overview.md)
 - [Configuration](docs/configuration.md)
 - [Auth and Keys](docs/auth-and-keys.md)
+- [Controllers and Channels](docs/controllers.md)
 - [Artefacts](docs/artefacts.md)
 - [Shares](docs/shares.md)
+- [Audit](docs/audit.md)
 - [LLM Proxy](docs/llm-proxy.md)
 - [Restore and Clone](docs/restore-and-clone.md)
 - [MCP and OAuth](docs/mcp-and-oauth.md)
 - [Network Policies](docs/network-policies.md)
 - [State Ownership](docs/state-ownership.md)
 - [Storage and Secrets](docs/storage-and-secrets.md)
+- [Database Backends](docs/database-backends.md)
 - [HTTP and SPA](docs/http-and-spa.md)
 - [Operations](docs/operations.md)
 - [Testing](docs/testing.md)

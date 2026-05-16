@@ -4,14 +4,31 @@ Swarm reads a single TOML file, typically
 `/etc/dyson-swarm/config.toml`. The example file in the repo is
 [config.example.toml](../config.example.toml).
 
+At startup, selected `SWARM_*` environment variables override the TOML. Common
+overrides include `SWARM_BIND`, `SWARM_DB_PATH`, `SWARM_DATABASE_BACKEND`,
+`SWARM_DATABASE_URL`, `SWARM_KEYS_DIR`, `SWARM_HOSTNAME`, `SWARM_CUBE_URL`,
+`SWARM_CUBE_API_KEY`, `SWARM_CUBE_SANDBOX_DOMAIN`, `SWARM_BYO_*`,
+`SWARM_BACKUP_S3_*`, and `SWARM_PROVIDERS_<NAME>_API_KEY` /
+`SWARM_PROVIDERS_<NAME>_UPSTREAM` for provider stanzas already declared in
+TOML.
+
 ## Required Basics
 
 - `bind`: host:port for the Axum server
-- `db_path`: SQLite database path
+- `database_backend`: `sqlite` by default; set to `postgres` for the Postgres stores
+- `db_path`: SQLite database path when `database_backend = "sqlite"`
+- `database_url`: required Postgres URL when `database_backend = "postgres"`
+- `keys_dir`: optional local age KMS key directory; defaults to a `keys/`
+  sibling of `db_path`
 - `[cube]`: Cube API URL, API key, and sandbox domain
 - `[backup]`: backup sink selection and local cache directory
 
 ## Important Optional Fields
+
+### `health_probe_interval_seconds` / `health_probe_timeout_seconds`
+
+Control the background instance health probe cadence. Defaults are 60 seconds
+between probes and a 5 second probe timeout.
 
 ### `hostname`
 
@@ -43,10 +60,21 @@ through the host’s public address cleanly.
 Default Cube template id for new hires and the reference point for startup
 binary rotation.
 
+### `default_models`
+
+Suggested model ids returned by `/auth/config` for the SPA hire form. The
+first model is pre-selected. An empty list leaves the model field free-form.
+
 ### `cube_profiles`
 
 Named Cube-template choices surfaced to the SPA. These are operator UX
 metadata around pre-registered templates.
+
+### `rotate_binary_on_startup`
+
+Opt-in startup binary rotation for live instances whose Cube template differs
+from `default_template_id`. It defaults to false and should stay off for normal
+deploys; enable it only for a deliberate binary migration.
 
 ## Auth Configuration
 
@@ -73,6 +101,20 @@ recommended source of truth for `api_key` is `system_secrets` using the name:
 `provider.<name>.api_key`
 
 The TOML value remains as a fallback for local development or unmigrated hosts.
+
+## MCP Runtime
+
+`[mcp_runtime]` enables the optional `dyson-mcp-runtime` Unix-socket helper for
+Docker/stdio MCP servers and runtime-managed streamable HTTP sessions.
+
+Fields:
+
+- `socket_path`: Unix socket path, usually `/run/dyson-mcp-runtime/runtime.sock`
+- `runtime`: Docker runtime; currently only `runsc` is accepted
+- `allow_user_docker_json`: whether users may paste arbitrary Docker stdio MCP
+  JSON. Keep this false on public nodes.
+- `[[mcp_runtime.docker_catalog]]`: operator-curated Docker MCP templates with
+  placeholder fields rendered server-side.
 
 ## OpenRouter Provisioning
 

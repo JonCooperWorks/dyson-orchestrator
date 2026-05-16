@@ -62,7 +62,8 @@ new ciphertext rows while preserving legacy age-row readability long enough to
 migrate old data.
 
 Before running a migration on a live host, stop swarm or keep write traffic
-quiet, then back up both the SQLite database and key tree:
+quiet, then back up the active database backend and key tree. For the default
+SQLite backend:
 
 ```sh
 sudo systemctl stop dyson-swarm

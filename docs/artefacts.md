@@ -7,22 +7,27 @@ Relevant code:
 
 - [artefacts.rs](../crates/core/src/artefacts.rs)
 - [db/sqlite/artefacts.rs](../crates/core/src/db/sqlite/artefacts.rs)
+- [db/pg/artefacts.rs](../crates/core/src/db/pg/artefacts.rs)
 - [instance_artefacts.rs](../crates/swarm/src/http/instance_artefacts.rs)
 - [internal_ingest.rs](../crates/swarm/src/http/internal_ingest.rs)
 - [artefacts.jsx](../crates/swarm/src/http/web/src/components/artefacts.jsx)
 
 ## What Swarm Stores
 
-Swarm splits artefact persistence into two layers:
+Swarm stores artefact metadata and sealed body bytes in `artefact_cache`:
 
-- SQLite metadata in `artefact_cache`
-- encrypted body files under `<local_cache_dir>/artefacts/`
+- metadata columns record owner, instance, chat, artefact id, kind, title,
+  mime, timestamps, and optional JSON metadata
+- `body_ciphertext` holds the sealed body bytes when the body has been cached
+- `bytes` records the plaintext size for listings and UI display
 
-That keeps large artefacts like images and PDFs out of SQLite while still
-letting the API and SPA page through metadata efficiently.
+The store has SQLite and Postgres implementations. Large artefacts are still
+bounded by the ingest/read paths; there is no separate filesystem body store in
+the current implementation.
 
 Bodies are sealed with the artefact owner's age cipher before they hit disk.
-A stolen cache directory alone is not enough to read historical artefacts.
+A database copy without the owner's KMS key is not enough to read historical
+artefacts.
 
 ## Why the Cache Exists
 
