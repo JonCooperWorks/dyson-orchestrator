@@ -15,7 +15,10 @@
 
 use std::sync::Arc;
 
-use crate::envelope::CipherDirectory;
+use crate::envelope::{
+    CipherDirectory, KmsContext, KmsScope, SecretAccessReason, is_v2_envelope, open_context,
+    seal_context,
+};
 use crate::error::StoreError;
 use crate::traits::{ArtefactCacheStore, ArtefactUpsertSpec, CachedArtefact};
 use crate::webhooks::AGE_ARMOR_PREFIX;
@@ -96,7 +99,7 @@ impl ArtefactCacheService {
         if bytes.is_empty() {
             return Ok(Some(Vec::new()));
         }
-        if !bytes.starts_with(AGE_ARMOR_PREFIX) {
+        if !bytes.starts_with(AGE_ARMOR_PREFIX) && !is_v2_envelope(bytes) {
             tracing::warn!(
                 artefact = %row.artefact_id,
                 owner = %row.owner_id,
@@ -104,20 +107,14 @@ impl ArtefactCacheService {
             );
             return Ok(None);
         }
-        let cipher = match self.ciphers.for_user(&row.owner_id) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    artefact = %row.artefact_id,
-                    owner = %row.owner_id,
-                    error = %e,
-                    "artefact cache: owner cipher unavailable — body suppressed",
-                );
-                return Ok(None);
-            }
-        };
-        match cipher.open(bytes) {
-            Ok(plain) => Ok(Some(plain)),
+        let context = artefact_context(row);
+        match open_context(
+            self.ciphers.as_ref(),
+            &context,
+            bytes,
+            SecretAccessReason::ArtefactRead,
+        ) {
+            Ok(opened) => Ok(Some(opened.plaintext)),
             Err(e) => {
                 tracing::warn!(
                     artefact = %row.artefact_id,
@@ -227,13 +224,19 @@ impl ArtefactCacheService {
             let stored_body = if bytes.is_empty() {
                 Vec::new()
             } else {
-                let cipher = self
-                    .ciphers
-                    .for_user(meta.owner_id)
-                    .map_err(|e| CacheError::Io(format!("owner cipher: {e}")))?;
-                cipher
-                    .seal(bytes)
-                    .map_err(|e| CacheError::Io(format!("seal: {e}")))?
+                let context = KmsContext::user_scoped(
+                    KmsScope::Artefact,
+                    meta.owner_id.to_owned(),
+                    Some(meta.instance_id.to_owned()),
+                    Some(format!("{}:{}", meta.chat_id, meta.artefact_id)),
+                );
+                seal_context(
+                    self.ciphers.as_ref(),
+                    &context,
+                    bytes,
+                    SecretAccessReason::ArtefactRead,
+                )
+                .map_err(|e| CacheError::Io(format!("seal: {e}")))?
             };
             self.store
                 .update_body(id, plain_len, meta.mime, &stored_body)
@@ -246,6 +249,15 @@ impl ArtefactCacheService {
             .ok_or_else(|| CacheError::Io("ingested row vanished".into()))?;
         Ok(row)
     }
+}
+
+fn artefact_context(row: &CachedArtefact) -> KmsContext {
+    KmsContext::user_scoped(
+        KmsScope::Artefact,
+        row.owner_id.clone(),
+        Some(row.instance_id.clone()),
+        Some(format!("{}:{}", row.chat_id, row.artefact_id)),
+    )
 }
 
 fn validate_tuple(instance_id: &str, chat_id: &str, artefact_id: &str) -> Result<(), CacheError> {
@@ -410,8 +422,8 @@ mod tests {
             .unwrap();
         let stored = row.body_ciphertext.as_deref().expect("sealed body");
         assert!(
-            stored.starts_with(AGE_ARMOR_PREFIX),
-            "body must be sealed under age cipher, found prefix {:?}",
+            crate::envelope::is_v2_envelope(stored),
+            "body must be sealed under KMS v2, found prefix {:?}",
             std::str::from_utf8(&stored[..stored.len().min(40)]).unwrap_or("<binary>"),
         );
         assert!(

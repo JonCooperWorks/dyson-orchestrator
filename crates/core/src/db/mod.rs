@@ -76,8 +76,8 @@ impl BackendStores {
         Self {
             artefacts: sqlite::artefact_cache_store(pool.clone()),
             channels: sqlite::instance_channel_store(pool.clone()),
-            instances: sqlite::instance_store(pool.clone(), system_cipher.clone()),
-            tokens: sqlite::token_store(pool.clone(), system_cipher),
+            instances: sqlite::instance_store(pool.clone(), system_cipher.clone(), ciphers.clone()),
+            tokens: sqlite::token_store(pool.clone(), system_cipher, ciphers.clone()),
             user_secrets: sqlite::user_secret_store(pool.clone()),
             system_secrets: sqlite::system_secret_store(pool.clone()),
             users: sqlite::user_store(pool.clone(), ciphers),

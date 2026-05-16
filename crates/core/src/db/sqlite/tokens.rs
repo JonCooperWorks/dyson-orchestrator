@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use crate::db::sqlite::map_sqlx;
 use crate::db::{INGEST_PROVIDER, state_sync_provider, token_lookup_key};
-use crate::envelope::EnvelopeCipher;
+use crate::envelope::{
+    CipherDirectory, EnvelopeCipher, KmsContext, KmsScope, SecretAccessReason, open_context,
+    seal_context_as_string,
+};
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::{TokenRecord, TokenStore};
@@ -15,14 +18,55 @@ use crate::traits::{TokenRecord, TokenStore};
 pub struct SqlxTokenStore {
     pool: SqlitePool,
     cipher: Arc<dyn EnvelopeCipher>,
+    ciphers: Option<Arc<dyn CipherDirectory>>,
 }
 
 impl SqlxTokenStore {
     pub fn new(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Self {
-        Self { pool, cipher }
+        Self {
+            pool,
+            cipher,
+            ciphers: None,
+        }
     }
 
-    fn seal_token(&self, token: &str) -> Result<String, StoreError> {
+    pub fn new_with_ciphers(
+        pool: SqlitePool,
+        cipher: Arc<dyn EnvelopeCipher>,
+        ciphers: Arc<dyn CipherDirectory>,
+    ) -> Self {
+        Self {
+            pool,
+            cipher,
+            ciphers: Some(ciphers),
+        }
+    }
+
+    fn token_context(instance_id: &str, provider: &str) -> KmsContext {
+        KmsContext {
+            scope: KmsScope::RuntimeToken,
+            owner_id: None,
+            instance_id: Some(instance_id.to_owned()),
+            name: Some(format!("proxy_token:{provider}")),
+        }
+    }
+
+    fn seal_token(
+        &self,
+        instance_id: &str,
+        provider: &str,
+        token: &str,
+    ) -> Result<String, StoreError> {
+        if let Some(ciphers) = self.ciphers.as_deref() {
+            let context = Self::token_context(instance_id, provider);
+            return seal_context_as_string(
+                ciphers,
+                &context,
+                token.as_bytes(),
+                token_reason(provider),
+            )
+            .map_err(|e| StoreError::Io(format!("seal proxy token: {e}")));
+        }
         let sealed = self
             .cipher
             .seal(token.as_bytes())
@@ -31,13 +75,35 @@ impl SqlxTokenStore {
             .map_err(|_| StoreError::Malformed("sealed proxy token was not utf-8".into()))
     }
 
-    fn open_token(&self, stored: &str) -> Result<String, StoreError> {
+    fn open_token(
+        &self,
+        instance_id: &str,
+        provider: &str,
+        stored: &str,
+    ) -> Result<String, StoreError> {
+        if let Some(ciphers) = self.ciphers.as_deref() {
+            let context = Self::token_context(instance_id, provider);
+            let opened = open_context(ciphers, &context, stored.as_bytes(), token_reason(provider))
+                .map_err(|e| StoreError::Malformed(format!("open proxy token: {e}")))?;
+            return String::from_utf8(opened.plaintext)
+                .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()));
+        }
         let plain = self
             .cipher
             .open(stored.as_bytes())
             .map_err(|e| StoreError::Malformed(format!("open proxy token: {e}")))?;
         String::from_utf8(plain)
             .map_err(|_| StoreError::Malformed("proxy token plaintext was not utf-8".into()))
+    }
+}
+
+fn token_reason(provider: &str) -> SecretAccessReason {
+    if provider == INGEST_PROVIDER {
+        SecretAccessReason::ArtefactRead
+    } else if provider.starts_with("state_sync:") {
+        SecretAccessReason::StateReplay
+    } else {
+        SecretAccessReason::LlmProviderProxy
     }
 }
 
@@ -53,7 +119,7 @@ impl SqlxTokenStore {
         provider: &str,
     ) -> Result<String, StoreError> {
         let token = format!("{prefix}{}", Uuid::new_v4().simple());
-        let stored_token = self.seal_token(&token)?;
+        let stored_token = self.seal_token(instance_id, provider, &token)?;
         let lookup = token_lookup_key(&token);
         sqlx::query(
             "INSERT INTO proxy_tokens \
@@ -138,14 +204,16 @@ impl TokenStore for SqlxTokenStore {
             return Ok(None);
         };
         let stored: String = row.get("token");
-        let plain = self.open_token(&stored)?;
+        let instance_id: String = row.get("instance_id");
+        let provider: String = row.get("provider");
+        let plain = self.open_token(&instance_id, &provider, &stored)?;
         if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
             return Ok(None);
         }
         Ok(Some(TokenRecord {
             token: plain,
-            instance_id: row.get("instance_id"),
-            provider: row.get("provider"),
+            instance_id,
+            provider,
             created_at: row.get("created_at"),
             revoked_at: row.get("revoked_at"),
             expected_src_ip: row.get("expected_src_ip"),
@@ -172,7 +240,8 @@ impl TokenStore for SqlxTokenStore {
         // revoke is idempotent at the API boundary.
         let lookup = token_lookup_key(token);
         let row = sqlx::query(
-            "SELECT token FROM proxy_tokens WHERE token_lookup = ? AND revoked_at IS NULL LIMIT 1",
+            "SELECT token, instance_id, provider FROM proxy_tokens \
+             WHERE token_lookup = ? AND revoked_at IS NULL LIMIT 1",
         )
         .bind(&lookup)
         .fetch_optional(&self.pool)
@@ -182,7 +251,9 @@ impl TokenStore for SqlxTokenStore {
             return Ok(false);
         };
         let stored: String = row.get("token");
-        let plain = self.open_token(&stored)?;
+        let instance_id: String = row.get("instance_id");
+        let provider: String = row.get("provider");
+        let plain = self.open_token(&instance_id, &provider, &stored)?;
         if !bool::from(plain.as_bytes().ct_eq(token.as_bytes())) {
             return Ok(false);
         }
@@ -230,7 +301,7 @@ impl TokenStore for SqlxTokenStore {
         .map_err(map_sqlx)?;
         row.map(|r| {
             let stored: String = r.get("token");
-            self.open_token(&stored)
+            self.open_token(instance_id, provider, &stored)
         })
         .transpose()
     }

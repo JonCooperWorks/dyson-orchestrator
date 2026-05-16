@@ -12,6 +12,7 @@ use futures::Stream;
 use serde::Serialize;
 
 use crate::auth::CallerIdentity;
+use crate::envelope::{KmsContext, KmsScope, SecretAccessReason, open_context};
 use crate::http::AppState;
 use crate::traits::{LlmToolCallFilters, LlmToolCallRow, LlmToolCallStatusFilter};
 
@@ -409,6 +410,18 @@ fn row_to_view(
     if row.owner_id != owner_id {
         return Ok(None);
     }
+    let input_context = KmsContext::user_scoped(
+        KmsScope::LlmToolCall,
+        row.owner_id.clone(),
+        Some(row.instance_id.clone()),
+        Some(format!("input:{}", row.tool_use_id)),
+    );
+    let result_context = KmsContext::user_scoped(
+        KmsScope::LlmToolCall,
+        row.owner_id.clone(),
+        Some(row.instance_id.clone()),
+        Some(format!("result:{}", row.tool_use_id)),
+    );
     Ok(Some(ToolCallView {
         id: row.id,
         llm_audit_id: row.llm_audit_id,
@@ -416,8 +429,8 @@ fn row_to_view(
         tool_use_id: row.tool_use_id,
         tool_name: row.tool_name,
         mcp_server: row.mcp_server,
-        input: unseal_json(state, owner_id, row.input_sealed)?,
-        result: unseal_json(state, owner_id, row.result_sealed)?,
+        input: unseal_json(state, &input_context, row.input_sealed)?,
+        result: unseal_json(state, &result_context, row.result_sealed)?,
         is_error: row.is_error,
         called_at: row.called_at,
         resulted_at: row.resulted_at,
@@ -429,20 +442,20 @@ fn row_to_view(
 
 fn unseal_json(
     state: &AppState,
-    owner_id: &str,
+    context: &KmsContext,
     ciphertext: Option<Vec<u8>>,
 ) -> Result<Option<serde_json::Value>, String> {
     let Some(ciphertext) = ciphertext else {
         return Ok(None);
     };
-    let cipher = state
-        .ciphers
-        .for_user(owner_id)
-        .map_err(|e| format!("load cipher: {e}"))?;
-    let plain = cipher
-        .open(&ciphertext)
-        .map_err(|e| format!("open payload: {e}"))?;
-    serde_json::from_slice::<serde_json::Value>(&plain)
+    let plain = open_context(
+        state.ciphers.as_ref(),
+        context,
+        &ciphertext,
+        SecretAccessReason::OperatorCli,
+    )
+    .map_err(|e| format!("open payload: {e}"))?;
+    serde_json::from_slice::<serde_json::Value>(&plain.plaintext)
         .map(Some)
         .map_err(|e| format!("decode payload json: {e}"))
 }

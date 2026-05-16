@@ -196,6 +196,7 @@ mod tests {
     use crate::db::sqlite::instances::SqlxInstanceStore;
     use crate::db::sqlite::open_in_memory;
     use crate::db::sqlite::tokens::SqlxTokenStore;
+    use crate::envelope::is_v2_envelope;
     use crate::instance::InstanceService;
     use crate::snapshot::SnapshotService;
     use crate::traits::{
@@ -609,7 +610,8 @@ mod tests {
 
         // Store holds ciphertext, not plaintext.
         let stored = row.body_ciphertext.as_deref().expect("sealed body");
-        assert!(stored.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----"));
+        assert!(is_v2_envelope(stored));
+        assert!(!stored.windows("Findings".len()).any(|w| w == b"Findings"));
     }
 
     #[tokio::test]

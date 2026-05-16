@@ -31,7 +31,7 @@ use axum::body::Bytes;
 use futures::Stream;
 use serde_json::Value as JsonValue;
 
-use crate::envelope::CipherDirectory;
+use crate::envelope::{CipherDirectory, KmsContext, KmsScope, SecretAccessReason, seal_context};
 use crate::traits::{AuditStore, LlmToolCallEntry, LlmToolCallStore};
 
 /// Hard cap on a single response body.  64 MiB is well above any
@@ -274,13 +274,19 @@ fn record_tool_calls(ctx: Option<ToolCallAuditContext>, calls: Vec<ToolCallEvent
 }
 
 async fn insert_tool_call(ctx: &ToolCallAuditContext, call: ToolCallEvent) -> Result<(), String> {
-    let cipher = ctx
-        .ciphers
-        .for_user(&ctx.owner_id)
-        .map_err(|e| format!("load owner cipher: {e}"))?;
-    let input_sealed = cipher
-        .seal(&capped_json_bytes(&call.input))
-        .map_err(|e| format!("seal tool input: {e}"))?;
+    let context = KmsContext::user_scoped(
+        KmsScope::LlmToolCall,
+        ctx.owner_id.clone(),
+        Some(ctx.instance_id.clone()),
+        Some(format!("input:{}", call.tool_use_id)),
+    );
+    let input_sealed = seal_context(
+        ctx.ciphers.as_ref(),
+        &context,
+        &capped_json_bytes(&call.input),
+        SecretAccessReason::LlmProviderProxy,
+    )
+    .map_err(|e| format!("seal tool input: {e}"))?;
     let (mcp_server, mcp_tool_name) = parse_mcp_tool_name(&call.tool_name);
     let called_at = crate::now_secs();
     let id = ctx

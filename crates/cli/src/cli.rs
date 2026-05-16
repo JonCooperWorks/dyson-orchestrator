@@ -65,6 +65,12 @@ pub enum Command {
         action: DbAction,
     },
 
+    /// Local KMS diagnostics and migration.
+    Kms {
+        #[command(subcommand)]
+        action: KmsAction,
+    },
+
     /// Create a new instance from a template.
     New {
         #[arg(long)]
@@ -190,6 +196,24 @@ pub enum DbAction {
         target_url: String,
         #[arg(long = "dangerous-confirm-overwrite", default_value_t = false)]
         dangerous_confirm_overwrite: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KmsAction {
+    /// Summarise local KMS row/envelope state without rewriting rows.
+    Status,
+    /// Run local KMS diagnostics, including decryptability and key checks.
+    Doctor,
+    /// Migrate all legacy/local age ciphertext rows to KMS v2 envelopes.
+    MigrateLocal {
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// Rewrap rows that are legacy or not using the active scoped key.
+    Rewrap {
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -442,6 +466,28 @@ mod tests {
                 assert!(dry_run);
                 assert!(no_verify_conversations);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_kms_operator_commands() {
+        use clap::Parser as _;
+
+        let parsed =
+            Cli::try_parse_from(["swarmctl", "kms", "migrate-local", "--dry-run"]).unwrap();
+        match parsed.command {
+            Some(Command::Kms {
+                action: KmsAction::MigrateLocal { dry_run },
+            }) => assert!(dry_run),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let parsed = Cli::try_parse_from(["swarmctl", "kms", "rewrap"]).unwrap();
+        match parsed.command {
+            Some(Command::Kms {
+                action: KmsAction::Rewrap { dry_run },
+            }) => assert!(!dry_run),
             other => panic!("unexpected command: {other:?}"),
         }
     }

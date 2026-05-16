@@ -33,7 +33,10 @@ use sha2::{Sha256, Sha512};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::envelope::CipherDirectory;
+use crate::envelope::{
+    CipherDirectory, KmsContext, KmsScope, SecretAccessReason, is_v2_envelope, open_context,
+    seal_context,
+};
 use crate::error::StoreError;
 use crate::http::InternalHttpClient;
 use crate::instance::InstanceService;
@@ -102,6 +105,15 @@ pub fn webhook_chat_id(webhook_name: &str) -> String {
 
 pub fn webhook_chat_title(webhook_name: &str) -> String {
     format!("{WEBHOOK_CHAT_TITLE_PREFIX}{webhook_name}")
+}
+
+fn webhook_delivery_context(owner_id: &str, instance_id: &str, webhook_name: &str) -> KmsContext {
+    KmsContext::user_scoped(
+        KmsScope::WebhookDelivery,
+        owner_id.to_owned(),
+        Some(instance_id.to_owned()),
+        Some(webhook_name.to_owned()),
+    )
 }
 
 pub fn clamp_delivery_limit(limit: u32) -> u32 {
@@ -969,7 +981,8 @@ impl WebhookService {
             .await?
             .ok_or(WebhookError::NotFound)?;
         if let Some(stored) = row.body.take() {
-            row.body = self.open_audit_body(owner_id, &row.id, stored);
+            row.body =
+                self.open_audit_body(owner_id, instance_id, &row.webhook_name, &row.id, stored);
         }
         Ok(row)
     }
@@ -1069,7 +1082,7 @@ impl WebhookService {
             .map_err(WebhookError::Dispatch)?;
         let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
         let sealed_body = self
-            .seal_body_for_audit(instance_id, &body)
+            .seal_body_for_audit(instance_id, &row.webhook_name, &body)
             .await
             .unwrap_or(None);
         let replay_row = DeliveryRow {
@@ -1097,29 +1110,28 @@ impl WebhookService {
     fn open_audit_body(
         &self,
         owner_id: &str,
+        instance_id: &str,
+        webhook_name: &str,
         delivery_id: &str,
         stored: Vec<u8>,
     ) -> Option<Vec<u8>> {
-        if !stored.starts_with(AGE_ARMOR_PREFIX) {
+        if !stored.starts_with(AGE_ARMOR_PREFIX) && !is_v2_envelope(&stored) {
             // Legacy row written before bodies were sealed — surface
             // as-is so historical audits remain readable.
             return Some(stored);
         }
-        match self.ciphers.for_user(owner_id) {
-            Ok(cipher) => match cipher.open(&stored) {
-                Ok(plain) => Some(plain),
-                Err(e) => {
-                    tracing::warn!(
-                        delivery = %delivery_id, error = %e,
-                        "webhook delivery: body decrypt failed (key rotated?) — surfacing as empty"
-                    );
-                    None
-                }
-            },
+        let context = webhook_delivery_context(owner_id, instance_id, webhook_name);
+        match open_context(
+            self.ciphers.as_ref(),
+            &context,
+            &stored,
+            SecretAccessReason::ArtefactRead,
+        ) {
+            Ok(opened) => Some(opened.plaintext),
             Err(e) => {
                 tracing::warn!(
                     delivery = %delivery_id, error = %e,
-                    "webhook delivery: owner cipher unavailable — body suppressed"
+                    "webhook delivery: body decrypt failed (key rotated?) — surfacing as empty"
                 );
                 None
             }
@@ -1186,7 +1198,7 @@ impl WebhookService {
             // owner can't be resolved (instance vanished mid-flight)
             // OR the seal fails, we drop the body and keep just the
             // metadata row so the audit trail still lands.
-            let sealed_body = match self.seal_body_for_audit(instance_id, body).await {
+            let sealed_body = match self.seal_body_for_audit(instance_id, name, body).await {
                 Ok(b) => b,
                 Err(reason) => {
                     tracing::warn!(
@@ -1242,6 +1254,7 @@ impl WebhookService {
     async fn seal_body_for_audit(
         &self,
         instance_id: &str,
+        webhook_name: &str,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, String> {
         if body.is_empty() {
@@ -1253,11 +1266,14 @@ impl WebhookService {
             .await
             .map(|r| r.owner_id)
             .map_err(|e| format!("owner lookup: {e}"))?;
-        let cipher = self
-            .ciphers
-            .for_user(&owner_id)
-            .map_err(|e| format!("cipher: {e}"))?;
-        let ct = cipher.seal(body).map_err(|e| format!("seal: {e}"))?;
+        let context = webhook_delivery_context(&owner_id, instance_id, webhook_name);
+        let ct = seal_context(
+            self.ciphers.as_ref(),
+            &context,
+            body,
+            SecretAccessReason::ArtefactRead,
+        )
+        .map_err(|e| format!("seal: {e}"))?;
         Ok(Some(ct))
     }
 

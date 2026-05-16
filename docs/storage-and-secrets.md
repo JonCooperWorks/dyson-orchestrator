@@ -39,6 +39,54 @@ The backup/local cache directory holds:
 
 Bodies are encrypted before disk where the service expects secrecy.
 
+## Local KMS v2
+
+Swarm uses the local `age` backend as its default and only KMS backend. New
+writes use a versioned JSON envelope around an age ciphertext:
+
+```json
+{
+  "v": 2,
+  "alg": "local-age-x25519",
+  "scope": "user_secret",
+  "owner_id": "00000000000000000000000000000000",
+  "instance_id": "example-agent-000",
+  "name": "mcp.github",
+  "key_id": "users/00000000000000000000000000000000/mcp",
+  "key_version": 1,
+  "created_at": 1778880000,
+  "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----..."
+}
+```
+
+Because age does not expose AEAD associated data, the plaintext sealed inside
+the age payload is also structured:
+
+```json
+{
+  "context": {
+    "scope": "user_secret",
+    "owner_id": "00000000000000000000000000000000",
+    "instance_id": "example-agent-000",
+    "name": "mcp.github"
+  },
+  "secret_b64": "..."
+}
+```
+
+Every decrypt builds the expected row context and verifies that the outer
+envelope and embedded plaintext context match exactly. A mismatch fails closed
+and returns no plaintext.
+
+Legacy age-armored rows remain readable so old data can be migrated. On a
+successful legacy or stale-version read, supported service paths lazily rewrap
+the row into the v2 envelope under the active scoped key.
+
+KMS open/seal call sites carry a typed access reason. Current reasons include
+LLM provider proxying, MCP proxy forwarding, MCP OAuth refresh, runtime
+configure pushes, system-secret bootstrap, operator CLI, state replay, artefact
+reads, migration, and tests.
+
 ## Secret Scopes
 
 Swarm uses age envelope encryption for user-owned and operator-owned
@@ -63,6 +111,51 @@ Encrypted under the host/system age key:
 - provider API keys
 - OpenRouter provisioning key
 - other host-operator credentials
+
+### Scope-separated key layout
+
+Existing key files are treated as legacy version 1 compatibility keys:
+
+- `keys/system.age`
+- `keys/<user_id>.age`
+
+KMS v2 uses deterministic scope key ids below `keys/`, with one active version
+file per scope. Version 1 scoped key material is stored as `v1.age`; the active
+version is selected by an `active` file next to it and defaults to `1` when the
+file is absent.
+
+Representative scoped paths:
+
+- `keys/system/provider/v1.age` for provider/API keys and host credentials
+- `keys/system/configure/v1.age` for `/api/admin/configure` secrets
+- `keys/users/<user_id>/mcp/v1.age` for MCP and user secret rows
+- `keys/users/<user_id>/api_keys/v1.age` for user API keys
+- `keys/users/<user_id>/state/v1.age` for mirrored state-file bodies
+- `keys/users/<user_id>/artefact/v1.age` for cached artefact bodies
+- `keys/users/<user_id>/tool_calls/v1.age` for sealed LLM tool-call audit
+
+This layout provides cryptographic separation by scope. Logical names are still
+stored in plaintext where the surrounding table already stores them; KMS v2 does
+not hash secret names.
+
+## Secret Access Audit
+
+The `secret_access_audit` table records KMS maintenance events and is shaped for
+future runtime audit expansion. Events include timestamp, actor kind/id, reason,
+operation, scope, owner/instance ids, existing plaintext secret names where
+already present, key id/version, result, and a redacted error class/message.
+
+Plaintext secret values are never written to this table.
+
+## Sealed Mode
+
+Set `SWARM_KMS_SEALED=1` or `DYSON_SWARM_KMS_SEALED=1` to start with local KMS
+operations disabled. Swarm will skip startup secret data migrations and any
+secret open/seal attempt returns a clear sealed-mode error.
+
+This is a startup gate, not a live lock/unlock service. Runtime traffic that
+needs provider keys, MCP credentials, state replay, artefact reads, or
+configure secrets will fail until the process is restarted without sealed mode.
 
 ### Legacy per-instance secrets
 

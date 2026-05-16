@@ -31,6 +31,8 @@ pub mod instance_client;
 #[cfg(feature = "full")]
 pub mod instance_id;
 #[cfg(feature = "full")]
+pub mod kms_local;
+#[cfg(feature = "full")]
 pub mod mcp_servers;
 #[cfg(feature = "full")]
 pub mod openrouter;

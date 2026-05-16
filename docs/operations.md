@@ -55,6 +55,61 @@ the TOML provider config. The secret-store value wins when present.
 
 That means key rotation typically requires a swarm restart.
 
+## Local KMS Operations
+
+The local KMS backend is `local-age`. It stores v2 metadata-bound envelopes for
+new ciphertext rows while preserving legacy age-row readability long enough to
+migrate old data.
+
+Before running a migration on a live host, stop swarm or keep write traffic
+quiet, then back up both the SQLite database and key tree:
+
+```sh
+sudo systemctl stop dyson-swarm
+sudo install -d -m 0700 /var/backups/dyson-swarm
+sudo cp -a /var/lib/dyson-swarm/state.db /var/backups/dyson-swarm/state.db.$(date +%Y%m%d%H%M%S)
+sudo cp -a /var/lib/dyson-swarm/keys /var/backups/dyson-swarm/keys.$(date +%Y%m%d%H%M%S)
+```
+
+Diagnostic commands:
+
+```sh
+sudo -u dyson-swarm swarmctl kms status
+sudo -u dyson-swarm swarmctl kms doctor
+sudo -u dyson-swarm swarmctl kms rewrap --dry-run
+sudo -u dyson-swarm swarmctl kms migrate-local --dry-run
+```
+
+Migration command:
+
+```sh
+sudo -u dyson-swarm swarmctl kms migrate-local
+```
+
+`migrate-local` scans legacy and stale v2 rows, decrypts them with the expected
+row context, and rewrites them as KMS v2 envelopes under the active scoped local
+age key. It is idempotent and reports counts by table and scope. It never prints
+plaintext. It fails closed on undecryptable rows or v2 context mismatches.
+
+`rewrap` currently uses the same scanner and rewrite engine as
+`migrate-local`; use it when active key versions change.
+
+Rollback means restoring the database and matching key directory backup
+together. Do not restore one without the other after a migration or key-version
+change.
+
+To verify a dev-server migration:
+
+```sh
+sudo -u dyson-swarm swarmctl kms doctor
+sudo systemctl start dyson-swarm
+systemctl status dyson-swarm
+```
+
+Then run the normal smoke checks below, including an LLM turn, an MCP tool call,
+a state read from a known mirrored file, and a `/api/admin/configure` push by
+creating or reconfiguring an instance.
+
 ## Useful Operator Commands
 
 ```sh

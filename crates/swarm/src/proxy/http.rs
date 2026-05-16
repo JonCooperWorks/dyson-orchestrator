@@ -26,6 +26,7 @@ use serde::Serialize;
 
 use crate::auth::extract_bearer;
 use crate::config::ProviderConfig;
+use crate::envelope::{KmsContext, KmsScope, SecretAccessReason, seal_context};
 use crate::now_secs;
 use crate::policy::PolicyDenial;
 use crate::proxy::ProxyService;
@@ -616,16 +617,20 @@ async fn capture_tool_results(
     let (Some(store), Some(ciphers)) = (&state.tool_calls, &state.ciphers) else {
         return;
     };
-    let cipher = match ciphers.for_user(owner_id) {
-        Ok(cipher) => cipher,
-        Err(err) => {
-            tracing::warn!(error = %err, user = %owner_id, "tool_result audit cipher load failed");
-            return;
-        }
-    };
     let resulted_at = crate::now_secs();
     for result in results {
-        let sealed = match cipher.seal(&capped_json_bytes(&result.content)) {
+        let context = KmsContext::user_scoped(
+            KmsScope::LlmToolCall,
+            owner_id.to_owned(),
+            Some(instance_id.to_owned()),
+            Some(format!("result:{}", result.tool_use_id)),
+        );
+        let sealed = match seal_context(
+            ciphers.as_ref(),
+            &context,
+            &capped_json_bytes(&result.content),
+            SecretAccessReason::LlmProviderProxy,
+        ) {
             Ok(sealed) => sealed,
             Err(err) => {
                 tracing::warn!(
@@ -1049,6 +1054,8 @@ mod tests {
 
     struct ToolAuditDbRow {
         llm_audit_id: Option<i64>,
+        owner_id: String,
+        instance_id: String,
         tool_use_id: String,
         tool_name: String,
         input_sealed: Option<Vec<u8>>,
@@ -1078,7 +1085,7 @@ mod tests {
 
     async fn fetch_tool_call_row(pool: &SqlitePool, tool_use_id: &str) -> Option<ToolAuditDbRow> {
         let row = sqlx::query(
-            "SELECT llm_audit_id, tool_use_id, tool_name, input_sealed, result_sealed, is_error \
+            "SELECT llm_audit_id, owner_id, instance_id, tool_use_id, tool_name, input_sealed, result_sealed, is_error \
              FROM llm_tool_call WHERE tool_use_id = ? ORDER BY id DESC LIMIT 1",
         )
         .bind(tool_use_id)
@@ -1087,6 +1094,8 @@ mod tests {
         .unwrap()?;
         Some(ToolAuditDbRow {
             llm_audit_id: row.try_get("llm_audit_id").unwrap(),
+            owner_id: row.try_get("owner_id").unwrap(),
+            instance_id: row.try_get("instance_id").unwrap(),
             tool_use_id: row.try_get("tool_use_id").unwrap(),
             tool_name: row.try_get("tool_name").unwrap(),
             input_sealed: row.try_get("input_sealed").unwrap(),
@@ -1100,7 +1109,7 @@ mod tests {
         tool_use_id: &str,
     ) -> Option<ToolAuditDbRow> {
         let row = sqlx::query(
-            "SELECT llm_audit_id, tool_use_id, tool_name, input_sealed, result_sealed, is_error \
+            "SELECT llm_audit_id, owner_id, instance_id, tool_use_id, tool_name, input_sealed, result_sealed, is_error \
              FROM llm_tool_call \
              WHERE tool_use_id = ? AND result_sealed IS NOT NULL \
              ORDER BY id DESC LIMIT 1",
@@ -1111,6 +1120,8 @@ mod tests {
         .unwrap()?;
         Some(ToolAuditDbRow {
             llm_audit_id: row.try_get("llm_audit_id").unwrap(),
+            owner_id: row.try_get("owner_id").unwrap(),
+            instance_id: row.try_get("instance_id").unwrap(),
             tool_use_id: row.try_get("tool_use_id").unwrap(),
             tool_name: row.try_get("tool_name").unwrap(),
             input_sealed: row.try_get("input_sealed").unwrap(),
@@ -1223,8 +1234,20 @@ mod tests {
 
         let row = wait_for_tool_call_row(&pool).await;
         let cipher_dir = crate::envelope::AgeCipherDirectory::new(keys.path()).unwrap();
-        let cipher = crate::envelope::CipherDirectory::for_user(&cipher_dir, TEST_OWNER).unwrap();
-        let input_plain = cipher.open(&row.input_sealed.unwrap()).unwrap();
+        let input_context = KmsContext::user_scoped(
+            KmsScope::LlmToolCall,
+            row.owner_id.clone(),
+            Some(row.instance_id.clone()),
+            Some(format!("input:{}", row.tool_use_id)),
+        );
+        let input_plain = crate::envelope::open_context(
+            &cipher_dir,
+            &input_context,
+            &row.input_sealed.unwrap(),
+            SecretAccessReason::Test,
+        )
+        .unwrap()
+        .plaintext;
         let input: serde_json::Value = serde_json::from_slice(&input_plain).unwrap();
         assert_eq!(row.tool_use_id, "call_1");
         assert_eq!(row.tool_name, "bash");
@@ -1250,7 +1273,20 @@ mod tests {
 
         let row = wait_for_tool_result_row(&pool).await;
         assert_eq!(row.is_error, Some(0));
-        let result_plain = cipher.open(&row.result_sealed.unwrap()).unwrap();
+        let result_context = KmsContext::user_scoped(
+            KmsScope::LlmToolCall,
+            row.owner_id.clone(),
+            Some(row.instance_id.clone()),
+            Some(format!("result:{}", row.tool_use_id)),
+        );
+        let result_plain = crate::envelope::open_context(
+            &cipher_dir,
+            &result_context,
+            &row.result_sealed.unwrap(),
+            SecretAccessReason::Test,
+        )
+        .unwrap()
+        .plaintext;
         let result: serde_json::Value = serde_json::from_slice(&result_plain).unwrap();
         assert_eq!(result, serde_json::json!("{\"cwd\":\"/workspace\"}"));
     }

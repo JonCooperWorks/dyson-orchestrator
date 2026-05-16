@@ -10,7 +10,10 @@
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use crate::envelope::CipherDirectory;
+use crate::envelope::{
+    CipherDirectory, KmsContext, KmsScope, SecretAccessReason, is_v2_envelope, open_context,
+    seal_context,
+};
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::{StateFileRow, StateFileStore, StateFileUpsertSpec};
@@ -64,16 +67,15 @@ impl StateFileService {
         if let Some(existing) = self.preserve_existing_chat_row(&meta, body).await? {
             return Ok(existing);
         }
-        let cipher = self
-            .ciphers
-            .for_user(meta.owner_id)
-            .map_err(|e| StateFileError::Io(format!("owner cipher: {e}")))?;
-        let sealed_body = cipher
-            .seal(body)
-            .map_err(|e| StateFileError::Io(format!("seal: {e}")))?;
-        if !sealed_body.starts_with(AGE_ARMOR_PREFIX) {
-            return Err(StateFileError::Io("sealed body missing age armor".into()));
-        }
+        let context =
+            state_file_context(meta.owner_id, meta.instance_id, meta.namespace, meta.path);
+        let sealed_body = seal_context(
+            self.ciphers.as_ref(),
+            &context,
+            body,
+            SecretAccessReason::StateReplay,
+        )
+        .map_err(|e| StateFileError::Io(format!("seal: {e}")))?;
         let bytes = i64::try_from(body.len()).unwrap_or(i64::MAX);
         Ok(self
             .store
@@ -172,7 +174,7 @@ impl StateFileService {
                 return Ok(None);
             }
         };
-        if !bytes.starts_with(AGE_ARMOR_PREFIX) {
+        if !bytes.starts_with(AGE_ARMOR_PREFIX) && !is_v2_envelope(bytes) {
             tracing::warn!(
                 instance = %row.instance_id,
                 namespace = %row.namespace,
@@ -181,13 +183,16 @@ impl StateFileService {
             );
             return Ok(None);
         }
-        let cipher = self
-            .ciphers
-            .for_user(&row.owner_id)
-            .map_err(|e| StateFileError::Io(format!("owner cipher: {e}")))?;
-        let plain = cipher
-            .open(bytes)
-            .map_err(|e| StateFileError::Io(format!("open: {e}")))?;
+        let context =
+            state_file_context(&row.owner_id, &row.instance_id, &row.namespace, &row.path);
+        let plain = open_context(
+            self.ciphers.as_ref(),
+            &context,
+            bytes,
+            SecretAccessReason::StateReplay,
+        )
+        .map_err(|e| StateFileError::Io(format!("open: {e}")))?
+        .plaintext;
         Ok(Some(plain))
     }
     pub fn read_body_for_replay(
@@ -196,6 +201,20 @@ impl StateFileService {
     ) -> Result<Option<Vec<u8>>, StateFileError> {
         self.read_body(row)
     }
+}
+
+fn state_file_context(
+    owner_id: &str,
+    instance_id: &str,
+    namespace: &str,
+    path: &str,
+) -> KmsContext {
+    KmsContext::user_scoped(
+        KmsScope::StateFile,
+        owner_id.to_owned(),
+        Some(instance_id.to_owned()),
+        Some(format!("{namespace}:{path}")),
+    )
 }
 
 fn validate_namespace(namespace: &str) -> Result<(), StateFileError> {
@@ -396,7 +415,7 @@ mod tests {
         let (svc, _keys) = svc().await;
         let row = svc.ingest(meta("MEMORY.md"), b"").await.unwrap();
         let stored = row.body_ciphertext.as_deref().expect("sealed body");
-        assert!(stored.starts_with(AGE_ARMOR_PREFIX));
+        assert!(crate::envelope::is_v2_envelope(stored));
         assert_eq!(svc.read_body(&row).unwrap().unwrap(), b"");
         assert_eq!(row.bytes, 0);
     }

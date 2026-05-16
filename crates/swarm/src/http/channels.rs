@@ -55,8 +55,8 @@ struct ChannelView {
 
 impl From<InstanceChannelRow> for ChannelView {
     fn from(row: InstanceChannelRow) -> Self {
-        let allowed_senders =
-            normalize_telegram_allowed_senders(row.allowed_senders.clone()).unwrap_or(row.allowed_senders);
+        let allowed_senders = normalize_telegram_allowed_senders(row.allowed_senders.clone())
+            .unwrap_or(row.allowed_senders);
         Self {
             kind: row.kind,
             handle: row.handle,

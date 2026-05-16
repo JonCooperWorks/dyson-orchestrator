@@ -11,7 +11,7 @@ use sqlx::{Row, SqlitePool};
 use crate::db::sqlite::map_sqlx;
 use crate::db::token_lookup_key;
 use crate::db::{RuntimeMigrationReport as MigrationReport, RuntimeMigrator};
-use crate::envelope::EnvelopeCipher;
+use crate::envelope::{EnvelopeCipher, is_v2_envelope};
 use crate::error::StoreError;
 use crate::now_secs;
 
@@ -258,6 +258,9 @@ fn is_current_ciphertext(
     label: &str,
     stored: &str,
 ) -> Result<bool, StoreError> {
+    if is_v2_envelope(stored.as_bytes()) {
+        return Ok(true);
+    }
     match cipher.open(stored.as_bytes()) {
         Ok(_) => Ok(true),
         Err(err) if stored.starts_with(AGE_ARMOR_HEADER) => Err(StoreError::Malformed(format!(

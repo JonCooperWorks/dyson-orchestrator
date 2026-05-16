@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use dyson_swarm_cli::{self as cli, Command, DbAction, SecretsAction};
+use dyson_swarm_cli::{self as cli, Command, DbAction, KmsAction, SecretsAction};
 use dyson_swarm_core::{
     api_client::ApiClient,
     backup::{local::LocalDiskBackupSink, s3::S3BackupSink},
@@ -84,6 +84,7 @@ async fn main() -> ExitCode {
     match command {
         Command::Secrets { action } => run_secrets(&cfg, args.dangerous_no_auth, action).await,
         Command::Db { action } => run_db(action).await,
+        Command::Kms { action } => run_kms(&cfg, action).await,
         Command::New {
             template,
             env,
@@ -195,6 +196,113 @@ async fn run_db(action: DbAction) -> ExitCode {
     }
 }
 
+async fn run_kms(cfg: &config::Config, action: KmsAction) -> ExitCode {
+    let cipher_dir: Arc<dyn dyson_swarm_core::envelope::CipherDirectory> =
+        match dyson_swarm_core::envelope::AgeCipherDirectory::new(cfg.resolved_keys_dir()) {
+            Ok(d) => Arc::new(d),
+            Err(err) => {
+                eprintln!("keys_dir open: {err}");
+                return ExitCode::from(2);
+            }
+        };
+    let system_cipher = match cipher_dir.system() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("system envelope init: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let database = match db::open_configured(cfg, cipher_dir.clone(), system_cipher.clone()).await {
+        Ok(db) => db,
+        Err(err) => {
+            eprintln!("db open: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    if !cipher_dir.is_sealed_mode()
+        && let Err(err) = database
+            .stores
+            .runtime_migrator
+            .migrate(system_cipher.as_ref())
+            .await
+    {
+        eprintln!("runtime data migration: {err}");
+        return ExitCode::from(2);
+    }
+
+    let db::DatabasePool::Sqlite(pool) = database.pool;
+
+    match action {
+        KmsAction::Status => {
+            match dyson_swarm_core::kms_local::migrate_sqlite(&pool, cipher_dir.as_ref(), true)
+                .await
+            {
+                Ok(report) => {
+                    print_kms_report("status", &report);
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("kms status: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        KmsAction::Doctor => {
+            let report = dyson_swarm_core::kms_local::doctor_sqlite(
+                &pool,
+                cipher_dir.as_ref(),
+                &cfg.resolved_keys_dir(),
+            )
+            .await;
+            print_kms_doctor(&report);
+            if report.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        KmsAction::MigrateLocal { dry_run } | KmsAction::Rewrap { dry_run } => {
+            match dyson_swarm_core::kms_local::migrate_sqlite(&pool, cipher_dir.as_ref(), dry_run)
+                .await
+            {
+                Ok(report) => {
+                    print_kms_report(if dry_run { "dry-run" } else { "migrated" }, &report);
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("kms migrate-local: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+fn print_kms_report(label: &str, report: &dyson_swarm_core::kms_local::KmsMigrationReport) {
+    println!("kms {label}: dry_run={}", report.dry_run);
+    println!("table\tscope\tscanned\talready_v2\tlegacy\tmigrated\tskipped_empty");
+    for row in &report.counts {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.table,
+            row.scope,
+            row.scanned,
+            row.already_v2,
+            row.legacy,
+            row.migrated,
+            row.skipped_empty
+        );
+    }
+}
+
+fn print_kms_doctor(report: &dyson_swarm_core::kms_local::KmsDoctorReport) {
+    for check in &report.checks {
+        let status = if check.ok { "ok" } else { "fail" };
+        println!("{status}\t{}\t{}", check.name, check.message);
+    }
+    print_kms_report("doctor-scan", &report.scan);
+}
+
 /// Mint an opaque user api-key without going through the HTTP admin
 /// surface.  Mirrors `secrets system-set` in posture: direct DB +
 /// cipher access on the swarm host, suitable for first-time setup
@@ -281,14 +389,16 @@ async fn run_dyson_skills(cfg: &config::Config, id: String) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-    if let Err(err) = database
-        .stores
-        .runtime_migrator
-        .migrate(system_cipher.as_ref())
-        .await
-    {
-        eprintln!("runtime data migration: {err}");
-        return ExitCode::from(2);
+    if !cipher_dir.is_sealed_mode() {
+        if let Err(err) = database
+            .stores
+            .runtime_migrator
+            .migrate(system_cipher.as_ref())
+            .await
+        {
+            eprintln!("runtime data migration: {err}");
+            return ExitCode::from(2);
+        }
     }
     let instances_store: std::sync::Arc<dyn dyson_swarm_core::traits::InstanceStore> =
         database.stores.instances.clone();
@@ -364,16 +474,18 @@ async fn build_ops_services(cfg: &config::Config) -> Result<OpsServices, String>
         .await
         .map_err(|e| format!("db open (backend {}): {e:#}", cfg.database_backend))?;
     let stores = database.stores.clone();
-    let report = stores
-        .runtime_migrator
-        .migrate(system_cipher.as_ref())
-        .await
-        .map_err(|e| format!("runtime data migration: {e:#}"))?;
-    if report.applied {
-        eprintln!(
-            "ok: runtime data migrations sealed {} proxy token(s), {} instance bearer(s)",
-            report.proxy_tokens_sealed, report.instance_bearers_sealed
-        );
+    if !cipher_dir.is_sealed_mode() {
+        let report = stores
+            .runtime_migrator
+            .migrate(system_cipher.as_ref())
+            .await
+            .map_err(|e| format!("runtime data migration: {e:#}"))?;
+        if report.applied {
+            eprintln!(
+                "ok: runtime data migrations sealed {} proxy token(s), {} instance bearer(s)",
+                report.proxy_tokens_sealed, report.instance_bearers_sealed
+            );
+        }
     }
     let instances: Arc<dyn InstanceStore> = stores.instances.clone();
     let tokens: Arc<dyn TokenStore> = stores.tokens.clone();

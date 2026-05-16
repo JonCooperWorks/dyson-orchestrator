@@ -97,16 +97,28 @@ pub fn artefact_cache_store(pool: SqlitePool) -> Arc<dyn ArtefactCacheStore> {
     Arc::new(artefacts::SqlxArtefactStore::new(pool))
 }
 
-pub fn instance_store(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Arc<dyn InstanceStore> {
-    Arc::new(instances::SqlxInstanceStore::new(pool, cipher))
+pub fn instance_store(
+    pool: SqlitePool,
+    cipher: Arc<dyn EnvelopeCipher>,
+    ciphers: Arc<dyn CipherDirectory>,
+) -> Arc<dyn InstanceStore> {
+    Arc::new(instances::SqlxInstanceStore::new_with_ciphers(
+        pool, cipher, ciphers,
+    ))
 }
 
 pub fn instance_channel_store(pool: SqlitePool) -> Arc<dyn InstanceChannelStore> {
     Arc::new(channels::SqlxInstanceChannelStore::new(pool))
 }
 
-pub fn token_store(pool: SqlitePool, cipher: Arc<dyn EnvelopeCipher>) -> Arc<dyn TokenStore> {
-    Arc::new(tokens::SqlxTokenStore::new(pool, cipher))
+pub fn token_store(
+    pool: SqlitePool,
+    cipher: Arc<dyn EnvelopeCipher>,
+    ciphers: Arc<dyn CipherDirectory>,
+) -> Arc<dyn TokenStore> {
+    Arc::new(tokens::SqlxTokenStore::new_with_ciphers(
+        pool, cipher, ciphers,
+    ))
 }
 
 pub fn user_secret_store(pool: SqlitePool) -> Arc<dyn UserSecretStore> {

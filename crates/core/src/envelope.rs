@@ -59,12 +59,250 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use age::{Decryptor, Encryptor};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+use serde::{Deserialize, Serialize};
 
 /// Sentinel "user id" used for system-scope secrets — provider API
 /// keys, the OpenRouter provisioning key, anything else not owned by
 /// a real user.  Reserved: real user ids are 32-hex (sqlite uuid
 /// simple form), so a non-hex sentinel can't collide.
 pub const SYSTEM_KEY_ID: &str = "system";
+
+pub const KMS_V2_ALG: &str = "local-age-x25519";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KmsScope {
+    SystemSecret,
+    SystemConfigure,
+    UserSecret,
+    UserApiKey,
+    UserProfile,
+    RuntimeToken,
+    StateFile,
+    Artefact,
+    WebhookDelivery,
+    LlmToolCall,
+}
+
+impl KmsScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SystemSecret => "system_secret",
+            Self::SystemConfigure => "system_configure",
+            Self::UserSecret => "user_secret",
+            Self::UserApiKey => "user_api_key",
+            Self::UserProfile => "user_profile",
+            Self::RuntimeToken => "runtime_token",
+            Self::StateFile => "state_file",
+            Self::Artefact => "artefact",
+            Self::WebhookDelivery => "webhook_delivery",
+            Self::LlmToolCall => "llm_tool_call",
+        }
+    }
+}
+
+impl std::fmt::Display for KmsScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretAccessReason {
+    LlmProviderProxy,
+    McpProxyForward,
+    McpOAuthRefresh,
+    RuntimeConfigurePush,
+    SystemSecretBootstrap,
+    OperatorCli,
+    StateReplay,
+    ArtefactRead,
+    Migration,
+    Test,
+}
+
+impl SecretAccessReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LlmProviderProxy => "LlmProviderProxy",
+            Self::McpProxyForward => "McpProxyForward",
+            Self::McpOAuthRefresh => "McpOAuthRefresh",
+            Self::RuntimeConfigurePush => "RuntimeConfigurePush",
+            Self::SystemSecretBootstrap => "SystemSecretBootstrap",
+            Self::OperatorCli => "OperatorCli",
+            Self::StateReplay => "StateReplay",
+            Self::ArtefactRead => "ArtefactRead",
+            Self::Migration => "Migration",
+            Self::Test => "Test",
+        }
+    }
+}
+
+impl std::fmt::Display for SecretAccessReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretAccessOperation {
+    Encrypt,
+    Decrypt,
+    Rewrap,
+    Rotate,
+    Delete,
+}
+
+impl SecretAccessOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Encrypt => "encrypt",
+            Self::Decrypt => "decrypt",
+            Self::Rewrap => "rewrap",
+            Self::Rotate => "rotate",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretAccessResult {
+    Success,
+    Failure,
+}
+
+impl SecretAccessResult {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KmsContext {
+    pub scope: KmsScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl KmsContext {
+    pub fn system_secret(name: impl Into<String>) -> Self {
+        Self {
+            scope: KmsScope::SystemSecret,
+            owner_id: None,
+            instance_id: None,
+            name: Some(name.into()),
+        }
+    }
+
+    pub fn system_configure(instance_id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            scope: KmsScope::SystemConfigure,
+            owner_id: None,
+            instance_id: Some(instance_id.into()),
+            name: Some(name.into()),
+        }
+    }
+
+    pub fn user_secret(user_id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            scope: KmsScope::UserSecret,
+            owner_id: Some(user_id.into()),
+            instance_id: None,
+            name: Some(name.into()),
+        }
+    }
+
+    pub fn user_scoped(
+        scope: KmsScope,
+        owner_id: impl Into<String>,
+        instance_id: Option<String>,
+        name: Option<String>,
+    ) -> Self {
+        Self {
+            scope,
+            owner_id: Some(owner_id.into()),
+            instance_id,
+            name,
+        }
+    }
+
+    fn legacy_key_user(&self) -> &str {
+        match self.scope {
+            KmsScope::SystemSecret | KmsScope::SystemConfigure | KmsScope::RuntimeToken => {
+                SYSTEM_KEY_ID
+            }
+            _ => self.owner_id.as_deref().unwrap_or(SYSTEM_KEY_ID),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VersionedCipher {
+    pub key_id: String,
+    pub key_version: u32,
+    pub cipher: Arc<dyn EnvelopeCipher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KmsEnvelope {
+    #[serde(rename = "v")]
+    pub version: u8,
+    #[serde(rename = "alg")]
+    pub algorithm: String,
+    pub scope: KmsScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub key_id: String,
+    pub key_version: u32,
+    pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotated_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rewrapped_at: Option<i64>,
+    pub ciphertext: String,
+}
+
+impl KmsEnvelope {
+    pub fn context(&self) -> KmsContext {
+        KmsContext {
+            scope: self.scope,
+            owner_id: self.owner_id.clone(),
+            instance_id: self.instance_id.clone(),
+            name: self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KmsPlaintext {
+    context: KmsContext,
+    secret_b64: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenEnvelopeResult {
+    pub plaintext: Vec<u8>,
+    pub key_id: String,
+    pub key_version: u32,
+    pub legacy: bool,
+    pub needs_rewrap: bool,
+}
 
 /// Per-key seal/open primitive.  One instance encrypts to and
 /// decrypts from exactly one root key; routing across keys is the
@@ -99,6 +337,39 @@ pub trait CipherDirectory: Send + Sync + std::fmt::Debug {
     /// MUST treat [`SYSTEM_KEY_ID`] as a valid user id.
     fn for_user(&self, user_id: &str) -> Result<Arc<dyn EnvelopeCipher>, EnvelopeError>;
 
+    /// Resolve the active local key for a metadata-bound KMS v2 row
+    /// context.  Default impl preserves older test directories by
+    /// falling back to the legacy per-user key.
+    fn for_context(&self, context: &KmsContext) -> Result<VersionedCipher, EnvelopeError> {
+        let user_id = context.legacy_key_user();
+        Ok(VersionedCipher {
+            key_id: format!("legacy/{user_id}"),
+            key_version: 1,
+            cipher: self.for_user(user_id)?,
+        })
+    }
+
+    /// Return the active key id/version for a context without
+    /// requiring callers to load or create that key.
+    fn active_key_meta(&self, context: &KmsContext) -> Result<(String, u32), EnvelopeError> {
+        let active = self.for_context(context)?;
+        Ok((active.key_id, active.key_version))
+    }
+
+    /// Resolve a concrete key id/version referenced by an existing
+    /// v2 envelope.  Implementations must not silently create a
+    /// missing historical key version.
+    fn for_key_id(
+        &self,
+        key_id: &str,
+        key_version: u32,
+    ) -> Result<Arc<dyn EnvelopeCipher>, EnvelopeError> {
+        let _ = (key_id, key_version);
+        Err(EnvelopeError::KeyParse(
+            "versioned key lookup is unsupported by this cipher directory".into(),
+        ))
+    }
+
     /// Sugar for `for_user(SYSTEM_KEY_ID)`.  Provided as a default to
     /// keep impls tiny.
     fn system(&self) -> Result<Arc<dyn EnvelopeCipher>, EnvelopeError> {
@@ -110,6 +381,10 @@ pub trait CipherDirectory: Send + Sync + std::fmt::Debug {
     /// "right to be forgotten" semantics.  Idempotent: missing keys
     /// are not an error.
     fn forget_user(&self, user_id: &str) -> Result<(), EnvelopeError>;
+
+    fn is_sealed_mode(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -133,6 +408,147 @@ pub enum EnvelopeError {
     /// 32-char hex, so this only fires on programmer error.
     #[error("envelope: invalid user id (must be hex or `{SYSTEM_KEY_ID}`)")]
     BadUserId,
+    #[error("envelope: invalid key id")]
+    BadKeyId,
+    #[error("envelope: sealed mode; local KMS decrypt/encrypt unavailable")]
+    Sealed,
+    #[error("envelope: v2 context mismatch")]
+    ContextMismatch,
+    #[error("envelope: invalid v2 envelope: {0}")]
+    BadEnvelope(String),
+}
+
+pub fn seal_context(
+    ciphers: &dyn CipherDirectory,
+    context: &KmsContext,
+    plaintext: &[u8],
+    _reason: SecretAccessReason,
+) -> Result<Vec<u8>, EnvelopeError> {
+    seal_context_inner(ciphers, context, plaintext, None)
+}
+
+pub fn rewrap_context(
+    ciphers: &dyn CipherDirectory,
+    context: &KmsContext,
+    plaintext: &[u8],
+    _reason: SecretAccessReason,
+) -> Result<Vec<u8>, EnvelopeError> {
+    seal_context_inner(ciphers, context, plaintext, Some(crate::now_secs()))
+}
+
+fn seal_context_inner(
+    ciphers: &dyn CipherDirectory,
+    context: &KmsContext,
+    plaintext: &[u8],
+    rewrapped_at: Option<i64>,
+) -> Result<Vec<u8>, EnvelopeError> {
+    let active = ciphers.for_context(context)?;
+    let payload = KmsPlaintext {
+        context: context.clone(),
+        secret_b64: B64.encode(plaintext),
+    };
+    let payload = serde_json::to_vec(&payload).map_err(|e| EnvelopeError::Age(e.to_string()))?;
+    let ciphertext = active.cipher.seal(&payload)?;
+    let ciphertext = String::from_utf8(ciphertext)
+        .map_err(|_| EnvelopeError::Age("non-utf8 armor (impossible)".into()))?;
+    let env = KmsEnvelope {
+        version: 2,
+        algorithm: KMS_V2_ALG.to_owned(),
+        scope: context.scope,
+        owner_id: context.owner_id.clone(),
+        instance_id: context.instance_id.clone(),
+        name: context.name.clone(),
+        key_id: active.key_id,
+        key_version: active.key_version,
+        created_at: crate::now_secs(),
+        rotated_at: None,
+        rewrapped_at,
+        ciphertext,
+    };
+    serde_json::to_vec(&env).map_err(|e| EnvelopeError::Age(e.to_string()))
+}
+
+pub fn seal_context_as_string(
+    ciphers: &dyn CipherDirectory,
+    context: &KmsContext,
+    plaintext: &[u8],
+    reason: SecretAccessReason,
+) -> Result<String, EnvelopeError> {
+    let bytes = seal_context(ciphers, context, plaintext, reason)?;
+    String::from_utf8(bytes).map_err(|_| EnvelopeError::Age("non-utf8 kms envelope".into()))
+}
+
+pub fn rewrap_context_as_string(
+    ciphers: &dyn CipherDirectory,
+    context: &KmsContext,
+    plaintext: &[u8],
+    reason: SecretAccessReason,
+) -> Result<String, EnvelopeError> {
+    let bytes = rewrap_context(ciphers, context, plaintext, reason)?;
+    String::from_utf8(bytes).map_err(|_| EnvelopeError::Age("non-utf8 kms envelope".into()))
+}
+
+pub fn open_context(
+    ciphers: &dyn CipherDirectory,
+    context: &KmsContext,
+    stored: &[u8],
+    _reason: SecretAccessReason,
+) -> Result<OpenEnvelopeResult, EnvelopeError> {
+    if let Ok(env) = serde_json::from_slice::<KmsEnvelope>(stored)
+        && env.version == 2
+    {
+        return open_v2(ciphers, context, env);
+    }
+    let cipher = ciphers.for_user(context.legacy_key_user())?;
+    let plaintext = cipher.open(stored)?;
+    Ok(OpenEnvelopeResult {
+        plaintext,
+        key_id: format!("legacy/{}", context.legacy_key_user()),
+        key_version: 1,
+        legacy: true,
+        needs_rewrap: true,
+    })
+}
+
+pub fn is_v2_envelope(stored: &[u8]) -> bool {
+    serde_json::from_slice::<KmsEnvelope>(stored)
+        .map(|env| env.version == 2)
+        .unwrap_or(false)
+}
+
+fn open_v2(
+    ciphers: &dyn CipherDirectory,
+    context: &KmsContext,
+    env: KmsEnvelope,
+) -> Result<OpenEnvelopeResult, EnvelopeError> {
+    if env.algorithm != KMS_V2_ALG {
+        return Err(EnvelopeError::BadEnvelope(format!(
+            "unsupported algorithm {}",
+            env.algorithm
+        )));
+    }
+    if &env.context() != context {
+        return Err(EnvelopeError::ContextMismatch);
+    }
+    let cipher = ciphers.for_key_id(&env.key_id, env.key_version)?;
+    let payload = cipher.open(env.ciphertext.as_bytes())?;
+    let payload: KmsPlaintext =
+        serde_json::from_slice(&payload).map_err(|e| EnvelopeError::BadEnvelope(e.to_string()))?;
+    if &payload.context != context {
+        return Err(EnvelopeError::ContextMismatch);
+    }
+    let plaintext = B64
+        .decode(payload.secret_b64)
+        .map_err(|e| EnvelopeError::BadEnvelope(format!("secret_b64: {e}")))?;
+    let (active_key_id, active_key_version) = ciphers.active_key_meta(context)?;
+    let needs_rewrap = active_key_id != env.key_id || active_key_version != env.key_version;
+    Ok(OpenEnvelopeResult {
+        plaintext,
+        key_id: env.key_id,
+        key_version: env.key_version,
+        legacy: false,
+        needs_rewrap,
+    })
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -308,6 +724,7 @@ impl EnvelopeCipher for AgeCipher {
 pub struct AgeCipherDirectory {
     keys_dir: PathBuf,
     cache: Mutex<HashMap<String, Arc<dyn EnvelopeCipher>>>,
+    sealed: bool,
 }
 
 impl std::fmt::Debug for AgeCipherDirectory {
@@ -333,67 +750,182 @@ impl AgeCipherDirectory {
     /// admin group, and we don't want to fight them.
     pub fn new(keys_dir: impl Into<PathBuf>) -> Result<Self, EnvelopeError> {
         let keys_dir = keys_dir.into();
+        let sealed = env_truthy("SWARM_KMS_SEALED") || env_truthy("DYSON_SWARM_KMS_SEALED");
         // try_exists predates create_dir_all so we know whether THIS
         // call is the creator.  Errors here (e.g. EACCES on the
         // parent) bubble — a missing-or-error result still goes
         // through create_dir_all below and surfaces a clearer error.
-        let pre_existed = keys_dir.try_exists().unwrap_or(false);
-        std::fs::create_dir_all(&keys_dir).map_err(EnvelopeError::Io)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o700);
-            if pre_existed {
-                // Best-effort: if the directory already had different
-                // perms (operator override), don't fight it.
-                let _ = std::fs::set_permissions(&keys_dir, perms);
-            } else {
-                // We just created it — the strict mode is required.
-                std::fs::set_permissions(&keys_dir, perms).map_err(EnvelopeError::Io)?;
+        if !sealed {
+            let pre_existed = keys_dir.try_exists().unwrap_or(false);
+            std::fs::create_dir_all(&keys_dir).map_err(EnvelopeError::Io)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o700);
+                if pre_existed {
+                    // Best-effort: if the directory already had different
+                    // perms (operator override), don't fight it.
+                    let _ = std::fs::set_permissions(&keys_dir, perms);
+                } else {
+                    // We just created it — the strict mode is required.
+                    std::fs::set_permissions(&keys_dir, perms).map_err(EnvelopeError::Io)?;
+                }
             }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = pre_existed; // silence unused on non-unix builds
+            #[cfg(not(unix))]
+            {
+                let _ = pre_existed; // silence unused on non-unix builds
+            }
         }
         Ok(Self {
             keys_dir,
             cache: Mutex::new(HashMap::new()),
+            sealed,
         })
     }
 
-    fn key_path(&self, user_id: &str) -> Result<PathBuf, EnvelopeError> {
+    fn legacy_key_path(&self, user_id: &str) -> Result<PathBuf, EnvelopeError> {
         validate_user_id(user_id)?;
         Ok(self.keys_dir.join(format!("{user_id}.age")))
+    }
+
+    fn active_version(&self, key_id: &str) -> Result<u32, EnvelopeError> {
+        validate_key_id(key_id)?;
+        let active_path = self.keys_dir.join(key_id).join("active");
+        match std::fs::read_to_string(&active_path) {
+            Ok(raw) => {
+                let version: u32 = raw.trim().parse().map_err(|_| {
+                    EnvelopeError::KeyParse("active version is not an integer".into())
+                })?;
+                if version == 0 {
+                    return Err(EnvelopeError::KeyParse(
+                        "active version must be >= 1".into(),
+                    ));
+                }
+                Ok(version)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(1),
+            Err(err) => Err(EnvelopeError::Io(err)),
+        }
+    }
+
+    fn versioned_key_path(&self, key_id: &str, key_version: u32) -> Result<PathBuf, EnvelopeError> {
+        validate_key_id(key_id)?;
+        if key_version == 0 {
+            return Err(EnvelopeError::KeyParse("key version must be >= 1".into()));
+        }
+        Ok(self
+            .keys_dir
+            .join(key_id)
+            .join(format!("v{key_version}.age")))
+    }
+
+    fn versioned_cipher(
+        &self,
+        key_id: &str,
+        key_version: u32,
+        create: bool,
+    ) -> Result<Arc<dyn EnvelopeCipher>, EnvelopeError> {
+        if self.sealed {
+            return Ok(Arc::new(SealedCipher));
+        }
+        let cache_key = format!("v2:{key_id}:v{key_version}");
+        let mut cache = self.cache.lock().expect("cipher cache poisoned");
+        if let Some(c) = cache.get(&cache_key) {
+            return Ok(Arc::clone(c));
+        }
+        let path = self.versioned_key_path(key_id, key_version)?;
+        if create {
+            AgeCipher::generate_if_missing(&path)?;
+            let active = self.keys_dir.join(key_id).join("active");
+            if !active.exists() {
+                if let Some(parent) = active.parent() {
+                    std::fs::create_dir_all(parent).map_err(EnvelopeError::Io)?;
+                }
+                std::fs::write(&active, format!("{key_version}\n")).map_err(EnvelopeError::Io)?;
+            }
+        }
+        let cipher: Arc<dyn EnvelopeCipher> = Arc::new(AgeCipher::from_key_file(&path)?);
+        cache.insert(cache_key, Arc::clone(&cipher));
+        Ok(cipher)
     }
 }
 
 impl CipherDirectory for AgeCipherDirectory {
     fn for_user(&self, user_id: &str) -> Result<Arc<dyn EnvelopeCipher>, EnvelopeError> {
+        if self.sealed {
+            return Ok(Arc::new(SealedCipher));
+        }
+        validate_user_id(user_id)?;
+        let cache_key = format!("legacy:{user_id}");
         let mut cache = self.cache.lock().expect("cipher cache poisoned");
-        if let Some(c) = cache.get(user_id) {
+        if let Some(c) = cache.get(&cache_key) {
             return Ok(Arc::clone(c));
         }
-        let path = self.key_path(user_id)?;
+        let path = self.legacy_key_path(user_id)?;
         AgeCipher::generate_if_missing(&path)?;
         let cipher: Arc<dyn EnvelopeCipher> = Arc::new(AgeCipher::from_key_file(&path)?);
-        cache.insert(user_id.to_owned(), Arc::clone(&cipher));
+        cache.insert(cache_key, Arc::clone(&cipher));
         Ok(cipher)
     }
 
+    fn for_context(&self, context: &KmsContext) -> Result<VersionedCipher, EnvelopeError> {
+        let key_id = scoped_key_id(context)?;
+        let key_version = self.active_version(&key_id)?;
+        let cipher = self.versioned_cipher(&key_id, key_version, true)?;
+        Ok(VersionedCipher {
+            key_id,
+            key_version,
+            cipher,
+        })
+    }
+
+    fn active_key_meta(&self, context: &KmsContext) -> Result<(String, u32), EnvelopeError> {
+        let key_id = scoped_key_id(context)?;
+        let key_version = self.active_version(&key_id)?;
+        Ok((key_id, key_version))
+    }
+
+    fn for_key_id(
+        &self,
+        key_id: &str,
+        key_version: u32,
+    ) -> Result<Arc<dyn EnvelopeCipher>, EnvelopeError> {
+        self.versioned_cipher(key_id, key_version, false)
+    }
+
     fn forget_user(&self, user_id: &str) -> Result<(), EnvelopeError> {
-        let path = self.key_path(user_id)?;
+        if self.sealed {
+            return Err(EnvelopeError::Sealed);
+        }
+        let path = self.legacy_key_path(user_id)?;
         // Drop the cached cipher first so a re-create later this
         // process lifetime gets a freshly-loaded one.
         self.cache
             .lock()
             .expect("cipher cache poisoned")
-            .remove(user_id);
+            .remove(&format!("legacy:{user_id}"));
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(EnvelopeError::Io(e)),
         }
+    }
+
+    fn is_sealed_mode(&self) -> bool {
+        self.sealed
+    }
+}
+
+#[derive(Debug)]
+struct SealedCipher;
+
+impl EnvelopeCipher for SealedCipher {
+    fn seal(&self, _plaintext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+        Err(EnvelopeError::Sealed)
+    }
+
+    fn open(&self, _ciphertext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+        Err(EnvelopeError::Sealed)
     }
 }
 
@@ -408,6 +940,65 @@ fn validate_user_id(id: &str) -> Result<(), EnvelopeError> {
         return Err(EnvelopeError::BadUserId);
     }
     Ok(())
+}
+
+pub fn scoped_key_id(context: &KmsContext) -> Result<String, EnvelopeError> {
+    let key_id = match context.scope {
+        KmsScope::SystemSecret => "system/provider".to_owned(),
+        KmsScope::SystemConfigure => "system/configure".to_owned(),
+        KmsScope::RuntimeToken => "system/runtime_tokens".to_owned(),
+        KmsScope::UserApiKey => format!("users/{}/api_keys", required_owner(context)?),
+        KmsScope::UserProfile => format!("users/{}/profile", required_owner(context)?),
+        KmsScope::StateFile => format!("users/{}/state", required_owner(context)?),
+        KmsScope::Artefact => format!("users/{}/artefact", required_owner(context)?),
+        KmsScope::WebhookDelivery => {
+            format!("users/{}/webhook_delivery", required_owner(context)?)
+        }
+        KmsScope::LlmToolCall => format!("users/{}/tool_calls", required_owner(context)?),
+        KmsScope::UserSecret => {
+            let segment = match context.name.as_deref() {
+                Some(name) if name.starts_with("mcp.") => "mcp",
+                _ => "secrets",
+            };
+            format!("users/{}/{segment}", required_owner(context)?)
+        }
+    };
+    validate_key_id(&key_id)?;
+    Ok(key_id)
+}
+
+fn required_owner(context: &KmsContext) -> Result<&str, EnvelopeError> {
+    let owner = context
+        .owner_id
+        .as_deref()
+        .ok_or(EnvelopeError::BadUserId)?;
+    validate_user_id(owner)?;
+    Ok(owner)
+}
+
+fn validate_key_id(key_id: &str) -> Result<(), EnvelopeError> {
+    if key_id.is_empty()
+        || key_id.starts_with('/')
+        || key_id.contains("//")
+        || key_id.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+    {
+        return Err(EnvelopeError::BadKeyId);
+    }
+    Ok(())
+}
+
+fn env_truthy(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -634,5 +1225,37 @@ mod tests {
             dir.for_user(&"z".repeat(32)).unwrap_err(),
             EnvelopeError::BadUserId
         ));
+    }
+
+    #[test]
+    fn v2_context_mismatch_is_rejected() {
+        let (_tmp, dir) = fresh_dir();
+        let user = user_id(0x22);
+        let ctx = KmsContext::user_secret(&user, "alpha");
+        let sealed = seal_context(&dir, &ctx, b"secret", SecretAccessReason::Test).unwrap();
+        let wrong = KmsContext::user_secret(&user, "beta");
+        let err = open_context(&dir, &wrong, &sealed, SecretAccessReason::Test).unwrap_err();
+        assert!(
+            matches!(err, EnvelopeError::ContextMismatch),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn v2_uses_scoped_versioned_key_layout() {
+        let (tmp, dir) = fresh_dir();
+        let user = user_id(0x23);
+        let ctx = KmsContext::user_secret(&user, "mcp.inst.github");
+        let sealed = seal_context(&dir, &ctx, b"secret", SecretAccessReason::Test).unwrap();
+        let env: KmsEnvelope = serde_json::from_slice(&sealed).unwrap();
+        assert_eq!(env.key_id, format!("users/{user}/mcp"));
+        assert_eq!(env.key_version, 1);
+        assert!(tmp.path().join(&env.key_id).join("v1.age").is_file());
+        assert_eq!(
+            open_context(&dir, &ctx, &sealed, SecretAccessReason::Test)
+                .unwrap()
+                .plaintext,
+            b"secret"
+        );
     }
 }

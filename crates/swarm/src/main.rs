@@ -159,20 +159,24 @@ async fn run_server(cfg: config::Config, dangerous_no_auth: bool) -> ExitCode {
     let sandbox_backend: Arc<dyn SandboxBackend> = Arc::new(CubeSandboxBackend::new(cube.clone()));
     let user_secrets_store = stores.user_secrets.clone();
     let system_secrets_store = stores.system_secrets.clone();
-    match stores.runtime_migrator.migrate(token_cipher.as_ref()).await {
-        Ok(report) => {
-            if report.applied {
-                tracing::info!(
-                    proxy_tokens = report.proxy_tokens_sealed,
-                    instance_bearers = report.instance_bearers_sealed,
-                    proxy_token_lookups = report.proxy_token_lookups_backfilled,
-                    "runtime data migrations complete"
-                );
+    if cipher_dir.is_sealed_mode() {
+        tracing::warn!("KMS sealed mode enabled; runtime secret data migrations skipped");
+    } else {
+        match stores.runtime_migrator.migrate(token_cipher.as_ref()).await {
+            Ok(report) => {
+                if report.applied {
+                    tracing::info!(
+                        proxy_tokens = report.proxy_tokens_sealed,
+                        instance_bearers = report.instance_bearers_sealed,
+                        proxy_token_lookups = report.proxy_token_lookups_backfilled,
+                        "runtime data migrations complete"
+                    );
+                }
             }
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "runtime data migration failed");
-            return ExitCode::from(2);
+            Err(err) => {
+                tracing::error!(error = %err, "runtime data migration failed");
+                return ExitCode::from(2);
+            }
         }
     }
     let instances_store: Arc<dyn InstanceStore> = stores.instances.clone();

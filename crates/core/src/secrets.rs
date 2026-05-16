@@ -14,7 +14,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::envelope::{CipherDirectory, EnvelopeError, SYSTEM_KEY_ID};
+use crate::envelope::{
+    CipherDirectory, EnvelopeError, KmsContext, SecretAccessReason, open_context,
+    rewrap_context_as_string, seal_context_as_string,
+};
 use crate::error::StoreError;
 use crate::traits::{SystemSecretStore, UserSecretStore};
 
@@ -45,10 +48,9 @@ impl UserSecretsService {
     }
 
     pub async fn put(&self, user_id: &str, name: &str, value: &[u8]) -> Result<(), SecretsError> {
-        let cipher = self.ciphers.for_user(user_id)?;
-        let ct = cipher.seal(value)?;
-        let ct_str = String::from_utf8(ct)
-            .map_err(|_| EnvelopeError::Age("non-utf8 armor (impossible)".into()))?;
+        let context = KmsContext::user_secret(user_id, name);
+        let reason = user_secret_reason(name);
+        let ct_str = seal_context_as_string(self.ciphers.as_ref(), &context, value, reason)?;
         self.store.put(user_id, name, &ct_str).await?;
         Ok(())
     }
@@ -57,8 +59,19 @@ impl UserSecretsService {
         let Some(ct) = self.store.get(user_id, name).await? else {
             return Ok(None);
         };
-        let cipher = self.ciphers.for_user(user_id)?;
-        Ok(Some(cipher.open(ct.as_bytes())?))
+        let context = KmsContext::user_secret(user_id, name);
+        let reason = user_secret_reason(name);
+        let opened = open_context(self.ciphers.as_ref(), &context, ct.as_bytes(), reason)?;
+        if opened.needs_rewrap {
+            let rewrapped = rewrap_context_as_string(
+                self.ciphers.as_ref(),
+                &context,
+                opened.plaintext.as_slice(),
+                reason,
+            )?;
+            self.store.put(user_id, name, &rewrapped).await?;
+        }
+        Ok(Some(opened.plaintext))
     }
 
     pub async fn delete(&self, user_id: &str, name: &str) -> Result<(), SecretsError> {
@@ -89,10 +102,9 @@ impl SystemSecretsService {
     }
 
     pub async fn put(&self, name: &str, value: &[u8]) -> Result<(), SecretsError> {
-        let cipher = self.ciphers.for_user(SYSTEM_KEY_ID)?;
-        let ct = cipher.seal(value)?;
-        let ct_str = String::from_utf8(ct)
-            .map_err(|_| EnvelopeError::Age("non-utf8 armor (impossible)".into()))?;
+        let context = system_secret_context(name);
+        let reason = system_secret_reason(name);
+        let ct_str = seal_context_as_string(self.ciphers.as_ref(), &context, value, reason)?;
         self.store.put(name, &ct_str).await?;
         Ok(())
     }
@@ -101,8 +113,19 @@ impl SystemSecretsService {
         let Some(ct) = self.store.get(name).await? else {
             return Ok(None);
         };
-        let cipher = self.ciphers.for_user(SYSTEM_KEY_ID)?;
-        Ok(Some(cipher.open(ct.as_bytes())?))
+        let context = system_secret_context(name);
+        let reason = system_secret_reason(name);
+        let opened = open_context(self.ciphers.as_ref(), &context, ct.as_bytes(), reason)?;
+        if opened.needs_rewrap {
+            let rewrapped = rewrap_context_as_string(
+                self.ciphers.as_ref(),
+                &context,
+                opened.plaintext.as_slice(),
+                reason,
+            )?;
+            self.store.put(name, &rewrapped).await?;
+        }
+        Ok(Some(opened.plaintext))
     }
 
     /// Convenience: read a system secret as a string (UTF-8).  Returns
@@ -122,6 +145,40 @@ impl SystemSecretsService {
 
     pub async fn list_names(&self) -> Result<Vec<String>, SecretsError> {
         Ok(self.store.list_names().await?)
+    }
+}
+
+pub fn system_secret_context(name: &str) -> KmsContext {
+    if let Some(instance_id) = name
+        .strip_prefix("instance.")
+        .and_then(|rest| rest.strip_suffix(".configure"))
+        .filter(|id| !id.is_empty())
+    {
+        KmsContext::system_configure(instance_id.to_owned(), name.to_owned())
+    } else {
+        KmsContext::system_secret(name.to_owned())
+    }
+}
+
+fn user_secret_reason(name: &str) -> SecretAccessReason {
+    if name.starts_with("mcp.") {
+        SecretAccessReason::McpProxyForward
+    } else {
+        SecretAccessReason::OperatorCli
+    }
+}
+
+fn system_secret_reason(name: &str) -> SecretAccessReason {
+    if name.starts_with("provider.") {
+        SecretAccessReason::LlmProviderProxy
+    } else if name
+        .strip_prefix("instance.")
+        .and_then(|rest| rest.strip_suffix(".configure"))
+        .is_some()
+    {
+        SecretAccessReason::RuntimeConfigurePush
+    } else {
+        SecretAccessReason::SystemSecretBootstrap
     }
 }
 
@@ -301,5 +358,24 @@ mod tests {
         assert_eq!(got.as_deref(), Some("sk-or-prov-..."));
         let names = svc.list_names().await.unwrap();
         assert_eq!(names, vec!["openrouter_provisioning"]);
+    }
+
+    #[tokio::test]
+    async fn user_secret_legacy_read_lazily_rewraps_to_v2() {
+        let (_tmp, dir) = ciphers();
+        let store = Arc::new(MemUserSecretStore(Mutex::new(Vec::new())));
+        let svc = UserSecretsService::new(store.clone(), dir.clone());
+        let u = user_id(0x55);
+        let legacy = dir.for_user(&u).unwrap().seal(b"legacy-secret").unwrap();
+        store
+            .put(&u, "mcp.inst.github", std::str::from_utf8(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let got = svc.get(&u, "mcp.inst.github").await.unwrap().unwrap();
+        assert_eq!(got, b"legacy-secret");
+        let after = store.get(&u, "mcp.inst.github").await.unwrap().unwrap();
+        assert!(crate::envelope::is_v2_envelope(after.as_bytes()));
+        assert!(!after.contains("legacy-secret"));
     }
 }

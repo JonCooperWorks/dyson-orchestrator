@@ -56,7 +56,10 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::db::sqlite::map_sqlx;
-use crate::envelope::{AgeCipher, CipherDirectory, EnvelopeCipher};
+use crate::envelope::{
+    AgeCipher, CipherDirectory, EnvelopeCipher, KmsContext, KmsScope, SecretAccessReason,
+    open_context, seal_context_as_string,
+};
 use crate::error::StoreError;
 use crate::now_secs;
 use crate::traits::{UserApiKey, UserRow, UserStatus, UserStore};
@@ -128,9 +131,20 @@ fn row_to_user(
 }
 
 fn open_email_ciphertext(ciphers: &dyn CipherDirectory, user_id: &str, ct: &str) -> Option<String> {
-    let cipher = ciphers.for_user(user_id).ok()?;
-    let bytes = cipher.open(ct.as_bytes()).ok()?;
-    String::from_utf8(bytes).ok()
+    let context = KmsContext::user_scoped(
+        KmsScope::UserProfile,
+        user_id.to_owned(),
+        None,
+        Some("email".to_owned()),
+    );
+    let opened = open_context(
+        ciphers,
+        &context,
+        ct.as_bytes(),
+        SecretAccessReason::OperatorCli,
+    )
+    .ok()?;
+    String::from_utf8(opened.plaintext).ok()
 }
 
 fn seal_email_plaintext(
@@ -138,13 +152,19 @@ fn seal_email_plaintext(
     user_id: &str,
     plain: &str,
 ) -> Result<String, StoreError> {
-    let cipher = ciphers
-        .for_user(user_id)
-        .map_err(|e| StoreError::Io(format!("envelope: {e}")))?;
-    let ct = cipher
-        .seal(plain.as_bytes())
-        .map_err(|e| StoreError::Io(format!("envelope seal: {e}")))?;
-    String::from_utf8(ct).map_err(|_| StoreError::Malformed("email ciphertext not ASCII".into()))
+    let context = KmsContext::user_scoped(
+        KmsScope::UserProfile,
+        user_id.to_owned(),
+        None,
+        Some("email".to_owned()),
+    );
+    seal_context_as_string(
+        ciphers,
+        &context,
+        plain.as_bytes(),
+        SecretAccessReason::OperatorCli,
+    )
+    .map_err(|e| StoreError::Io(format!("envelope seal: {e}")))
 }
 
 #[derive(Clone)]
@@ -223,16 +243,25 @@ fn ct_eq(a: &str, b: &str) -> bool {
 fn ciphertext_matches_token(
     ciphers: &dyn CipherDirectory,
     user_id: &str,
+    key_id: &str,
     ciphertext: &str,
     token: &str,
 ) -> bool {
-    let Ok(cipher) = ciphers.for_user(user_id) else {
+    let context = KmsContext::user_scoped(
+        KmsScope::UserApiKey,
+        user_id.to_owned(),
+        None,
+        Some(key_id.to_owned()),
+    );
+    let Ok(opened) = open_context(
+        ciphers,
+        &context,
+        ciphertext.as_bytes(),
+        SecretAccessReason::OperatorCli,
+    ) else {
         return false;
     };
-    let Ok(plaintext) = cipher.open(ciphertext.as_bytes()) else {
-        return false;
-    };
-    let Ok(plaintext_str) = std::str::from_utf8(&plaintext) else {
+    let Ok(plaintext_str) = std::str::from_utf8(&opened.plaintext) else {
         return false;
     };
     ct_eq(plaintext_str, token)
@@ -384,16 +413,20 @@ impl UserStore for SqlxUserStore {
         let token = generate_token();
         let prefix =
             lookup_prefix(&token).expect("generate_token always produces a well-formed token");
-        let cipher = self
-            .ciphers
-            .for_user(user_id)
-            .map_err(|e| StoreError::Io(format!("envelope: {e}")))?;
-        let ciphertext_bytes = cipher
-            .seal(token.as_bytes())
-            .map_err(|e| StoreError::Io(format!("envelope seal: {e}")))?;
-        let ciphertext = String::from_utf8(ciphertext_bytes)
-            .map_err(|_| StoreError::Malformed("envelope ciphertext not ASCII".into()))?;
         let id = Uuid::new_v4().simple().to_string();
+        let context = KmsContext::user_scoped(
+            KmsScope::UserApiKey,
+            user_id.to_owned(),
+            None,
+            Some(id.clone()),
+        );
+        let ciphertext = seal_context_as_string(
+            self.ciphers.as_ref(),
+            &context,
+            token.as_bytes(),
+            SecretAccessReason::OperatorCli,
+        )
+        .map_err(|e| StoreError::Io(format!("envelope seal: {e}")))?;
         sqlx::query(
             "INSERT INTO user_api_keys (id, user_id, prefix, ciphertext, label, created_at, revoked_at) \
              VALUES (?, ?, ?, ?, ?, ?, NULL)",
@@ -424,7 +457,7 @@ impl UserStore for SqlxUserStore {
         // size-1; we still iterate so a rare collision doesn't break
         // resolution.
         let rows = sqlx::query(
-            "SELECT user_id, ciphertext, label, created_at, revoked_at \
+            "SELECT id, user_id, ciphertext, label, created_at, revoked_at \
              FROM user_api_keys WHERE prefix = ? AND revoked_at IS NULL",
         )
         .bind(prefix)
@@ -442,8 +475,9 @@ impl UserStore for SqlxUserStore {
         }
         for r in rows {
             let user_id: String = r.get("user_id");
+            let id: String = r.get("id");
             let ciphertext: String = r.get("ciphertext");
-            if ciphertext_matches_token(&*self.ciphers, &user_id, &ciphertext, token) {
+            if ciphertext_matches_token(&*self.ciphers, &user_id, &id, &ciphertext, token) {
                 return Ok(Some(UserApiKey {
                     token: token.to_owned(),
                     user_id,
@@ -486,10 +520,10 @@ impl UserStore for SqlxUserStore {
         for r in rows {
             let user_id: String = r.get("user_id");
             let ciphertext: String = r.get("ciphertext");
-            if !ciphertext_matches_token(&*self.ciphers, &user_id, &ciphertext, token) {
+            let id: String = r.get("id");
+            if !ciphertext_matches_token(&*self.ciphers, &user_id, &id, &ciphertext, token) {
                 continue;
             }
-            let id: String = r.get("id");
             let upd = sqlx::query(
                 "UPDATE user_api_keys SET revoked_at = ? \
                  WHERE id = ? AND revoked_at IS NULL",
@@ -715,8 +749,11 @@ mod tests {
         let ct: String = row.get("ciphertext");
         let prefix: String = row.get("prefix");
         assert_ne!(ct, tok);
-        // age-armored output starts with the literal `-----BEGIN AGE`.
-        assert!(ct.starts_with("-----BEGIN AGE"), "got: {ct:.40}");
+        // KMS v2 output is a metadata envelope around age ciphertext.
+        assert!(
+            crate::envelope::is_v2_envelope(ct.as_bytes()),
+            "got: {ct:.40}"
+        );
         // The prefix column is plaintext lookup oracle = first 8 hex
         // chars after the `dy_` literal.
         assert_eq!(prefix, &tok[TOKEN_PREFIX.len()..TOKEN_PREFIX.len() + 8]);
