@@ -26,6 +26,7 @@ const SECRET_ENTRYPOINT_CONTAINER_PATH: &str = "/run/dyson-mcp-runtime-secret-en
 const SECRET_ENTRYPOINT_SHELL: &str = "/bin/sh";
 const MAX_RUNTIME_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PLAYWRIGHT_SCREENSHOT_BYTES: usize = 8 * 1024 * 1024;
+const PLAYWRIGHT_MCP_IMAGE_REPOSITORY: &str = "mcr.microsoft.com/playwright/mcp";
 const PLAYWRIGHT_ARTIFACT_CONTAINER_DIR: &str = "/home/node/.playwright-mcp";
 const PLAYWRIGHT_ARTIFACT_LINK_PREFIX: &str = ".playwright-mcp/";
 
@@ -1137,7 +1138,7 @@ fn docker_run_launch(
         }
     };
 
-    let artifact_dir = if is_playwright_mcp_server(server_name, &user_args) {
+    let artifact_dir = if is_playwright_mcp_image(&user_args) {
         Some(create_docker_artifact_dir(
             secret_root,
             instance_id,
@@ -1181,11 +1182,25 @@ fn docker_run_launch(
     })
 }
 
-fn is_playwright_mcp_server(server_name: &str, user_args: &[String]) -> bool {
-    server_name.to_ascii_lowercase().contains("playwright")
-        || user_args
-            .iter()
-            .any(|arg| arg.to_ascii_lowercase().contains("playwright"))
+fn is_playwright_mcp_image(user_args: &[String]) -> bool {
+    let Ok(split) = split_docker_user_args(user_args) else {
+        return false;
+    };
+    docker_image_repository(&split.image) == PLAYWRIGHT_MCP_IMAGE_REPOSITORY
+}
+
+fn docker_image_repository(image: &str) -> &str {
+    let without_digest = image
+        .split_once('@')
+        .map_or(image, |(repository, _digest)| repository);
+    let tag_search_start = without_digest
+        .rfind('/')
+        .map_or(0, |slash_index| slash_index + 1);
+    if let Some(tag_index) = without_digest[tag_search_start..].rfind(':') {
+        &without_digest[..tag_search_start + tag_index]
+    } else {
+        without_digest
+    }
 }
 
 fn augment_playwright_screenshot_response(
@@ -2467,14 +2482,14 @@ for line in sys.stdin:
         let args = vec![
             "run".to_string(),
             "--rm".to_string(),
-            "mcr.microsoft.com/playwright/mcp".to_string(),
+            "mcr.microsoft.com/playwright/mcp:latest".to_string(),
         ];
         let secret_root = test_secret_root("playwright-artifacts");
         let launch = docker_run_launch(
             &args,
             &HashMap::new(),
             "i-1",
-            "playwright",
+            "browser",
             &secret_root,
             "docker",
             "runsc",
@@ -2490,6 +2505,55 @@ for line in sys.stdin:
 
         cleanup_secret_dir_sync(launch.artifact_dir.as_deref());
         let _ = std::fs::remove_dir_all(secret_root);
+    }
+
+    #[test]
+    fn docker_run_args_does_not_mount_for_playwright_name_with_other_image() {
+        let args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "example/mcp".to_string(),
+        ];
+        let secret_root = test_secret_root("playwright-name-no-artifacts");
+        let launch = docker_run_launch(
+            &args,
+            &HashMap::new(),
+            "i-1",
+            "playwright",
+            &secret_root,
+            "docker",
+            "runsc",
+        )
+        .unwrap();
+        assert!(launch.artifact_dir.is_none());
+        assert!(!launch.args.iter().any(|arg| {
+            arg.contains("dst=/home/node/.playwright-mcp")
+                || arg.contains(PLAYWRIGHT_ARTIFACT_CONTAINER_DIR)
+        }));
+
+        let _ = std::fs::remove_dir_all(secret_root);
+    }
+
+    #[test]
+    fn playwright_image_detection_allows_tags_and_digests_only_for_official_image() {
+        for image in [
+            "mcr.microsoft.com/playwright/mcp",
+            "mcr.microsoft.com/playwright/mcp:latest",
+            "mcr.microsoft.com/playwright/mcp:v0.0.40",
+            "mcr.microsoft.com/playwright/mcp@sha256:abc123",
+        ] {
+            let args = vec![image.to_string()];
+            assert!(is_playwright_mcp_image(&args), "{image}");
+        }
+
+        for image in [
+            "mcr.microsoft.com/playwright/mcp-extra",
+            "example/playwright",
+            "example/mcp",
+        ] {
+            let args = vec![image.to_string()];
+            assert!(!is_playwright_mcp_image(&args), "{image}");
+        }
     }
 
     #[test]

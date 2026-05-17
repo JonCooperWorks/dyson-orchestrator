@@ -1,4 +1,4 @@
-# Audit
+expl# Audit
 
 Swarm keeps forensic audit state on the host, not inside the cube. Sandboxes
 are disposable; audit rows live with the durable swarm state and survive
