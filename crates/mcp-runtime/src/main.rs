@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use base64::Engine;
 use clap::Parser;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,9 @@ const CONTAINER_SECRET_DIR: &str = "/run/secrets";
 const SECRET_ENTRYPOINT_CONTAINER_PATH: &str = "/run/dyson-mcp-runtime-secret-entrypoint";
 const SECRET_ENTRYPOINT_SHELL: &str = "/bin/sh";
 const MAX_RUNTIME_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PLAYWRIGHT_SCREENSHOT_BYTES: usize = 8 * 1024 * 1024;
+const PLAYWRIGHT_ARTIFACT_CONTAINER_DIR: &str = "/home/node/.playwright-mcp";
+const PLAYWRIGHT_ARTIFACT_LINK_PREFIX: &str = ".playwright-mcp/";
 
 #[derive(Debug, Parser)]
 #[command(name = "dyson-mcp-runtime")]
@@ -208,6 +212,7 @@ struct DockerStdioSession {
     child: Arc<Mutex<Child>>,
     reader: JoinHandle<()>,
     secret_dir: Option<PathBuf>,
+    artifact_dir: Option<PathBuf>,
 }
 
 struct HttpStreamableSession {
@@ -564,14 +569,17 @@ impl DockerStdioSession {
             .spawn()
             .map_err(|e| {
                 cleanup_secret_dir_sync(launch.secret_dir.as_deref());
+                cleanup_secret_dir_sync(launch.artifact_dir.as_deref());
                 format!("spawn docker: {e}")
             })?;
         let Some(stdin) = child.stdin.take() else {
             cleanup_secret_dir_sync(launch.secret_dir.as_deref());
+            cleanup_secret_dir_sync(launch.artifact_dir.as_deref());
             return Err("docker child stdin was not piped".into());
         };
         let Some(stdout) = child.stdout.take() else {
             cleanup_secret_dir_sync(launch.secret_dir.as_deref());
+            cleanup_secret_dir_sync(launch.artifact_dir.as_deref());
             return Err("docker child stdout was not piped".into());
         };
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>> =
@@ -619,6 +627,7 @@ impl DockerStdioSession {
             child: Arc::new(Mutex::new(child)),
             reader,
             secret_dir: launch.secret_dir,
+            artifact_dir: launch.artifact_dir,
         })
     }
 }
@@ -658,7 +667,14 @@ impl McpSession for DockerStdioSession {
             return Ok(None);
         };
         match tokio::time::timeout(Duration::from_secs(120), rx).await {
-            Ok(Ok(body)) => Ok(Some(body)),
+            Ok(Ok(body)) => {
+                let body = if let Some(artifact_dir) = &self.artifact_dir {
+                    augment_playwright_screenshot_response(&body, artifact_dir)?
+                } else {
+                    body
+                };
+                Ok(Some(body))
+            }
             Ok(Err(_)) => Err("MCP server exited before responding".to_owned()),
             Err(_) => {
                 remove_pending(&self.pending, pending_id.as_deref()).await;
@@ -678,6 +694,16 @@ impl McpSession for DockerStdioSession {
                 error = %e,
                 path = %secret_dir.display(),
                 "mcp runtime: failed to remove docker secret dir"
+            );
+        }
+        if let Some(artifact_dir) = &self.artifact_dir
+            && let Err(e) = tokio::fs::remove_dir_all(artifact_dir).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                error = %e,
+                path = %artifact_dir.display(),
+                "mcp runtime: failed to remove docker artifact dir"
             );
         }
     }
@@ -1058,6 +1084,7 @@ fn docker_run_args(user_args: &[String], instance_id: &str, server_name: &str) -
 struct DockerLaunch {
     args: Vec<String>,
     secret_dir: Option<PathBuf>,
+    artifact_dir: Option<PathBuf>,
 }
 
 struct DockerImageDefaults {
@@ -1110,6 +1137,16 @@ fn docker_run_launch(
         }
     };
 
+    let artifact_dir = if is_playwright_mcp_server(server_name, &user_args) {
+        Some(create_docker_artifact_dir(
+            secret_root,
+            instance_id,
+            server_name,
+        )?)
+    } else {
+        None
+    };
+
     let mut out = vec![
         "run".to_owned(),
         "--rm".to_owned(),
@@ -1129,11 +1166,139 @@ fn docker_run_launch(
         "--label".to_owned(),
         format!("{DOCKER_SERVER_LABEL}={server_name}"),
     ];
+    if let Some(dir) = &artifact_dir {
+        out.push("--mount".to_owned());
+        out.push(format!(
+            "type=bind,src={},dst={PLAYWRIGHT_ARTIFACT_CONTAINER_DIR}",
+            dir.display()
+        ));
+    }
     out.extend(user_args);
     Ok(DockerLaunch {
         args: out,
         secret_dir,
+        artifact_dir,
     })
+}
+
+fn is_playwright_mcp_server(server_name: &str, user_args: &[String]) -> bool {
+    server_name.to_ascii_lowercase().contains("playwright")
+        || user_args
+            .iter()
+            .any(|arg| arg.to_ascii_lowercase().contains("playwright"))
+}
+
+fn augment_playwright_screenshot_response(
+    body: &str,
+    artifact_dir: &Path,
+) -> Result<String, String> {
+    let mut value = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) => value,
+        Err(_) => return Ok(body.to_owned()),
+    };
+    let Some(content) = value
+        .get_mut("result")
+        .and_then(|result| result.get_mut("content"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(body.to_owned());
+    };
+    if content
+        .iter()
+        .any(|item| item.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+    {
+        return Ok(body.to_owned());
+    }
+
+    let mut attachments = Vec::new();
+    for item in content.iter() {
+        let Some(text) = item.get("text").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        for filename in extract_playwright_artifact_filenames(text) {
+            let path = artifact_dir.join(&filename);
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "mcp runtime: failed to read Playwright screenshot"
+                    );
+                    continue;
+                }
+            };
+            if bytes.len() > MAX_PLAYWRIGHT_SCREENSHOT_BYTES {
+                tracing::warn!(
+                    path = %path.display(),
+                    bytes = bytes.len(),
+                    "mcp runtime: Playwright screenshot too large to attach"
+                );
+                continue;
+            }
+            let mime_type = mime_type_for_filename(&filename);
+            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+            attachments.push(serde_json::json!({
+                "type": "image",
+                "data": data,
+                "mimeType": mime_type,
+            }));
+        }
+    }
+
+    if attachments.is_empty() {
+        return Ok(body.to_owned());
+    }
+    content.extend(attachments);
+    serde_json::to_string(&value).map_err(|e| format!("encode augmented Playwright response: {e}"))
+}
+
+fn extract_playwright_artifact_filenames(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(idx) = rest.find(PLAYWRIGHT_ARTIFACT_LINK_PREFIX) {
+        let after = &rest[idx + PLAYWRIGHT_ARTIFACT_LINK_PREFIX.len()..];
+        let filename: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .collect();
+        if is_safe_playwright_artifact_filename(&filename) && !out.contains(&filename) {
+            out.push(filename.clone());
+        }
+        rest = &after[filename.len()..];
+    }
+    out
+}
+
+fn is_safe_playwright_artifact_filename(filename: &str) -> bool {
+    !filename.is_empty()
+        && filename != "."
+        && filename != ".."
+        && !filename.starts_with('.')
+        && !filename.contains("..")
+        && !filename.contains('/')
+        && !filename.contains('\\')
+        && matches!(
+            Path::new(filename)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase())
+                .as_deref(),
+            Some("png" | "jpg" | "jpeg" | "webp")
+        )
+}
+
+fn mime_type_for_filename(filename: &str) -> &'static str {
+    match Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    }
 }
 
 fn sanitized_docker_user_args(
@@ -1512,6 +1677,38 @@ fn create_docker_secret_dir(
     ));
     create_private_dir(&dir)
         .map_err(|e| format!("create docker secret dir `{}`: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+fn create_docker_artifact_dir(
+    secret_root: &Path,
+    instance_id: &str,
+    server_name: &str,
+) -> Result<PathBuf, String> {
+    let artifact_root = secret_root.join("artifacts");
+    create_private_dir(&artifact_root).map_err(|e| {
+        format!(
+            "create docker artifact root `{}`: {e}",
+            artifact_root.display()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock before unix epoch: {e}"))?
+        .as_nanos();
+    let dir = artifact_root.join(format!(
+        "{}-{}-{nonce}",
+        safe_path_component(instance_id),
+        safe_path_component(server_name)
+    ));
+    fs::create_dir(&dir)
+        .map_err(|e| format!("create docker artifact dir `{}`: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777))
+            .map_err(|e| format!("chmod docker artifact dir `{}`: {e}", dir.display()))?;
+    }
     Ok(dir)
 }
 
@@ -2263,6 +2460,82 @@ for line in sys.stdin:
 
         cleanup_secret_dir_sync(launch.secret_dir.as_deref());
         let _ = std::fs::remove_dir_all(secret_root);
+    }
+
+    #[test]
+    fn docker_run_args_mounts_playwright_artifact_dir() {
+        let args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "mcr.microsoft.com/playwright/mcp".to_string(),
+        ];
+        let secret_root = test_secret_root("playwright-artifacts");
+        let launch = docker_run_launch(
+            &args,
+            &HashMap::new(),
+            "i-1",
+            "playwright",
+            &secret_root,
+            "docker",
+            "runsc",
+        )
+        .unwrap();
+        let artifact_dir = launch.artifact_dir.as_ref().expect("artifact dir");
+        assert!(artifact_dir.exists());
+        assert!(launch.args.windows(2).any(|w| {
+            w[0] == "--mount"
+                && w[1].starts_with(&format!("type=bind,src={}", artifact_dir.display()))
+                && w[1].ends_with(&format!("dst={PLAYWRIGHT_ARTIFACT_CONTAINER_DIR}"))
+        }));
+
+        cleanup_secret_dir_sync(launch.artifact_dir.as_deref());
+        let _ = std::fs::remove_dir_all(secret_root);
+    }
+
+    #[test]
+    fn augments_playwright_screenshot_link_with_image_content() {
+        let artifact_dir = test_secret_root("playwright-screenshot");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(artifact_dir.join("screenshot.png"), b"fake-png").unwrap();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "[Screenshot](.playwright-mcp/screenshot.png)"
+                    }
+                ],
+                "isError": false
+            }
+        })
+        .to_string();
+
+        let augmented = augment_playwright_screenshot_response(&body, &artifact_dir).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&augmented).unwrap();
+        let content = value["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["mimeType"], "image/png");
+        let data = content[1]["data"].as_str().unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap(),
+            b"fake-png"
+        );
+
+        let _ = std::fs::remove_dir_all(artifact_dir);
+    }
+
+    #[test]
+    fn ignores_unsafe_playwright_artifact_names() {
+        let text = "[Screenshot](.playwright-mcp/../secret.png) [Screenshot](.playwright-mcp/.hidden.png) [Screenshot](.playwright-mcp/safe.jpg)";
+        assert_eq!(
+            extract_playwright_artifact_filenames(text),
+            vec!["safe.jpg".to_string()]
+        );
     }
 
     #[tokio::test]
