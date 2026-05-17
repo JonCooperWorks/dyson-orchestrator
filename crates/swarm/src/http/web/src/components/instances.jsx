@@ -3836,6 +3836,14 @@ export function AgentSecretsPanel({ instanceId, disabled }) {
     }
   };
 
+  const hide = (secretName) => {
+    setRevealed(r => {
+      const next = { ...r };
+      delete next[secretName];
+      return next;
+    });
+  };
+
   const remove = async (secretName) => {
     if (!confirm(`Delete agent secret ${secretName}?`)) return;
     const prev = rows;
@@ -3902,31 +3910,38 @@ export function AgentSecretsPanel({ instanceId, disabled }) {
             <th>name</th><th>created</th><th>updated</th><th>last read</th><th></th>
           </tr></thead>
           <tbody>
-            {rows.map(r => (
-              <tr key={r.name}>
-                <td data-label="name">
-                  <code className="mono-sm agent-secret-name" title={r.name}>{r.name}</code>
-                  {Object.prototype.hasOwnProperty.call(revealed, r.name) ? (
-                    <div className="secret-reveal"><code>{revealed[r.name]}</code></div>
-                  ) : null}
-                </td>
-                <td data-label="created" className="muted">{fmtTime(r.created_at)}</td>
-                <td data-label="updated" className="muted">{fmtTime(r.updated_at)}</td>
-                <td data-label="last read" className="muted">{fmtTime(r.last_read_at)}</td>
-                <td className="row-actions">
-                  <button className="btn btn-ghost btn-sm" onClick={() => reveal(r.name)} disabled={busy}>
-                    reveal
-                  </button>
-                  <button
-                    className="btn btn-ghost btn-sm btn-danger"
-                    onClick={() => remove(r.name)}
-                    disabled={busy || disabled}
-                  >
-                    delete
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {rows.map(r => {
+              const isRevealed = Object.prototype.hasOwnProperty.call(revealed, r.name);
+              return (
+                <tr key={r.name}>
+                  <td data-label="name">
+                    <code className="mono-sm agent-secret-name" title={r.name}>{r.name}</code>
+                    {isRevealed ? (
+                      <div className="secret-reveal"><code>{revealed[r.name]}</code></div>
+                    ) : null}
+                  </td>
+                  <td data-label="created" className="muted">{fmtTime(r.created_at)}</td>
+                  <td data-label="updated" className="muted">{fmtTime(r.updated_at)}</td>
+                  <td data-label="last read" className="muted">{fmtTime(r.last_read_at)}</td>
+                  <td className="row-actions">
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => (isRevealed ? hide(r.name) : reveal(r.name))}
+                      disabled={busy}
+                    >
+                      {isRevealed ? 'hide' : 'reveal'}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm btn-danger"
+                      onClick={() => remove(r.name)}
+                      disabled={busy || disabled}
+                    >
+                      delete
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

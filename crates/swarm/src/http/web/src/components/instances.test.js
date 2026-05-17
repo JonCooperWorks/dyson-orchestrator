@@ -1088,7 +1088,7 @@ describe('AgentSecretsPanel', () => {
     );
   }
 
-  test('lists metadata and supports add, reveal, and delete', async () => {
+  test('lists metadata and supports add, reveal, hide, and delete', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     const client = {
       listAgentSecrets: vi.fn()
@@ -1122,6 +1122,11 @@ describe('AgentSecretsPanel', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'reveal' })[0]);
     await screen.findByText('shh-value');
     expect(client.revealAgentSecret).toHaveBeenCalledWith('inst-1', 'api.token');
+
+    fireEvent.click(screen.getByRole('button', { name: 'hide' }));
+    await waitFor(() => expect(screen.queryByText('shh-value')).toBeNull());
+    expect(client.revealAgentSecret).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole('button', { name: 'reveal' }).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getAllByRole('button', { name: 'delete' })[0]);
     await waitFor(() => expect(client.deleteAgentSecret).toHaveBeenCalledWith('inst-1', 'api.token'));
